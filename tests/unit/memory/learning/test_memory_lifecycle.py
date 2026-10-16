@@ -260,3 +260,68 @@ def test_arabic_self_statements_are_a_review_signal(said: str, expected: bool) -
     from jarvis.memory.learning.signals import has_signal
 
     assert has_signal(said) is expected
+
+
+# ── Arabic explicit requests take the deterministic path ───────────────────
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "تذكر أن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "تذكّر أن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "احفظ أن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "افتكر أن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "بديك تتذكر إن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "بديك تتذكر أن مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+        "لو سمحت، احفظ انو مشروعي التجريبي اسمه MemoryTestAlpha",  # i18n-allow
+    ],
+)
+async def test_an_arabic_remember_request_is_kept_without_a_model(
+    tmp_path: Path, said: str
+) -> None:
+    book = _book(tmp_path)
+    notebook_module.set_active(book)
+    reviewer = ScriptedReviewer()
+    loop = JarvisLearningLoop(book, reviewer, review_every_turns=50, idle_review_seconds=0)
+
+    loop.record("chat:c", Turn(user=said, assistant="تمام"))  # i18n-allow
+    await _drain(loop)
+
+    assert reviewer.calls == 0
+    assert "MemoryTestAlpha" in snapshot_block()
+    assert "MemoryTestAlpha" in (book.folder / "MEMORY.md").read_text(encoding="utf-8")
+    assert "MemoryTestAlpha" in _book(tmp_path).render()  # after a restart
+
+
+async def test_an_arabic_request_said_twice_is_kept_once(tmp_path: Path) -> None:
+    book = _book(tmp_path)
+    notebook_module.set_active(book)
+    loop = JarvisLearningLoop(
+        book, ScriptedReviewer(), review_every_turns=50, idle_review_seconds=0
+    )
+    said = "تذكر أن مشروعي التجريبي اسمه MemoryTestAlpha"  # i18n-allow
+
+    loop.record("chat:c", Turn(user=said, assistant="تمام"))  # i18n-allow
+    await _drain(loop)
+    loop.record("chat:c", Turn(user=said, assistant="تمام"))  # i18n-allow
+    await _drain(loop)
+
+    memory = (book.folder / "MEMORY.md").read_text(encoding="utf-8")
+    assert memory.count("MemoryTestAlpha") == 1
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "هل تتذكر أن مشروعي اسمه MemoryTestAlpha؟",  # i18n-allow
+        "تذكرت أن عندي موعد اليوم",  # i18n-allow
+        "كيف الطقس اليوم في المدينة",  # i18n-allow
+        "ما بتذكر شو قلتلي امبارح",  # i18n-allow
+        "احفظ الملف في المجلد",  # i18n-allow
+    ],
+)
+def test_ordinary_arabic_is_not_a_remember_request(said: str) -> None:
+    from jarvis.society.memory_intent import requested_memory
+
+    assert not requested_memory(said)
