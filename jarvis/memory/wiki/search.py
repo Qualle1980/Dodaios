@@ -230,14 +230,14 @@ class VaultSearch:
         if self._owns_conn and self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:  # noqa: BLE001, S110
+            except Exception:  # noqa: BLE001
                 pass
             self._conn = None
         for ext_conn in self._external_conns.values():
             try:
                 ext_conn.close()
-            except Exception:  # noqa: BLE001, S110
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("VaultSearch: closing external index failed: %s", exc)
         self._external_conns.clear()
 
     # ------------------------------------------------------------------
