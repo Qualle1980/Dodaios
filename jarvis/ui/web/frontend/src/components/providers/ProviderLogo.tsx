@@ -122,7 +122,7 @@ function localGlyph(providerId: string): "device" | "server" | null {
   if (id === "local-voice") return "device";
   if (id.startsWith("local-") || id === "generic" || id === "home_server" || id === "strato") return "server";
   if (id === "multipass") return "device";
-  if (id.includes("faster-whisper") || id.includes("piper")) return "device";
+  if (id.includes("faster-whisper") || id.includes("piper") || id.includes("supertonic")) return "device";
   return null;
 }
 

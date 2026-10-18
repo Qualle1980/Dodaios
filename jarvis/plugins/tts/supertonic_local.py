@@ -94,6 +94,9 @@ class SupertonicLocalTTS:
         self._speed = float(speed) if speed and speed > 0 else _DEFAULT_SPEED
         self._engine: Any = None
         self._load_lock = asyncio.Lock()
+        # The pipeline synthesises sentences concurrently; queue them in order
+        # instead of letting the guard below reject (and drop) all but one.
+        self._turn_lock = asyncio.Lock()
         # AP-24: one native engine per instance, never driven by two callers.
         self._synth_lock = threading.Lock()
 
@@ -189,9 +192,10 @@ class SupertonicLocalTTS:
         self.last_voice = name
         self.last_voice_provider = self.name
         for sentence in sentences:
-            audio = await asyncio.to_thread(
-                self._generate, engine, sentence, sid, language
-            )
+            async with self._turn_lock:
+                audio = await asyncio.to_thread(
+                    self._generate, engine, sentence, sid, language
+                )
             samples = np.asarray(getattr(audio, "samples", ()), dtype=np.float32)
             rate = int(getattr(audio, "sample_rate", 0) or 0)
             if samples.size == 0:
