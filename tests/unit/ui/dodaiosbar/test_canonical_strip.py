@@ -27,11 +27,18 @@ def center(action):
     return (left + right) / 2, layout.height / 2
 
 
-def test_default_painter_is_the_existing_component():
+def test_default_painter_is_the_existing_component_with_the_clip_in_the_orb_slot():
     expected = controls.render_pet_strip(controls.PetStripState(jarvis_bar=True))
     actual = renderer.JarvisBarRenderer().render(0, "idle")
-    assert actual.tobytes() == expected.tobytes()
     assert actual.size == controls.pet_strip_size()
+    _, x0, x1 = next(s for s in controls.pet_strip_layout(renderer.strip_scale()).slots
+                     if s[0] == "orb")
+    width = actual.width
+    outside = [x for x in range(width) if x < x0 or x >= x1]
+    mid = actual.height // 2
+    for x in outside:
+        assert actual.getpixel((x, mid)) == expected.getpixel((x, mid))
+    assert actual.tobytes() != expected.tobytes()
 
 
 @pytest.mark.parametrize("screen,user", [(0.55, 0.5), (0.85, 1.35), (1.6, 2.0)])

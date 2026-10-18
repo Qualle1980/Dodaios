@@ -11,6 +11,7 @@ import math
 import numpy as np
 from PIL import Image, ImageDraw
 
+from jarvis.ui import jarvis_clip
 from jarvis.ui.dodaiosbar.modes import (  # noqa: F401
     ACTIVE_VOICE_MODES,
     CONNECT_MODES,
@@ -282,7 +283,9 @@ class JarvisBarRenderer:
         )
         phase = controls.indicator_phase(motion, t)
         spin = 0
+        connecting = motion == "connect"
         if connect_look is not None and actual in ACTIVE_VOICE_MODES:
+            connecting = True
             # The surface's ConnectTimeline: the strokes bending into the
             # loading loop, or the one-shot back out of it once connected.
             motion, phase, spin = connect_look.motion, connect_look.phase, connect_look.spin
@@ -316,6 +319,17 @@ class JarvisBarRenderer:
         def clear_indicator() -> None:
             # A mark replaces the indicator; drawn over the strokes it is unreadable.
             draw.ellipse((cx - clear_r, cy - clear_r, cx + clear_r, cy + clear_r), fill=backdrop)
+
+        if not connecting:
+            # The orb slot plays the JARVIS HUD clip instead of the strokes; the
+            # connecting loop and its flourish stay, the only sign of the call coming up.
+            # At rest the clip holds still; a live voice pulses its size.
+            pulse = 0.82 + 0.18 * state.level / controls.PET_LEVEL_STEPS
+            clip_d = max(2, round(clear_r * 2 * pulse))
+            clip_xy = (round(cx - clip_d / 2), round(cy - clip_d / 2))
+            clip = jarvis_clip.clip_disc(0.0 if motion == "rest" else t, actual, clip_d)
+            clear_indicator()
+            frame.paste(clip, clip_xy, jarvis_clip.circle_mask(clip_d))
 
         if (
             drop_state in (DROP_STATE_OK, DROP_STATE_REJECTED)

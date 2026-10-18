@@ -68,6 +68,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 from jarvis.core.config import DEFAULT_CONFIG_FILE as JARVIS_TOML_PATH
 from jarvis.core.win32_dpi import ensure_dpi_awareness as _ensure_dpi_awareness
 from jarvis.ui.dodaiosbar.modes import ACTIVE_VOICE_MODES, MODES
+from jarvis.ui.jarvis_clip import JarvisClipRenderer
 from jarvis.ui.overlay_styles import LEGACY_STYLE_ALIASES, ORB_STYLES, PERSISTENT_ORB_STYLES
 from jarvis.ui.pets.states import ACTION_STATES, DEFAULT_PET_ID, NO_PET_ID, ONE_SHOT_STATES
 from ui.orb import controls as orb_controls
@@ -2266,7 +2267,9 @@ class OrbOverlay:
         self._root: tk.Tk | None = None
         self._canvas: tk.Canvas | None = None
         self._comment_bubble: OrbCommentBubble | None = None
-        self._renderer: MascotRenderer | VoiceOrbRenderer | PetRenderer | None = None
+        self._renderer: (
+            MascotRenderer | VoiceOrbRenderer | JarvisClipRenderer | PetRenderer | None
+        ) = None
         # Cached mascot anchor + min-show-time guard.
         self._mascot_x: int = 0
         self._mascot_y: int = 0
@@ -4423,7 +4426,9 @@ class OrbOverlay:
             self._controls.set_orb_size(self._win_w, self._win_h)
         self._move_attached(self._mascot_x, self._mascot_y, screen_w)
 
-    def _build_renderer(self, style: str) -> MascotRenderer | VoiceOrbRenderer | PetRenderer | None:
+    def _build_renderer(
+        self, style: str
+    ) -> MascotRenderer | VoiceOrbRenderer | JarvisClipRenderer | PetRenderer | None:
         if style == "pet":
             try:
                 renderer = PetRenderer(
@@ -4441,6 +4446,13 @@ class OrbOverlay:
                 )
                 return None
         if style == "voice_orb":
+            key = (int(COLOR_KEY_RGB[0]), int(COLOR_KEY_RGB[1]), int(COLOR_KEY_RGB[2]))
+            try:
+                return JarvisClipRenderer(size=self._win_w, color_key=key)
+            except Exception as exc:  # noqa: BLE001
+                logging.getLogger("jarvis.orb").warning(
+                    "JARVIS clip unavailable (%s); drawing the procedural orb.", exc
+                )
             try:
                 return VoiceOrbRenderer(
                     size=self._win_w,
