@@ -92,6 +92,11 @@ class MobileChannel:
     def store(self) -> DeviceStore:
         return self._store
 
+    @property
+    def enabled(self) -> bool:
+        """False when config turns the gateway off; start() is then a no-op."""
+        return bool(self._cfg.enabled)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
