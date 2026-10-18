@@ -123,15 +123,19 @@
         color: var(--jbs-accent);
         cursor: default; user-select: none;
       }
+      #jarvis-boot-splash .jbs-group > :not(.jbs-mark) {
+        position: relative; z-index: 1;
+        text-shadow: 0 1px 8px rgba(0, 0, 0, 0.9);
+      }
       #jarvis-boot-splash .jbs-group {
         display: flex; flex-direction: column; align-items: center;
         /* Optical centre: a touch above the geometric middle. */
         margin-top: -4vh;
       }
+      /* The intro clip fills the whole window; name and progress sit on top. */
       #jarvis-boot-splash .jbs-mark {
-        width: 240px; height: 135px; border-radius: 16px; overflow: hidden;
+        position: fixed; inset: 0; z-index: 0; overflow: hidden;
         background: #000;
-        box-shadow: var(--jbs-shadow), 0 0 0 1px var(--jbs-rim);
         animation: jbs-mark-in .9s var(--jbs-ease) both;
         animation-delay: var(--jbs-shift, 0s);
       }
@@ -220,7 +224,6 @@
         #jarvis-boot-splash.jbs-exit { animation: jbs-fade-out .2s ease forwards; }
       }
       @media (max-height: 420px) {
-        #jarvis-boot-splash .jbs-mark { width: 176px; height: 99px; }
         #jarvis-boot-splash .name { margin-top: 16px; }
       }
     </style>

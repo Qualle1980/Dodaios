@@ -87,7 +87,7 @@ import {
   type PaneDropPayload,
 } from "./paneDrop";
 import { useDragSessionEnd } from "./dragSessionEnd";
-import { VoiceOrb } from "./VoiceOrb";
+import { JarvisHudOrb } from "./JarvisHudOrb";
 import { VoiceBubbleNotice } from "./VoiceBubbleNotice";
 import { useVoiceCall } from "./useVoiceCall";
 
@@ -699,7 +699,7 @@ export function VoiceBubble({
             (busy || connecting || dropPhase === "reading") && "cursor-wait opacity-80",
           )}
         >
-          <VoiceOrb state={voiceState} size={132} />
+          <JarvisHudOrb state={voiceState} size={132} />
         </button>
       </div>
 
