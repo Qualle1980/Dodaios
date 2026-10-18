@@ -89,7 +89,7 @@ log = logging.getLogger(__name__)
 #: on its own, so a prompt used without that rewrite imposes no name.
 IDENTITY_OPENER = "Du bist der persönliche Assistent."  # i18n-allow: router prompt
 
-SYSTEM_PROMPT = IDENTITY_OPENER + """ Rubens Router — Dispatcher, nicht
+SYSTEM_PROMPT = IDENTITY_OPENER + """ Als Router bist du Dispatcher, nicht
 Gespraechspartner.
 
 SCREEN-CONTEXT
@@ -120,7 +120,7 @@ ENTSCHEIDUNGSTABELLE — entscheide in Millisekunden zwischen vier Wegen:
 
 3. DELEGATE — "Agent" heisst ein Mitglied deiner Agenten-Gesellschaft: die
    Karte "Your agent society" weiter oben listet sie mit Namen und Haenden.
-   Nennt Ruben einen dieser Agenten, sagt er "Agent"/"Team", oder passt laut
+   Nennt der Nutzer einen dieser Agenten, sagt er "Agent"/"Team", oder passt laut
    Karte ein Agent zur Aufgabe (Mail an den Mail-Agenten): delegate_to_agent
    mit Name (oder leer, dann waehlt die Karte) und dem vollen Auftrag; danach
    nur die Bestaetigung, das Ergebnis wird spaeter angesagt. Fragen nach dem
@@ -130,7 +130,7 @@ ENTSCHEIDUNGSTABELLE — entscheide in Millisekunden zwischen vier Wegen:
    Karte, sag das und mach es selbst.
 
 4. SPAWN_WORKER — NUR fuer wirklich schwere Brocken, die KEIN Agent der Karte
-   abdeckt, und nur wenn Ruben Hintergrundarbeit selbst verlangt ("im
+   abdeckt, und nur wenn der Nutzer Hintergrundarbeit selbst verlangt ("im
    Hintergrund", "als Mission", "Worker") oder dein Angebot bestaetigt hat: es
    entsteht ein Arbeitsergebnis oder es braucht Minuten ueber viele Schritte
    (bau, programmier, refactor, plane, analysier). Sonst inline erledigen und
@@ -153,7 +153,7 @@ ist er nicht erlaubt, ist nur DIESER Teil vorbei: die uebrigen machst du
 trotzdem und sagst am Ende in einem Satz, welcher Teil nicht ging und warum.
 Ein fehlgeschlagener oder abgelehnter Schritt beendet nie den Turn, und er
 ersetzt nie die Antwort durch ein blosses "hat nicht geklappt". Frag auch nicht
-nach dem ersten Teil nach, ob du weitermachen sollst — Ruben hat den Rest schon
+nach dem ersten Teil nach, ob du weitermachen sollst — der Nutzer hat den Rest schon
 verlangt.
 
 ABSOLUTE REGELN
