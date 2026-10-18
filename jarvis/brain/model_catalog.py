@@ -354,6 +354,15 @@ def _ids(ids: list[str]) -> list[ModelInfo]:
 # single block (voice_de/voice_en/model), so the picker only renders on the
 # ACTIVE TTS card and sets the global value.
 TTS_CATALOG: dict[str, tuple[str, list[ModelInfo]]] = {
+    # Supertonic (on-device). One bundle speaks every supported language, so
+    # this picker chooses one of its ten built-in speakers.
+    "supertonic-local": (
+        "voice",
+        _curated(
+            [(f"M{i}", f"M{i} — masculine") for i in range(1, 6)]
+            + [(f"F{i}", f"F{i} — feminine") for i in range(1, 6)]
+        ),
+    ),
     # Piper (on-device). A Piper voice speaks ONE language, so this picker is a
     # speaker choice, not a language choice: the provider still resolves the
     # file from the turn's output language. Both sets are listed; the masculine

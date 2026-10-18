@@ -2109,6 +2109,14 @@ _TTS_DEFAULTS: dict[str, dict[str, str]] = {
         "voice_en": "vits-piper-en_US-ryan-medium",
         "language_code": "auto",
     },
+    "supertonic-local": {
+        # One multilingual bundle; "auto" lets the plugin take each turn's
+        # resolved language. The voices are built-in speaker names (M1..F5).
+        "model": "",
+        "voice_de": "M1",
+        "voice_en": "M1",
+        "language_code": "auto",
+    },
 }
 
 # Per-provider voice allowlist — when the existing voice does not match the
@@ -2130,6 +2138,9 @@ _VOICES_FOR_PROVIDER: dict[str, frozenset[str]] = {
             "vits-piper-es_ES-sharvard-medium",
             "vits-piper-pt_PT-tugao-medium",
         }
+    ),
+    "supertonic-local": frozenset(
+        {"F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"}
     ),
     "gemini-flash-tts": frozenset(
         {

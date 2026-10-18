@@ -791,6 +791,30 @@ def _build_provider(tts_cfg: Any, provider: str) -> Any:
         )
         return PiperLocalTTS(gender=profile, speed=tts_cfg.speed)
 
+    if provider == "supertonic-local":
+        try:
+            from jarvis.plugins.tts.supertonic_local import (
+                SPEAKER_NAMES,
+                SupertonicLocalTTS,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                f"TTS provider 'supertonic-local' configured, but the plugin is "
+                f"not importable: {exc}.",
+            ) from exc
+        # One multilingual bundle: the language comes per turn, the speaker from
+        # a pinned built-in name (M1..F5) or else the curated voice's profile.
+        from jarvis.plugins.tts.curated_catalog import voice_gender
+
+        voice_de = getattr(tts_cfg, "voice_de", None)
+        voice_en = getattr(tts_cfg, "voice_en", None)
+        pinned = next(
+            (v for v in (voice_de, voice_en) if (v or "").upper() in SPEAKER_NAMES),
+            None,
+        )
+        profile = voice_gender(voice_de) or voice_gender(voice_en)
+        return SupertonicLocalTTS(voice=pinned, gender=profile, speed=tts_cfg.speed)
+
     if provider in _VERTEX_TTS_ALIASES:
         try:
             from jarvis.plugins.tts.gemini_flash_tts import VertexTTS

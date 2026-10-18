@@ -514,6 +514,10 @@ NEMOTRON_HF_REPO = "csukuangfj2/sherpa-onnx-nemotron-3.5-asr-streaming-0.6b-560m
 _PIPER_RELEASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
 
 
+#: Supertonic 3 INT8, published on the same sherpa-onnx ``tts-models`` release.
+SUPERTONIC_MODEL_ID = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11"
+
+
 def _piper_bundle(name: str, *, label: str, language: str, gender: str) -> SherpaBundle:
     """One Piper voice, named the way the upstream release names it.
 
@@ -597,6 +601,23 @@ SHERPA_BUNDLES: dict[str, SherpaBundle] = {
         language="es",
         gender="feminine",
     ),
+    # One multilingual bundle (31 languages, ten built-in speakers). No
+    # ``language`` on purpose: it is not a per-language Piper voice, and the
+    # Piper provider picks voices by that field.
+    SUPERTONIC_MODEL_ID: SherpaBundle(
+        model_id=SUPERTONIC_MODEL_ID,
+        label="Supertonic 3 (multilingual)",
+        required_files=(
+            "duration_predictor.int8.onnx",
+            "text_encoder.int8.onnx",
+            "vector_estimator.int8.onnx",
+            "vocoder.int8.onnx",
+            "tts.json",
+            "unicode_indexer.bin",
+            "voice.bin",
+        ),
+        archive_url=f"{_PIPER_RELEASE}{SUPERTONIC_MODEL_ID}.tar.bz2",
+    ),
 }
 
 #: The voices the local TTS install fetches — one per supported language, all
@@ -644,6 +665,16 @@ LOCAL_PROVIDERS: tuple[LocalProvider, ...] = (
         pip_package=SHERPA_ONNX_PACKAGE,
         bundles=PIPER_DEFAULT_VOICES,
     ),
+    LocalProvider(
+        provider_id="supertonic-local",
+        tier="tts",
+        runtime="sherpa-onnx",
+        model_id=SUPERTONIC_MODEL_ID,
+        model_label="Supertonic 3 (multilingual)",
+        download_size="about 130 MB",
+        pip_package=SHERPA_ONNX_PACKAGE,
+        bundles=(SUPERTONIC_MODEL_ID,),
+    ),
 )
 
 
@@ -688,6 +719,7 @@ def local_status(
 
 __all__ = [
     "LOCAL_PROVIDERS",
+    "SUPERTONIC_MODEL_ID",
     "WHISPER_VOICE_MODEL",
     "AcceleratorStatus",
     "LocalModelStatus",
