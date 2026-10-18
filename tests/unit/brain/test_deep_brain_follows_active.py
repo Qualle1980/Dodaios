@@ -28,9 +28,19 @@ def _all_test_providers_have_credentials(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
-def _cfg(*, primary: str, provider: str, fallback_provider: str | None):
+def _cfg(
+    *,
+    primary: str,
+    provider: str | None,
+    fallback_provider: str | None,
+    deep_brain: str | None = None,
+):
     cfg = load_config()
     cfg.brain.primary = primary
+    cfg.brain.deep_brain = deep_brain
+    if provider is None:
+        cfg.brain.router = None
+        return cfg
     cfg.brain.router = BrainTierConfig(
         provider=provider,
         fallback_provider=fallback_provider,
@@ -140,3 +150,72 @@ async def test_runtime_switch_preserves_explicit_split() -> None:
 
     assert mgr.active_provider == "openai"
     assert mgr._config.brain.deep_brain == "claude-api"
+
+
+def _split_mgr(escalation: str) -> BrainManager:
+    cfg = _cfg(primary="gemini", provider="gemini", fallback_provider="claude-api")
+    cfg.brain.deep_brain_escalation = escalation
+    return BrainManager.from_tier_config("router", cfg, EventBus())
+
+
+def test_explicit_escalation_keeps_capable_default_on_active() -> None:
+    # "explicit": an unrecognised turn stays on the fast active provider.
+    mgr = _split_mgr("explicit")
+    mgr._turn_route_reason = "capable-default"
+    assert mgr._build_fallback_chain("deep")[0][0] == "gemini"
+
+
+@pytest.mark.parametrize("reason,level", [("deep-keyword", "deep"), ("code-keyword", "code")])
+def test_explicit_escalation_hands_keyword_turns_to_deep_brain(reason: str, level: str) -> None:
+    mgr = _split_mgr("explicit")
+    mgr._turn_route_reason = reason
+    assert mgr._build_fallback_chain(level)[0][0] == "claude-api"
+
+
+def test_always_escalation_keeps_the_old_order() -> None:
+    mgr = _split_mgr("always")
+    mgr._turn_route_reason = "capable-default"
+    assert mgr._build_fallback_chain("deep")[0][0] == "claude-api"
+
+
+def _chat_pick_chain(mgr: BrainManager, provider: str, level: str) -> list:
+    from jarvis.brain.manager import _TURN_OVERRIDE
+    from jarvis.brain.turn_override import TurnOverride
+
+    token = _TURN_OVERRIDE.set(TurnOverride(provider=provider, model="pick-model"))
+    try:
+        return mgr._build_fallback_chain(level)
+    finally:
+        _TURN_OVERRIDE.reset(token)
+
+
+def test_chat_pick_of_primary_escalates_keyword_turns() -> None:
+    mgr = _split_mgr("explicit")
+    mgr._turn_route_reason = "deep-keyword"
+    chain = _chat_pick_chain(mgr, "gemini", "deep")
+    assert [p for p, _ in chain] == ["claude-api", "gemini"]
+    assert chain[1] == ("gemini", "pick-model")
+
+
+@pytest.mark.parametrize(
+    "escalation,reason,provider",
+    [
+        ("explicit", "capable-default", "gemini"),
+        ("always", "deep-keyword", "gemini"),
+        ("explicit", "deep-keyword", "openai"),
+    ],
+)
+def test_chat_pick_stays_exact_otherwise(escalation: str, reason: str, provider: str) -> None:
+    mgr = _split_mgr(escalation)
+    mgr._turn_route_reason = reason
+    assert _chat_pick_chain(mgr, provider, "deep") == [(provider, "pick-model")]
+
+
+def test_explicit_deep_brain_survives_without_router_block() -> None:
+    # No [brain.router] block, brain.deep_brain set explicitly: the synthesized
+    # tier has no fallback, and boot must keep the user's deep pick rather than
+    # collapse it onto the active provider.
+    cfg = _cfg(primary="gemini", provider=None, fallback_provider=None, deep_brain="openai")
+    mgr = BrainManager.from_tier_config("router", cfg, EventBus(), provider_override="gemini")
+    assert mgr.active_provider == "gemini"
+    assert mgr._config.brain.deep_brain == "openai"

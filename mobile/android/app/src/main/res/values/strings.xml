@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="hud_title">J.A.R.V.I.S.</string>
+    <string name="pair_heading">GERÄT KOPPELN</string>
+    <string name="pair_hint">Am PC den Kopplungs-QR-Code öffnen und scannen. Der Code gilt 5 Minuten.</string>
+    <string name="scan">QR-Code scannen</string>
+    <string name="payload_hint">…oder Kopplungsdaten einfügen</string>
+    <string name="pair">Koppeln</string>
+    <string name="tab_chat">CHAT</string>
+    <string name="tab_tasks">AUFGABEN</string>
+    <string name="tab_inbox">NACHRICHTEN</string>
+    <string name="tab_files">DATEIEN</string>
+    <string name="tab_projects">PROJEKTE</string>
+    <string name="call">ANRUFEN</string>
+    <string name="hang_up">AUFLEGEN</string>
+    <string name="accept">ANNEHMEN</string>
+    <string name="decline">ABLEHNEN</string>
+    <string name="incoming">JARVIS RUFT AN</string>
+    <string name="ring_channel">Anrufe von Jarvis</string>
+    <string name="watch_channel">Erreichbarkeit</string>
+    <string name="watch_text">Jarvis kann dich anrufen.</string>
+</resources>

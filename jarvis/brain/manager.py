@@ -409,7 +409,7 @@ TIER_DEFAULTS_BY_PROVIDER: dict[str, dict[str, str]] = {
         # empty means "the plugin discovers the first installed model".
         "ollama": "",
         "local-openai": "",
-        "chatgpt-web": "chatgpt-web/medium",
+        "chatgpt-web": "chatgpt-web/instant",
         # The plan's own catalog decides: empty = the first model it lists.
         "chatgpt-plan": "",
     },
@@ -438,7 +438,7 @@ TIER_DEFAULTS_BY_PROVIDER: dict[str, dict[str, str]] = {
         # Local providers: empty = plugin-side discovery (see router tier).
         "ollama": "",
         "local-openai": "",
-        "chatgpt-web": "chatgpt-web/medium",
+        "chatgpt-web": "chatgpt-web/instant",
         # The plan's own catalog decides: empty = the first model it lists.
         "chatgpt-plan": "",
     },
@@ -3259,6 +3259,12 @@ class BrainManager:
             )
         ):
             deep_provider = effective_provider
+        # An explicit brain.deep_brain (default None) on a tier without its own
+        # fallback is the user's deliberate deep split: keep it instead of
+        # collapsing deep turns onto the active provider.
+        explicit_deep = (getattr(config.brain, "deep_brain", None) or "").strip()
+        if not tier_cfg.fallback_provider and explicit_deep and explicit_deep != effective_provider:
+            deep_provider = explicit_deep
         local_config.brain.deep_brain = deep_provider
 
         # Tier model resolver:
@@ -10895,8 +10901,30 @@ class BrainManager:
         A person who chose a model in the chat gets that model or an honest
         error — never a silent cross-provider fallback. A tool-incapable pick
         does not authorize another provider to lead or bill this turn.
+
+        One exception the person configured themselves: with
+        ``deep_brain_escalation = "explicit"``, a pick of the default brain
+        (``brain.primary``) hands a turn with a reasoning or coding keyword to
+        the ``deep_brain`` first; the pick stays as its fallback.
         """
         pick: tuple[str, str | None] = (override.provider, override.model)
+        brain_cfg = self._config.brain
+        deep_brain = brain_cfg.deep_brain
+        if (
+            getattr(brain_cfg, "deep_brain_escalation", "always") == "explicit"
+            and level in ("deep", "code")
+            and getattr(self, "_turn_route_reason", "") in ("deep-keyword", "code-keyword")
+            and override.provider == brain_cfg.primary
+            and deep_brain
+            and deep_brain != override.provider
+            and deep_brain in self._registry.available()
+        ):
+            escalated = self._deep_model(deep_brain) or self._fast_model(deep_brain)
+            log.info(
+                "Chat pick %s escalates a %s turn to deep_brain %s.",
+                override.provider, level, deep_brain,
+            )
+            return [(deep_brain, escalated), pick]
         return [pick]
 
     def _build_fallback_chain(self, level: str) -> list[tuple[str, str | None]]:
@@ -10965,11 +10993,18 @@ class BrainManager:
         # deep/code intents, or the chosen brain would never actually answer a hard
         # question despite being selected (it would silently fall through to the
         # deep_brain). Other active brains keep the deep_brain routing unchanged.
+        # "explicit" escalation: an unrecognised turn ("capable-default") stays on
+        # the active provider; only a reasoning/coding keyword hands it over.
+        explicit_only = (
+            getattr(self._config.brain, "deep_brain_escalation", "always") == "explicit"
+        )
+        weak_signal = getattr(self, "_turn_route_reason", "") == "capable-default"
         if (
             level in ("deep", "code")
             and deep_brain
             and deep_brain != active
             and active != "codex"
+            and not (explicit_only and weak_signal)
             and deep_brain in self._registry.available()
         ):
             preferred_deep = self._deep_model(deep_brain) or self._fast_model(deep_brain)
@@ -11999,6 +12034,7 @@ class BrainManager:
         # Reset _router_lead_key here too so a monkeypatched _build_fallback_chain
         # (tests / callers that replace it) never leaves a stale fall-through marker.
         self._router_lead_key = None
+        self._turn_route_reason = decision.reason
         self._turn_substantive = not is_smalltalk_turn
         self._turn_needs_tools = (not is_smalltalk_turn) and self._turn_has_action_intent(
             user_text
