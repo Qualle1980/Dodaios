@@ -22,10 +22,10 @@ export interface VoiceApiKeysTabProps {
 
 /**
  * "API Keys" tab of the merged voice section — the providers and keys that turn
- * speech into text.
+ * speech into text, and the voice that speaks the answers back.
  *
  * This is the SAME provider block the API-Keys view renders, scoped to the
- * `stt` tier: one shared `ProviderCategory`, not a second implementation. A key
+ * `stt`, `dictation` and `tts` tiers: one shared `ProviderCategory`, not a second implementation. A key
  * saved here is therefore the same stored credential the API-Keys view shows,
  * and vice versa — the two screens are never mounted at the same time
  * (`MainView.SwitchOnActiveSection` renders exactly one section), and
@@ -85,6 +85,19 @@ export function VoiceApiKeysTab({ hideHeader = false }: VoiceApiKeysTabProps = {
             onChanged={refetch}
             onActivateOptimistic={setActiveOptimistic}
             health={health.dictation}
+          />
+
+          {/* Spoken answers. Without this card the voice output (local
+              on-device voices included) had no place in the app to be picked. */}
+          <ProviderCategory
+            meta={categories.tts}
+            tier="tts"
+            providers={providers}
+            loading={loading}
+            error={error}
+            onChanged={refetch}
+            onActivateOptimistic={setActiveOptimistic}
+            health={health.tts}
           />
         </div>
       </div>

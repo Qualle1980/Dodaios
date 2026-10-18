@@ -58,13 +58,22 @@ const DICTATION_PROVIDER: ProviderDescriptor = {
   optional: true,
 };
 
+const TTS_PROVIDER: ProviderDescriptor = {
+  ...STT_PROVIDER,
+  id: "test-voice-out",
+  label: "Test Voice Output",
+  tier: "tts",
+  secret_keys: ["TEST_VOICE_OUT_API_KEY"],
+  secrets_set: { TEST_VOICE_OUT_API_KEY: false },
+};
+
 vi.mock("@/hooks/useProviders", () => ({
   sectionHealthForSubject: (
     health: { subject_id?: string } | undefined,
     subjectId?: string,
   ) => (subjectId && health?.subject_id === subjectId ? health : undefined),
   useProviders: () => ({
-    providers: [STT_PROVIDER, BRAIN_PROVIDER, DICTATION_PROVIDER],
+    providers: [STT_PROVIDER, BRAIN_PROVIDER, DICTATION_PROVIDER, TTS_PROVIDER],
     loading: false,
     error: null,
     refetch: vi.fn(),
@@ -102,6 +111,12 @@ describe("VoiceApiKeysTab", () => {
     expect(screen.getByTestId("provider-optional-test-wording")).toBeTruthy();
     // The required tier must NOT pick the chip up.
     expect(screen.queryByTestId("provider-optional-test-speech")).toBeNull();
+  });
+
+  it("renders the voice output provider so a TTS voice can be picked", () => {
+    render(<VoiceApiKeysTab />);
+
+    expect(screen.getByText("Test Voice Output")).toBeTruthy();
   });
 
   it("shows only the speech tiers, never other tiers' providers", () => {
