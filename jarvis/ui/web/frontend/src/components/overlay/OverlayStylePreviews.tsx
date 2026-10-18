@@ -1,5 +1,5 @@
 import { MascotGigi } from "@/components/MascotGigi";
-import { VoiceOrb } from "@/components/agentic/VoiceOrb";
+import { JarvisHudOrb } from "@/components/agentic/JarvisHudOrb";
 import { PetControlStripPreview } from "@/components/pets/PetControlStripPreview";
 import type { OverlayStyle } from "@/hooks/useOverlayStyle";
 import {
@@ -41,10 +41,9 @@ export function StylePreview({ style }: { style: OverlayStyle }) {
   if (style === "mascot") {
     return <MascotGigi size={46} reactToVoice={false} enableComments={false} />;
   }
-  // The voice orb is its own portrait: the very renderer the desktop overlay
-  // runs, at thumbnail size. Held at "idle" so the picker shows the calm
-  // resting look rather than pretending a session is live.
-  if (style === "voice_orb") return <VoiceOrb state="idle" size={46} />;
+  // The voice orb is the JARVIS HUD the desktop overlay plays, at thumbnail
+  // size. Held at "idle" so the picker shows the still resting look.
+  if (style === "voice_orb") return <JarvisHudOrb state="idle" size={46} />;
   if (style === "pet") return <PetPreview />;
   if (style === "jarvis_bar") return <BarPreview />;
   return <NonePreview />;

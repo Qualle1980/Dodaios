@@ -946,6 +946,8 @@ jarvis = [
     # Built-in desktop pets and the sprite-sheet template, read at runtime via
     # Path(__file__) (jarvis/ui/pets/loader.py). Scoped to the two file kinds
     # a pet folder holds.
+    # The JARVIS HUD clip frames (jarvis/ui/jarvis_clip.py).
+    "ui/assets/*.png",
     "ui/pets/builtin/*/*.json",
     "ui/pets/builtin/*/*.png",
     "ui/pets/template/*.json",
