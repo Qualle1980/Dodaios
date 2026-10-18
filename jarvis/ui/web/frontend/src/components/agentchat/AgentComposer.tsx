@@ -2,7 +2,6 @@ import { ChatCommandPanel, useChatCommands } from "./ChatCommands";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
-  AudioLines,
   Bot,
   Brain,
   FolderCode,
@@ -49,6 +48,7 @@ import { PetMark } from "@/components/pets/PetMark";
 import { useVoiceModeSwitch } from "@/components/home/assistantStatus";
 import { fill, useT } from "@/i18n";
 import { cn } from "@/lib/utils";
+import { LiveOrb } from "@/components/LiveOrb";
 
 /**
  * The composer — the front page's one control for talking to Jarvis by
@@ -881,7 +881,7 @@ export function AgentComposer({ autoFocus = false }: { autoFocus?: boolean }) {
               data-testid="composer-voice-mode"
               className={cn(ROUND_ACTION_CLASS, "bg-accent text-accent-foreground hover:bg-accent/85 disabled:opacity-60")}
             >
-              <AudioLines className="h-4 w-4" />
+              <LiveOrb className="h-6 w-6" />
             </button>
           )}
         </div>
