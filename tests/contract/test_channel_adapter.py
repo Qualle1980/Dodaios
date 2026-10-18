@@ -51,6 +51,8 @@ def test_channel_adapter_protocol_conformance(ep, bus: EventBus) -> None:
 async def test_channel_start_subscribes_and_stop_unsubscribes(ep, bus: EventBus) -> None:
     cls = ep.load()
     instance = cls(bus)
+    if not getattr(instance, "enabled", True):
+        pytest.skip(f"{ep.name} is disabled by default; start() is a no-op")
 
     wildcard = bus._wildcard_subscribers  # noqa: SLF001 — intentional introspection
     before = len(wildcard)

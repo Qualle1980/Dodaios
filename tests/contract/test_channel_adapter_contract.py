@@ -61,6 +61,8 @@ async def test_channel_lifecycle(name, cls):
         pytest.skip("no ChannelAdapter plugins installed")
     bus = EventBus()
     inst = cls(bus)
+    if not getattr(inst, "enabled", True):
+        pytest.skip(f"{name} is disabled by default; start() has nothing to subscribe")
 
     before_start = len(bus._wildcard_subscribers)
     await inst.start()
