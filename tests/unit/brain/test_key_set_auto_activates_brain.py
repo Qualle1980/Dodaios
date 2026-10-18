@@ -80,7 +80,7 @@ async def test_key_set_does_not_override_a_working_active_provider(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_key_set_for_a_non_brain_slot_is_ignored(monkeypatch) -> None:
-    # An STT/TTS key (groq) is not a brain provider — it must never move the brain.
+    # An STT/TTS key (Deepgram) is not a brain provider — it must never move the brain.
     mgr, bus = _manager("claude-api")
     monkeypatch.setattr(mgr, "_active_has_usable_credential", lambda: False)
     switched: list[str] = []
@@ -89,7 +89,7 @@ async def test_key_set_for_a_non_brain_slot_is_ignored(monkeypatch) -> None:
         lambda name: switched.append(name),
     )
 
-    await bus.publish(SecretConfigured(key="groq_api_key", action="set"))
+    await bus.publish(SecretConfigured(key="deepgram_api_key", action="set"))
 
     assert mgr.active_provider == "claude-api"
     assert switched == []

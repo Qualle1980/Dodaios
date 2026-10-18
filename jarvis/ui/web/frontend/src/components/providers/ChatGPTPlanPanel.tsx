@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Loader2, LogOut, RotateCw } from "lucide-react";
 import openaiLogo from "@/assets/providers/openai.svg?url";
 import { Button } from "@/components/ui/button";
+import { BrandedSelect } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 
@@ -140,20 +141,18 @@ export function ChatGPTPlanPanel() {
         <div className="flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-2 text-muted-foreground">
             {t("chatgpt_plan.model")}
-            <select
-              data-testid="chatgpt-plan-model"
+            <BrandedSelect
+              testId="chatgpt-plan-model"
+              ariaLabel={t("chatgpt_plan.model")}
               className="h-7 rounded-md border border-border bg-background px-2 text-xs text-foreground"
               value={state.model}
               disabled={busy || models.length === 0}
-              onChange={(e) => void run("model", { slug: e.target.value })}
-            >
-              {!state.model && <option value="">{t("chatgpt_plan.model_default")}</option>}
-              {models.map((m) => (
-                <option key={m.slug} value={m.slug}>
-                  {m.display_name}
-                </option>
-              ))}
-            </select>
+              onValueChange={(slug) => void run("model", { slug })}
+              options={[
+                ...(state.model ? [] : [{ value: "", label: t("chatgpt_plan.model_default") }]),
+                ...models.map((m) => ({ value: m.slug, label: m.display_name })),
+              ]}
+            />
           </label>
           <span className="text-muted-foreground">{t("chatgpt_plan.using")}</span>
           <a
