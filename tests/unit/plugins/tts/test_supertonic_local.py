@@ -71,3 +71,31 @@ def test_arabic_is_passed_through() -> None:
     tts = _RecordingTTS()
     _collect(tts, "مرحبا.", language_code="ar")
     assert tts.calls[0][2] == "ar"
+
+
+class _SlowTTS(SupertonicLocalTTS):
+    """Runs the real ``_generate`` guard against a slow fake engine."""
+
+    def __init__(self) -> None:
+        super().__init__(gender="masculine")
+
+        class _Engine:
+            def generate(self, sentence, config):
+                import time
+
+                time.sleep(0.02)
+                return _Audio(samples=[0.1])
+
+        self._engine = _Engine()
+
+
+def test_concurrent_turns_are_queued_not_dropped() -> None:
+    tts = _SlowTTS()
+
+    async def speak(text: str) -> int:
+        return len([c async for c in tts.synthesize(text, language_code="de")])
+
+    async def run() -> list[int]:
+        return await asyncio.gather(*(speak(f"Satz {i}.") for i in range(4)))
+
+    assert asyncio.run(run()) == [1, 1, 1, 1]
