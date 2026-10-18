@@ -12,9 +12,11 @@ import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.VideoView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -73,9 +75,44 @@ class MainActivity : AppCompatActivity() {
         uri?.let { upload(it) }
     }
 
+    /** Cold-start splash: the looping JARVIS clip over the HUD, then a fade. */
+    private fun showSplash() {
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(getColor(R.color.hud_bg))
+            isClickable = true
+        }
+        val video = VideoView(this).apply {
+            setVideoURI(Uri.parse("android.resource://$packageName/${R.raw.jarvis_live}"))
+            setOnPreparedListener { it.isLooping = true; it.setVolume(0f, 0f) }
+        }
+        overlay.addView(
+            video,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER,
+            ),
+        )
+        addContentView(
+            overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            ),
+        )
+        video.start()
+        overlay.postDelayed({
+            overlay.animate().alpha(0f).setDuration(400).withEndAction {
+                video.stopPlayback()
+                (overlay.parent as? android.view.ViewGroup)?.removeView(overlay)
+            }.start()
+        }, SPLASH_MS)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        if (savedInstanceState == null) showSplash()
         store = SecureStore(this)
 
         reactor = findViewById(R.id.reactor)
@@ -638,6 +675,7 @@ class MainActivity : AppCompatActivity() {
         const val PLACEHOLDER = "placeholder"
         const val KEY_LAST_INBOX = "last_inbox"
         const val POLL_MS = 15_000L
+        const val SPLASH_MS = 3_000L
         const val MAX_UPLOAD = 25 * 1024 * 1024
     }
 }

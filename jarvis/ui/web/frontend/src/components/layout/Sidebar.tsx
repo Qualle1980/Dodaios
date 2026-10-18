@@ -1,6 +1,5 @@
 import {
   Loader2,
-  Mic,
   ChevronDown,
   MoreHorizontal,
   Plus,
@@ -20,6 +19,7 @@ import { useSectionHealth } from "@/hooks/useProviders";
 import { usePluginAttention } from "@/hooks/usePluginAttention";
 import { clsx } from "clsx";
 import { cn } from "@/lib/utils";
+import { LiveOrb } from "@/components/LiveOrb";
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { useT } from "@/i18n";
 import { RecentChats } from "@/components/home/RecentChats";
@@ -512,7 +512,7 @@ export function Sidebar({
             </button>
             <button type="button" aria-label="Dodaios Live" title="Dodaios Live" onClick={toggleIdeVoice}
               className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              <Mic aria-hidden className="h-4 w-4" />
+              <LiveOrb className="h-6 w-6" />
             </button>
           </div>
         </nav>) : <nav aria-label={t("sidebar.sections")} className="space-y-px px-2 py-2">
