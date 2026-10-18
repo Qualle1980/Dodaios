@@ -820,6 +820,21 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
             "the more natural-sounding option."
         ),
     ),
+    ProviderSpec(
+        id="supertonic-local",
+        label="Supertonic (on this machine)",
+        tier="tts",
+        auth_mode="none",
+        secret_keys=(),
+        dashboard_url=None,
+        signup_url=None,
+        credential_help=(
+            "Speaks on this machine — no API key, no cloud account, nothing "
+            "sent anywhere. One download of about 130 MB speaks 31 languages, "
+            "including German, English and Arabic, with five masculine and "
+            "five feminine voices. The model weights are licensed OpenRAIL-M."
+        ),
+    ),
     # ── STT ───────────────────────────────────────────────────────────────
     ProviderSpec(
         id="openai-api",

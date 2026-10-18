@@ -581,6 +581,8 @@ vertex-stt = "jarvis.plugins.stt.gemini_api:VertexSTT"
 # piper1-gpl library. Native sherpa builds can still include GPL-licensed
 # phonemization components; redistribution must account for their own terms.
 piper-local = "jarvis.plugins.tts.piper_local:PiperLocalTTS"
+# Supertonic 3 INT8 via sherpa-onnx: one multilingual bundle (OpenRAIL-M weights).
+supertonic-local = "jarvis.plugins.tts.supertonic_local:SupertonicLocalTTS"
 inworld = "jarvis.plugins.tts.inworld_tts:InworldTTS"
 elevenlabs = "jarvis.plugins.tts.elevenlabs_tts:ElevenLabsTTS"
 gemini-flash-tts = "jarvis.plugins.tts.gemini_flash_tts:GeminiFlashTTS"
