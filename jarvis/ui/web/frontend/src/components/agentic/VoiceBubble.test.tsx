@@ -134,7 +134,7 @@ describe("voice bubble", () => {
   it("shows the orb, ready, with the brand name in its tooltip", () => {
     renderBubble();
     expect(screen.getByTestId("voice-bubble")).toBeTruthy();
-    const orb = screen.getByTestId("voice-orb-canvas");
+    const orb = screen.getByTestId("jarvis-hud-orb");
     expect(orb.getAttribute("data-state")).toBe("idle");
     expect(orb.getAttribute("style")).toContain("width: 132px");
     expect(screen.getByTestId("voice-bubble-status").textContent).toBe("Ready");
