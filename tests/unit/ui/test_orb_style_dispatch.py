@@ -14,9 +14,9 @@ import tkinter as tk
 import pytest
 
 import ui.orb.overlay as overlay_mod
+from jarvis.ui.jarvis_clip import JarvisClipRenderer
 from jarvis.ui.overlay_styles import ORB_STYLES
 from ui.orb.overlay import MascotRenderer, OrbOverlay, _apply_color_key, _coerce_style
-from ui.orb.voice_orb import VoiceOrbRenderer
 
 
 @pytest.fixture(autouse=True)
@@ -24,11 +24,11 @@ def _no_env_style(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("JARVIS_ORB_STYLE", raising=False)
 
 
-def test_voice_orb_style_builds_the_voice_orb_renderer() -> None:
+def test_voice_orb_style_builds_the_jarvis_clip_renderer() -> None:
     overlay = OrbOverlay(style="voice_orb")
 
     assert overlay._style == "voice_orb"
-    assert isinstance(overlay._build_renderer("voice_orb"), VoiceOrbRenderer)
+    assert isinstance(overlay._build_renderer("voice_orb"), JarvisClipRenderer)
 
 
 def test_mascot_style_still_builds_the_mascot_renderer() -> None:
