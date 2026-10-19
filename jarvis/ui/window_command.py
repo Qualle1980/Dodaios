@@ -39,7 +39,7 @@ def native_drag_available(window: Any, *, platform: str | None = None) -> bool:
         return False
     try:
         from System import Action  # noqa: F401, PLC0415 — availability probe
-    except ImportError:
+    except ImportError:  # no .NET runtime: this probe's answer IS the report
         return False
     return True
 
@@ -101,6 +101,10 @@ def begin_native_move(
     try:
         from System import Action  # noqa: PLC0415 — pythonnet, WinForms host only
     except ImportError:
+        # Not swallowed: the reason travels back to the page, which then keeps
+        # pywebview's drag region. Logging every mousedown on a host without a
+        # .NET runtime would be noise, and ``native_drag_available`` already
+        # told the page this would happen.
         return {"ok": False, "reason": "no_ui_thread"}
 
     handle = int(hwnd)
