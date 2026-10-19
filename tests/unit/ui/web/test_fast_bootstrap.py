@@ -284,6 +284,35 @@ async def test_shell_paint_requires_browser_ack_not_just_js_bytes(tmp_path) -> N
     assert await bs.wait_shell_painted(timeout=0.05)
 
 
+@pytest.mark.asyncio
+async def test_shell_paint_ack_without_origin_is_rejected(tmp_path) -> None:
+    # The surface boundary answers this POST only for a same-origin,
+    # browser-shaped request. A caller that omits the Origin header gets 403
+    # and the paint event stays unset — so any non-browser acknowledger (the
+    # GUI-free boot harness, scripts/measure_desktop_boot.py) MUST send Host +
+    # Origin or it silently pays the full 12 s paint-timeout fallback.
+    bs = FastBootstrap(dist_dir=_seed_dist(tmp_path), session_token=_TOKEN)
+    scope = _http("/api/ui/shell-painted", method="POST")
+    scope["headers"] = [(name, value) for name, value in scope["headers"] if name != b"origin"]
+
+    sent = await _drive(bs.app, scope)
+
+    assert _status(sent) == 403
+    assert not await bs.wait_shell_painted(timeout=0.05)
+
+
+def test_boot_harness_acknowledges_paint_with_an_origin() -> None:
+    # Guards the measurement harness against the regression the test above
+    # describes: without this header every headless boot measurement is ~12 s
+    # too slow and the boot-budget gate false-fails.
+    repo_root = Path(__file__).resolve().parents[4]
+    script = (repo_root / "scripts/measure_desktop_boot.py").read_text(encoding="utf-8")
+    ack = script.split("/api/ui/shell-painted", 1)[1]
+
+    assert '"Origin": origin' in ack
+    assert '"Host": f"127.0.0.1:{port}"' in ack
+
+
 def test_boot_page_acknowledges_after_two_frames() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     page = repo_root / "jarvis/ui/web/frontend/index.html"

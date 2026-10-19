@@ -203,16 +203,32 @@ def run_one(python: str, timeout: float, mode: str = "legacy", voice: bool = Fal
                             # anchor and false-failing the boot-budget gate.
                             # Ack right after the shell HTML is served: the
                             # closest honest stand-in for the window's paint.
+                            # The ack MUST carry Host + Origin. The surface
+                            # boundary answers this POST only for a same-origin,
+                            # browser-shaped request (surface_security.py, the
+                            # /api/ui/shell-painted branch); without the header
+                            # it is rejected with 403, the paint event is never
+                            # set, and the run pays exactly the 12 s fallback
+                            # this ack exists to avoid. That silently inflated
+                            # every headless measurement by ~12 s until
+                            # 2026-10-19, so a non-204 is RECORDED, never
+                            # swallowed.
                             try:
-                                req = urllib.request.Request(
-                                    f"http://127.0.0.1:{port}/api/ui/shell-painted",
+                                origin = f"http://127.0.0.1:{port}"
+                                req = urllib.request.Request(  # noqa: S310
+                                    f"{origin}/api/ui/shell-painted",
                                     data=b"",
                                     method="POST",
+                                    headers={
+                                        "Origin": origin,
+                                        "Host": f"127.0.0.1:{port}",
+                                    },
                                 )
-                                with urllib.request.urlopen(req, timeout=2.0):  # noqa: S310
-                                    pass
-                            except Exception:  # noqa: BLE001 — ack is best-effort
-                                pass
+                                with urllib.request.urlopen(req, timeout=2.0) as ack:  # noqa: S310
+                                    if ack.status != 204:
+                                        result["paint_ack_status"] = ack.status
+                            except Exception as exc:  # noqa: BLE001 — ack is best-effort
+                                result["paint_ack_error"] = repr(exc)
                             return
             except Exception:  # noqa: BLE001
                 pass
