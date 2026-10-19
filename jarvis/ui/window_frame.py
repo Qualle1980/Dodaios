@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "caption_hit",
     "install_resize_frame",
+    "maximize_reference_rect",
     "maximized_bounds",
     "native_hwnd",
     "window_is_maximized",
@@ -330,6 +331,16 @@ def _build_api() -> _Win32:
     user32.IsZoomed.restype = ctypes.c_int
     user32.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     user32.MonitorFromWindow.restype = ctypes.c_void_p
+    # The maximize cap asks about a RECTANGLE, not the window: a minimized
+    # window is parked off-screen and would name the wrong monitor.
+    user32.MonitorFromRect.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.MonitorFromRect.restype = ctypes.c_void_p
+    user32.IsIconic.argtypes = [ctypes.c_void_p]
+    user32.IsIconic.restype = ctypes.c_int
+    user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.GetWindowRect.restype = ctypes.c_int
+    user32.GetWindowPlacement.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.GetWindowPlacement.restype = ctypes.c_int
     user32.SetWindowPos.argtypes = [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -606,11 +617,83 @@ def _cap_maximized(api: _Win32, hwnd: int, lparam: object) -> None:
     fields[4], fields[5] = x, y
 
 
+def maximize_reference_rect(
+    *,
+    minimized: bool,
+    window_rect: tuple[int, int, int, int] | None,
+    restore_rect: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """Which rectangle names the monitor a maximize belongs on.
+
+    Pure, so the two-monitor cases can be tested without a window.
+
+    A MINIMIZED window is parked off-screen by Windows, and asking which
+    monitor it is "nearest" then answers for that parking spot rather than for
+    the screen the user will see. With two monitors at different scale factors
+    that is the whole bug: restoring a window that was maximized on the
+    125%-scaled laptop capped it to the 100% monitor's work area, the WebView
+    child landed on that other monitor's rectangle — measured as exactly
+    ``(-474, -1080, 1446, -48)`` — and the user was left with the bare grey
+    frame (live 2026-10-19, and only ever on the secondary-scale screen).
+
+    Windows maximizes onto the monitor holding the window's RESTORE rectangle,
+    so while minimized that rectangle is the honest reference. Returns None
+    when neither rectangle is available, and the caller then leaves the
+    maximize uncapped rather than guessing a monitor.
+    """
+    if minimized and restore_rect is not None:
+        return restore_rect
+    return window_rect if window_rect is not None else restore_rect
+
+
+def _restore_rect(api: _Win32, hwnd: int) -> tuple[int, int, int, int] | None:
+    """``rcNormalPosition`` from GetWindowPlacement, or None (logged)."""
+
+    class _WindowPlacement(api.ctypes.Structure):  # type: ignore[misc, name-defined]
+        _fields_ = [
+            ("length", api.ctypes.c_uint),
+            ("flags", api.ctypes.c_uint),
+            ("showCmd", api.ctypes.c_uint),
+            ("ptMinPosition", api.ctypes.c_long * 2),
+            ("ptMaxPosition", api.ctypes.c_long * 2),
+            ("rcNormalPosition", api.ctypes.c_long * 4),
+        ]
+
+    placement = _WindowPlacement()
+    placement.length = api.ctypes.sizeof(_WindowPlacement)
+    if not api.user32.GetWindowPlacement(hwnd, api.ctypes.byref(placement)):
+        logger.error("GetWindowPlacement failed hwnd=%s", hwnd)
+        return None
+    left, top, right, bottom = placement.rcNormalPosition
+    return (left, top, right, bottom)
+
+
+def _window_rect(api: _Win32, hwnd: int) -> tuple[int, int, int, int] | None:
+    rect = (api.ctypes.c_long * 4)()
+    if not api.user32.GetWindowRect(hwnd, api.ctypes.byref(rect)):
+        logger.error("GetWindowRect failed hwnd=%s", hwnd)
+        return None
+    return (rect[0], rect[1], rect[2], rect[3])
+
+
 def _monitor_info(api: _Win32, hwnd: int) -> Any | None:
-    """MONITORINFO of the monitor nearest ``hwnd``, or None (logged)."""
-    monitor = api.user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+    """MONITORINFO of the monitor the maximize belongs on, or None (logged).
+
+    Not simply ``MonitorFromWindow``: see :func:`maximize_reference_rect` for
+    why a minimized window must be asked about through its restore rectangle.
+    """
+    reference = maximize_reference_rect(
+        minimized=bool(api.user32.IsIconic(hwnd)),
+        window_rect=_window_rect(api, hwnd),
+        restore_rect=_restore_rect(api, hwnd),
+    )
+    if reference is None:
+        logger.error("no reference rectangle for the maximize hwnd=%s", hwnd)
+        return None
+    bounds = (api.ctypes.c_long * 4)(*reference)
+    monitor = api.user32.MonitorFromRect(api.ctypes.byref(bounds), _MONITOR_DEFAULTTONEAREST)
     if not monitor:
-        logger.error("MonitorFromWindow returned no monitor hwnd=%s", hwnd)
+        logger.error("MonitorFromRect returned no monitor hwnd=%s", hwnd)
         return None
     info = api.monitor_info()
     info.cbSize = api.ctypes.sizeof(info)
