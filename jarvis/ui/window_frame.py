@@ -627,23 +627,28 @@ def maximize_reference_rect(
 
     Pure, so the two-monitor cases can be tested without a window.
 
-    A MINIMIZED window is parked off-screen by Windows, and asking which
-    monitor it is "nearest" then answers for that parking spot rather than for
-    the screen the user will see. With two monitors at different scale factors
+    The RESTORE rectangle always wins, because it is the only one that is
+    trustworthy in every state. A minimized window is parked off-screen, and
+    during the restore itself ``IsIconic`` is already false while the window
+    rectangle still holds the old position — measured on the live window — so
+    gating on "is it minimized" was not enough and the first attempt at this
+    fix changed nothing. With two monitors at different scale factors
     that is the whole bug: restoring a window that was maximized on the
     125%-scaled laptop capped it to the 100% monitor's work area, the WebView
     child landed on that other monitor's rectangle — measured as exactly
     ``(-474, -1080, 1446, -48)`` — and the user was left with the bare grey
     frame (live 2026-10-19, and only ever on the secondary-scale screen).
 
-    Windows maximizes onto the monitor holding the window's RESTORE rectangle,
-    so while minimized that rectangle is the honest reference. Returns None
-    when neither rectangle is available, and the caller then leaves the
+    Windows maximizes onto the monitor holding the window's restore rectangle,
+    and that rectangle stays correct while maximized too (measured as
+    ``(208, 116, 1790, 1069)`` on the laptop while the window was zoomed), so
+    it is the reference in every state. Returns None when neither rectangle is
+    available, and the caller then leaves the
     maximize uncapped rather than guessing a monitor.
     """
-    if minimized and restore_rect is not None:
+    if restore_rect is not None:
         return restore_rect
-    return window_rect if window_rect is not None else restore_rect
+    return window_rect
 
 
 def _restore_rect(api: _Win32, hwnd: int) -> tuple[int, int, int, int] | None:
