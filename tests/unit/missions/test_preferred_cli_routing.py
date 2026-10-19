@@ -23,7 +23,7 @@ from jarvis.missions.stream_evidence import TARGET_CLI_MARKER, parse_target_cli
         (f"{TARGET_CLI_MARKER} claude", "claude"),
         (f"{TARGET_CLI_MARKER} CODEX.", "codex"),
         # A mention inside the task text must never redirect a worker.
-        ("Bitte nutze codex fuer diese Aufgabe.", None),
+        ("Bitte nutze codex fuer diese Aufgabe.", None),  # i18n-allow: quotes a German chat turn
         (f"{TARGET_CLI_MARKER} gemini.", None),
         ("", None),
     ],
