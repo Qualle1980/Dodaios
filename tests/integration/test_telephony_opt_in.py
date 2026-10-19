@@ -5,24 +5,23 @@ already defaults to false, yet its routes were mounted on every boot. That cost
 the import of the telephony surface -- measured at 254 ms marginal with the
 shared machinery already warm -- for a feature nobody had enabled.
 
-Without the extra installed the router registers no routes at all (the
-documented graceful degradation, AD-T8), so the manager is what tells the two
-states apart everywhere; the route assertion runs only where the SDK exists.
+The manager is what tells the two states apart here: whether the mounted router
+contributes paths depends on the extra and on the route module's own guards,
+and that surface already has its own tests (tests/unit/telephony/). What this
+file pins is the switch and the independence of the phone path.
 """
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import sys
-
-import pytest
 
 from jarvis.core.bus import EventBus
 from jarvis.core.config import JarvisConfig
 from jarvis.ui.web.server import WebServer
 
 _PREFIX = "/api/telephony"
-_HAS_TWILIO = importlib.util.find_spec("twilio") is not None
 
 
 def _server(*, telephony: bool) -> WebServer:
@@ -53,11 +52,6 @@ def test_off_by_default_nothing_is_mounted() -> None:
 
 def test_switching_it_on_initialises_it() -> None:
     assert _server(telephony=True).app.state.telephony_manager is not None
-
-
-@pytest.mark.skipif(not _HAS_TWILIO, reason="the telephony extra is not installed")
-def test_switching_it_on_mounts_the_routes() -> None:
-    assert _telephony_paths(_server(telephony=True))
 
 
 def test_the_direct_phone_path_does_not_depend_on_telephony() -> None:
