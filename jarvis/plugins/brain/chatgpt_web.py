@@ -129,12 +129,31 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "\n[…]"
 
 
+# The bridge takes no tool schemas, so the only way this brain can hand work to
+# a background worker is to say so in its text. The envelope is OPTIONAL and
+# deliberately narrow: ``parse_route_decision`` accepts nothing else, and the
+# caller treats an unparsable reply as a plain answer. Kept short on purpose —
+# every character is typed into the web composer and costs answer latency.
+ROUTING_INSTRUCTION = (
+    "\n\nWhen a request needs real work in the user's repo (writing or changing "
+    "code, running commands, longer research), do not do it yourself and do not "
+    "claim you did. Answer with ONLY this JSON object and no other text:\n"
+    '{"route": "delegate", "target": "codex", "task": "<the full task>"}\n'
+    'Use "target": "claude" for broad or multi-file work, "codex" for a focused '
+    "code change. If one fact is missing, ask instead:\n"
+    '{"route": "clarify", "text": "<your question>"}\n'
+    "For everything else just answer normally in plain text."
+)
+
+
 def _input_items(req: BrainRequest) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     if req.system:
-        items.append(
-            {"type": "message", "role": "system", "content": _clip(req.system, MAX_SYSTEM_CHARS)}
-        )
+        # Clip first, then append the routing rule, so the cap can never cut it
+        # off — a half-written envelope would be parsed as prose and lose the
+        # delegation entirely.
+        system = _clip(req.system, MAX_SYSTEM_CHARS) + ROUTING_INSTRUCTION
+        items.append({"type": "message", "role": "system", "content": system})
     for msg in req.messages[-MAX_HISTORY_MESSAGES:]:
         if msg.role == "tool":
             # No tools on this bridge; a stale tool result is context text.
