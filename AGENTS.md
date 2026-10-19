@@ -142,9 +142,24 @@ ran, and what remains unverified in the PR. Tiers are guidance, not checklists:
 Escalate evidence when risk crosses a boundary. Never claim an unrun platform,
 device or provider was verified. A check red on the exact base commit: compare
 failure identities and causes in the same environment (counts are not a
-comparison); a failure already on base is a backlog item, a new or changed
-failure blocks completion. Never silence a required check, raise a baseline,
-or bypass branch protection to look green.
+comparison); a new or changed failure blocks completion. "Also red on base" is
+NOT by itself a reason to move on: name the verified cause, or say in the PR
+that the cause is unknown and the number is therefore unusable as evidence.
+Forensic 2026-10-19: a red boot budget was waved through as pre-existing on
+both sides, and the cause turned out to be the measuring harness rejecting its
+own request — so every boot number in that PR, on both commits, was wrong.
+Never silence a required check, raise a baseline, or bypass branch protection
+to look green.
+
+**A measurement is evidence only if it could have come out otherwise.** Before
+a number decides anything: validate the harness (a probe it sends must be
+accepted — assert the status, do not infer it from a duration), then report
+every sample, not just a median. A claim of faster or slower needs enough
+serial runs that the ranges do not overlap; overlapping ranges, or a spread
+above about 2x between the fastest and slowest run, mean inconclusive and must
+be written as such. Investigate an outlier, never drop it silently. Distinguish
+a deliberate wait (a bounded gate) from work on the path — an anchor behind a
+gate moves when the gate does and proves nothing about the change.
 
 ## 3. Architecture you must respect
 

@@ -258,7 +258,33 @@ def run_one(python: str, timeout: float, mode: str = "legacy", voice: bool = Fal
             f"voice stack never printed VOICE_USABLE_MS within {timeout:.0f}s "
             f"(port {port}) — honest TTU anchor missing"
         )
+    # Validate the harness itself before its numbers are allowed out.
+    check_paint_ack(result)
     return result
+
+
+def check_paint_ack(result: dict) -> None:
+    """Raise when the harness's own paint acknowledgement did not land.
+
+    A rejected or failed ack is NOT a slow boot: the bootstrap's paint event
+    stays unset and the run pays the full ``wait_shell_painted`` fallback, so
+    every anchor behind it is measurement noise, not a property of the app.
+    Until 2026-10-19 the ack was sent without an Origin header, was answered
+    with 403, and the harness reported the resulting ~12 s as a boot cost for
+    months. A broken measurement must FAIL, never produce numbers.
+    """
+    status = result.get("paint_ack_status")
+    error = result.get("paint_ack_error")
+    if status is None and error is None:
+        return
+    detail = f"HTTP {status}" if status is not None else f"request failed: {error}"
+    raise RuntimeError(
+        f"paint acknowledgement (POST /api/ui/shell-painted) was not accepted "
+        f"({detail}) — the measurement is invalid, not slow. The route is "
+        f"answered only for a same-origin, browser-shaped request; check the "
+        f"Host/Origin headers the harness sends and jarvis/ui/web/"
+        f"surface_security.py before trusting any anchor from this run."
+    )
 
 
 def _summarize(runs: list[dict], *, python: str, pages: int) -> dict:

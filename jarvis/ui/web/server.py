@@ -154,6 +154,27 @@ class _SpaFallbackRoute(APIRoute):
         return super().matches(scope)
 
 
+def _make_feature_mark() -> Callable[[str], None]:
+    """Return a stamp for the sub-phases of the deferred feature setup.
+
+    Same opt-in switch and same ``[BOOT_PROFILE] <phase>=<ms>`` line format as
+    the marks in ``start()``, so one harness reads both. Off (the default) it
+    is two env/clock reads per phase and prints nothing. Phase names are
+    prefixed ``fs_`` so a profile shows at a glance which stage a cost is in.
+    """
+    enabled = os.environ.get("JARVIS_BOOT_PROFILE") == "1"
+    last = time.perf_counter()
+
+    def mark(name: str) -> None:
+        nonlocal last
+        now = time.perf_counter()
+        if enabled:
+            print(f"[BOOT_PROFILE] fs_{name}={(now - last) * 1000.0:.1f}", flush=True)
+        last = now
+
+    return mark
+
+
 class WebServer:
     """In-process uvicorn + FastAPI, run by the orchestrator loop."""
 
@@ -462,7 +483,14 @@ class WebServer:
         Desktop defers this work behind local voice warmup. Headless and other
         callers retain eager construction. The shared bus, skill registry and
         voice-status subscriber already exist before this method runs.
+
+        Sub-phases are stamped through ``_feature_mark`` (opt-in, same
+        ``JARVIS_BOOT_PROFILE`` switch as the rest): this method was the single
+        biggest phase in every cold-boot profile while saying nothing about
+        WHICH part cost the time — importing ~100 route modules, or mounting
+        and wiring them. Diagnosis only; no behaviour changes with the switch.
         """
+        _feature_mark = _make_feature_mark()
         # Sub-agent registry (dashboard feature) — subscribes to the bus immediately.
         try:
             from jarvis.agents import JarvisAgentRegistry
@@ -474,6 +502,7 @@ class WebServer:
             logger.opt(exception=exc).warning("JarvisAgentRegistry setup failed")
             app.state.sub_agent_registry = None
 
+        _feature_mark("sub_agent_registry")
         # Wire in the MCP, tool, provider, profile, task, skills, CLI, and
         # sub-agents routes — lazy import avoids cycles.
         from jarvis.runs.routes import router as runs_router
@@ -588,6 +617,10 @@ class WebServer:
         except ImportError as exc:
             logger.warning("Conductor module not available: {} — Conductor view stays empty", exc)
             conductor_router = None
+
+        # Everything above is IMPORT cost (~100 route modules and their
+        # transitive dependencies); everything below is mounting and wiring.
+        _feature_mark("route_imports")
         app.include_router(mcp_router)
         # Connect-flow for the Agent MCP surface: what it offers, which
         # clients this box has, and writing the entry into their config.
@@ -861,8 +894,10 @@ class WebServer:
             logger.opt(exception=exc).warning("PreviewRegistry setup failed")
             app.state.preview_registry = None
 
+        _feature_mark("route_mounting")
         # The SPA catch-all must remain after every API router.
         self._register_static_or_spa(app)
+        _feature_mark("spa_mount")
 
     def _publish_app(self) -> None:
         # Deferred construction runs in a thread, but publication belongs to

@@ -19,6 +19,21 @@ Anchors and budgets (override via env for slower CI boxes):
   when the host can run the voice stack (audio device present) — a headless
   CI box checks the window anchor and skips voice honestly instead of faking
   a pass.
+- app-interactive: spawn -> ``APP_INTERACTIVE_MS`` (``set_app``: the UI's held
+  data requests are answered). Budget ``JARVIS_BOOT_BUDGET_INTERACTIVE_MS``
+  (default 20000). This anchor sits behind the wake-model gate BY DESIGN, so
+  it moves whenever voice does.
+- post-voice work: app-interactive MINUS voice TTU — ``prepare_app`` and the
+  route mounting, i.e. the part a new feature actually regresses. Budget
+  ``JARVIS_BOOT_BUDGET_POST_VOICE_MS`` (default 8000). When app-interactive
+  misses its budget while this one holds, the cause is voice, not the path.
+
+Sampling: ``JARVIS_BOOT_BUDGET_RUNS`` cold boots (default 3) run SERIALLY
+after one discarded warmup, and every sample is printed next to the median.
+One sample cannot separate a regression from boot noise — the measured spread
+for one unchanged commit on the reference box was 9.5 s to 41.5 s. A spread
+above 2x prints an INVESTIGATE line and makes any before/after comparison on
+those numbers inconclusive; outliers are never silently dropped.
 
 Budgets are deliberately ~4x the measured medians: loose enough that machine
 variance never flakes, tight enough that every regression class we have
@@ -38,6 +53,7 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +71,24 @@ DEFAULT_VOICE_BUDGET_MS = 20_000.0
 # (the user-facing "usable" moment; measured median 5.3 s isolated). Checked in
 # voice mode (the run must live past the window anchor to see it).
 DEFAULT_INTERACTIVE_BUDGET_MS = 20_000.0
+# APP_INTERACTIVE sits behind the wake-model gate BY DESIGN
+# (``_heavy_backend_bg`` waits for ``_wake_model_loaded``, bounded at 12 s,
+# before ``prepare_app``), so the absolute anchor above moves whenever voice
+# does and cannot tell "voice got slower" from "someone put work on the
+# startup path". This budget is the DIFFERENCE — the work that actually runs
+# after voice is usable — and that is the one a feature regresses.
+DEFAULT_POST_VOICE_BUDGET_MS = 8_000.0
+
+# One sample cannot separate a regression from boot noise: the measured spread
+# on the reference box is 9.5 s to 41.5 s for the same commit. Run several
+# cold boots SERIALLY (never concurrently — parallel boots compete for CPU,
+# disk and the GPU probe and measure the contention, not the app) and judge
+# the median. Overridable so a slow CI box can spend less.
+DEFAULT_RUNS = 3
+# Ratio between the slowest and fastest run above which the numbers are not a
+# usable basis for a decision. Reported loudly, never silently discarded: an
+# outlier is a lead, and dropping it is how the 403 ack survived for months.
+UNSTABLE_SPREAD_RATIO = 2.0
 
 
 def _macos_microphone_granted() -> bool:
@@ -86,6 +120,37 @@ def _audio_capable() -> bool:
         return False
 
 
+def _report_spread(summary: dict, label: str, runs_key: str) -> None:
+    """Print every sample for *label*, plus median and spread.
+
+    A gate that prints one number teaches whoever reads it to trust one
+    number. Printing the samples is what makes "the ranges overlap" visible
+    at the moment of the decision instead of in a later forensic.
+    """
+    samples = [float(v) for v in summary.get(runs_key) or []]
+    if not samples:
+        return
+    median = statistics.median(samples)
+    low, high = min(samples), max(samples)
+    line = (
+        f"boot-budget: {label} samples "
+        f"{', '.join(f'{v:.0f}' for v in samples)} ms "
+        f"-> median {median:.0f} ms (min {low:.0f}, max {high:.0f})"
+    )
+    print(line, flush=True)
+    if len(samples) > 1 and low > 0 and high / low >= UNSTABLE_SPREAD_RATIO:
+        # Not a failure: an unstable box must not block a correct change. But
+        # it is also not a basis for claiming an improvement or a regression.
+        print(
+            f"boot-budget: INVESTIGATE — {label} spread is {high / low:.1f}x "
+            f"(max/min). Treat any before/after comparison on these numbers as "
+            f"inconclusive and find the cause of the slow run (contention from "
+            f"a parallel build or agent session, a cold cache, a bounded gate "
+            f"timing out) before drawing a conclusion from it.",
+            flush=True,
+        )
+
+
 def main() -> int:
     window_budget = float(
         os.environ.get("JARVIS_BOOT_BUDGET_WINDOW_MS", DEFAULT_WINDOW_BUDGET_MS)
@@ -98,27 +163,39 @@ def main() -> int:
             "JARVIS_BOOT_BUDGET_INTERACTIVE_MS", DEFAULT_INTERACTIVE_BUDGET_MS
         )
     )
+    post_voice_budget = float(
+        os.environ.get("JARVIS_BOOT_BUDGET_POST_VOICE_MS", DEFAULT_POST_VOICE_BUDGET_MS)
+    )
+    runs = max(1, int(os.environ.get("JARVIS_BOOT_BUDGET_RUNS", DEFAULT_RUNS)))
     if not HARNESS.exists():
         print(f"boot-budget: harness missing ({HARNESS}) — skipping", flush=True)
         return SKIP_EXIT
 
     voice = _audio_capable()
+    # One discarded warmup boot: without it the first run also pays the OS file
+    # cache for the model and bundle reads, which is the single largest source
+    # of the spread this guard used to trip over.
     args = [
         sys.executable,
         str(HARNESS),
         "--runs",
-        "1",
+        str(runs),
         "--warmup",
-        "0",
+        "1",
     ]
     if voice:
         args.append("--voice")
     print(
-        f"boot-budget: measuring one isolated cold boot (voice={voice}) ...",
+        f"boot-budget: measuring {runs} isolated cold boot(s) serially, "
+        f"1 discarded warmup (voice={voice}) ...",
         flush=True,
     )
     proc = subprocess.run(  # noqa: S603 — our own harness, fixed argv
-        args, cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=420
+        args,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=300 + runs * 180,
     )
     if proc.returncode != 0:
         print(proc.stdout[-2000:], flush=True)
@@ -130,6 +207,7 @@ def main() -> int:
     summary = json.loads(latest.read_text(encoding="utf-8"))
 
     failures: list[str] = []
+    _report_spread(summary, "window", "wall_ms_runs")
     window_ms = summary.get("median_wall_ms")
     if window_ms is None:
         failures.append("window anchor missing from harness output")
@@ -139,6 +217,8 @@ def main() -> int:
         )
 
     if voice:
+        _report_spread(summary, "voice TTU", "voice_usable_wall_ms_runs")
+        _report_spread(summary, "app-interactive", "app_interactive_wall_ms_runs")
         voice_ms = summary.get("median_voice_usable_wall_ms")
         if voice_ms is None:
             failures.append("VOICE_USABLE anchor missing from harness output")
@@ -155,17 +235,46 @@ def main() -> int:
         interactive_ms = summary.get("median_app_interactive_wall_ms")
         if interactive_ms is None:
             failures.append("APP_INTERACTIVE anchor missing from harness output")
-        elif interactive_ms > interactive_budget:
-            failures.append(
-                f"app-interactive {interactive_ms:.0f} ms > budget "
-                f"{interactive_budget:.0f} ms"
-            )
         else:
-            print(
-                f"boot-budget: app-interactive {interactive_ms:.0f} ms <= "
-                f"{interactive_budget:.0f} ms OK",
-                flush=True,
+            # Separate the two things the absolute anchor confuses: the time
+            # the backend DELIBERATELY waits for the wake model, and the work
+            # that runs after it (prepare_app + the route mounting).
+            post_voice_ms = (
+                interactive_ms - voice_ms if isinstance(voice_ms, (int, float)) else None
             )
+            if post_voice_ms is not None:
+                if post_voice_ms > post_voice_budget:
+                    failures.append(
+                        f"post-voice work {post_voice_ms:.0f} ms > budget "
+                        f"{post_voice_budget:.0f} ms (voice usable at "
+                        f"{voice_ms:.0f} ms, app interactive at "
+                        f"{interactive_ms:.0f} ms) — this is work on the "
+                        f"startup path, not the wake gate"
+                    )
+                else:
+                    print(
+                        f"boot-budget: post-voice work {post_voice_ms:.0f} ms <= "
+                        f"{post_voice_budget:.0f} ms OK",
+                        flush=True,
+                    )
+            if interactive_ms > interactive_budget:
+                cause = (
+                    " — but the post-voice work is within budget, so the cause "
+                    "is the voice anchor / the wake-model gate it waits on, "
+                    "NOT new work on the startup path"
+                    if post_voice_ms is not None and post_voice_ms <= post_voice_budget
+                    else ""
+                )
+                failures.append(
+                    f"app-interactive {interactive_ms:.0f} ms > budget "
+                    f"{interactive_budget:.0f} ms{cause}"
+                )
+            else:
+                print(
+                    f"boot-budget: app-interactive {interactive_ms:.0f} ms <= "
+                    f"{interactive_budget:.0f} ms OK",
+                    flush=True,
+                )
     else:
         print(
             "boot-budget: no usable audio input or permission — voice anchor skipped (honest)",

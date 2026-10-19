@@ -3351,6 +3351,11 @@ class DesktopApp:
                     )
                 if self._shutdown_done:
                     return
+                # Separate mark: everything up to here is WAITING for the wake
+                # model, by design. Folding it into the route mark made the
+                # biggest phase in every profile a mixture of a deliberate gate
+                # and real work, so neither could be read (forensic 2026-10-19).
+                _db_mark("wake_gate")
                 # Route imports/mounting and the board used to run before the
                 # speech task even existed. Complete them off-loop only after
                 # wake warmup, and never expose a partially installed API.
