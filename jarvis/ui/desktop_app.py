@@ -5387,12 +5387,19 @@ class DesktopApp:
         """
         from jarvis.ui.window_command import window_chrome
 
+        from jarvis.ui.window_command import native_drag_available
+
         info = window_chrome()
         window = self._window
         frameless = bool(getattr(window, "frameless", False)) if window is not None else False
         info["frameless"] = frameless
         if not frameless:
             info["controls"] = "none"
+        # Whether the page may hand its caption drag to the system. False means
+        # "keep pywebview's drag region": a host that cannot marshal onto its UI
+        # thread would otherwise end up with no drag at all, which is how the
+        # window became unmovable once (live 2026-10-19).
+        info["native_drag"] = frameless and native_drag_available(window)
         return info
 
     def window_command(self, action: str, view: str | None) -> dict[str, Any]:
@@ -5406,15 +5413,15 @@ class DesktopApp:
 
         window = self._detached_windows.get(section_window(view)) if view else self._window
         if action == "begin-move":
-            # Separate from the button actions: this one blocks for as long as
-            # the user drags, because Windows runs its move loop inside
-            # SendMessageW. The route already calls us on a worker thread.
+            # Separate from the button actions: the two Win32 calls must run on
+            # the window's OWN thread, so this hands them to the form and
+            # returns at once instead of waiting out the user's drag.
             if window is None:
                 return {"ok": False, "reason": "no_window"}
             try:
                 from jarvis.ui.window_frame import native_hwnd
 
-                return begin_native_move(native_hwnd(window))
+                return begin_native_move(window, native_hwnd(window))
             except Exception:  # noqa: BLE001
                 from loguru import logger
 
