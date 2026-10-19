@@ -25,6 +25,7 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..ids import uuid7_str
+from ..stream_evidence import parse_target_cli
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,14 @@ class Step(BaseModel):
     slug: str  # short kebab-case for worktree naming (e.g. "refactor-auth")
     prompt: str  # complete instruction for the worker
     worker_cli: Literal["claude", "codex"] = "claude"
+    # The worker family the REQUEST explicitly asked for, read back from the
+    # prompt's ``Zielort/Kontext:`` line. Distinct from ``worker_cli`` on
+    # purpose: that field carries a default ("claude") on every heuristic plan,
+    # so honouring it would silently redirect every mission on an install
+    # configured for a different provider. ``None`` means "nobody asked", and
+    # the configured routing then stays untouched. Old persisted plans that
+    # never carried the field deserialize to None.
+    preferred_cli: Literal["claude", "codex"] | None = None
     # Empty string = "use whatever the worker's primary provider configures".
     # ClaudeDirectWorker overrides this with primary.model from
     # [brain.providers.claude-api]; CodexDirectWorker omits --model when
@@ -295,6 +304,7 @@ class MissionDecomposer:
                     worker_cli="claude",
                     model="",  # let the worker pick its configured primary
                     needs_repo=needs_repo,
+                    preferred_cli=parse_target_cli(mission_prompt),
                 )
             ],
             n_workers=1,

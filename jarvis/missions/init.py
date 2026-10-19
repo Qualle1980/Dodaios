@@ -402,11 +402,25 @@ def _custom_api_worker_tools(task_text: str) -> tuple[str, ...]:
         return ()
 
 
-def _select_subagent_worker_kind(sub_jarvis_provider: str | None, step_model: str) -> str:
+def _select_subagent_worker_kind(
+    sub_jarvis_provider: str | None,
+    step_model: str,
+    preferred_cli: str | None = None,
+) -> str:
     """Pure routing decision for the Heavy-Task subagent worker.
 
     Returns one of ``"claude_direct"`` | ``"codex_direct"`` | ``"antigravity"``
     | ``"grok_build"`` | ``"subjarvis"`` | ``"gemini"``.
+
+    ``preferred_cli`` is an EXPLICIT per-request pick of the claude/codex
+    family — the ``Zielort/Kontext:`` line a routed task carries, not a
+    per-step default (see ``Step.preferred_cli``). It is honoured only between
+    those two subscription CLIs and only when the configured provider is one of
+    them, so the 2026-05-29 mandate below still holds for every other provider:
+    a request can swap Claude for Codex, but it can never divert heavy work
+    away from a deliberately configured gemini/openai/grok/openrouter provider,
+    and it can never reach the Gemini API key. ``None`` (the default) leaves
+    every decision exactly as it was.
 
     Defense-in-depth (2026-05-29, user mandate: heavy tasks run on the
     configured provider — claude-api -> Claude Max OAuth — and Gemini must
@@ -420,11 +434,21 @@ def _select_subagent_worker_kind(sub_jarvis_provider: str | None, step_model: st
     the Jarvis-Agent worker (``"subjarvis"``), NOT the direct ``GeminiWorker``
     API path — the latter is purely the legacy no-provider fallback.
     """
-    if sub_jarvis_provider == "claude-api":
+    # The explicit request-level pick, confined to the two subscription CLIs.
+    # Both families must already be in play: the configured provider is one of
+    # them, and the request named the other.
+    configured_is_claude = sub_jarvis_provider == "claude-api"
+    configured_is_codex = sub_jarvis_provider in CODEX_SUBAGENT_SLUGS
+    if (configured_is_claude or configured_is_codex) and preferred_cli in (
+        "claude",
+        "codex",
+    ):
+        return "claude_direct" if preferred_cli == "claude" else "codex_direct"
+    if configured_is_claude:
         return "claude_direct"
     if sub_jarvis_provider == "openclaw-claude":
         return "subjarvis"
-    if sub_jarvis_provider in CODEX_SUBAGENT_SLUGS:
+    if configured_is_codex:
         return "codex_direct"
     # "antigravity" (Google subscription via the official agy/gemini CLI over the
     # OAuth login) is a HARD LOCK like claude-api: no per-step model can divert it
@@ -1473,7 +1497,18 @@ async def bootstrap_missions(
         # kept routing every heavy mission to the ClaudeDirectWorker (Opus)
         # fallback for hours. Degrades to the boot snapshot on any read failure.
         live_provider = _live_subagent_provider(sub_jarvis_provider)
-        kind = _select_subagent_worker_kind(live_provider, getattr(step, "model", "") or "")
+        # ``preferred_cli`` is set only when the request itself named a worker
+        # family (``Zielort/Kontext:``), so an ordinary mission keeps the
+        # configured routing untouched.
+        preferred_cli = getattr(step, "preferred_cli", None)
+        kind = _select_subagent_worker_kind(
+            live_provider, getattr(step, "model", "") or "", preferred_cli
+        )
+        if preferred_cli:
+            logger.info(
+                "Mission worker: request asked for %r -> kind=%r "
+                "(configured provider: %r)", preferred_cli, kind, live_provider,
+            )
         if kind == "claude_direct":
             from jarvis.missions.workers.claude_direct_worker import (
                 _resolve_claude_binary,
