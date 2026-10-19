@@ -1143,6 +1143,28 @@ FORCE_SPAWN_DIRECTIVE: Final[str] = (
 )
 UNDERLYING_REQUEST_LEAD: Final[str] = "Underlying request: "
 
+# The prompt line that names the worker family a routed task asked for. Both
+# ``spawn_worker._build_mission_prompt`` and the text-only delegation path write
+# it, and the decomposer reads it back, so the writer and the reader share one
+# constant instead of two copies of the same literal.
+TARGET_CLI_MARKER: Final[str] = "Zielort/Kontext:"
+_TARGET_CLI_RE: Final[re.Pattern[str]] = re.compile(
+    rf"^\s*{re.escape(TARGET_CLI_MARKER)}\s*(claude|codex)\s*\.?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_target_cli(prompt: str) -> str | None:
+    """Return the worker family a mission prompt explicitly asked for.
+
+    Only an exact ``Zielort/Kontext: claude`` / ``codex`` line counts, so a
+    mention of either name inside the task text can never redirect a worker.
+    ``None`` means "no preference was expressed" — the caller then keeps the
+    configured routing untouched.
+    """
+    match = _TARGET_CLI_RE.search(prompt or "")
+    return match.group(1).lower() if match else None
+
 
 def _request_body(prompt: str) -> str:
     """Strip the standing directives that spawn_worker prepends so the caller
@@ -1486,6 +1508,7 @@ def summarize_answers(answers: list[str], *, cap: int = 600) -> str:
 __all__ = [
     "FORCE_SPAWN_DIRECTIVE",
     "StreamEvidence",
+    "TARGET_CLI_MARKER",
     "UNDERLYING_REQUEST_LEAD",
     "clean_request_body",
     "diff_has_action_evidence",
@@ -1498,6 +1521,7 @@ __all__ = [
     "is_clarification_only_answer",
     "is_informational_request",
     "normalize_worker_stream",
+    "parse_target_cli",
     "readonly_answer",
     "strip_spawn_meta",
     "summarize_answers",

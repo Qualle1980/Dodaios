@@ -60,7 +60,7 @@ async def _settle(kontrollierer: _Kontrollierer) -> None:
 async def test_prose_reply_is_left_untouched() -> None:
     """``self`` means "this is the answer": the turn must not be rewritten."""
     out = await _route(
-        _Stub(), "Das ist eine normale Antwort.", "hi", language="de", may_delegate=True
+        _Stub(), "Das ist eine normale Antwort.", "hi", language="de", may_delegate=True  # i18n-allow: quotes a German chat turn
     )
     assert out is None
 
@@ -156,7 +156,7 @@ async def test_an_informational_turn_keeps_the_question_shape(
 
     reply = (
         '{"route": "delegate", "target": "codex", '
-        '"task": "Nenne die erste Ueberschrift aus README.md. Aendere keine Datei."}'
+        '"task": "Nenne die erste Ueberschrift aus README.md. Aendere keine Datei."}'  # i18n-allow: quotes a German chat turn
     )
     await _route(
         _Stub(), reply, "was steht oben in der readme", language="de", may_delegate=True
@@ -179,7 +179,7 @@ async def test_a_work_turn_keeps_the_task_shape(monkeypatch: pytest.MonkeyPatch)
 
     reply = (
         '{"route": "delegate", "target": "codex", '
-        '"task": "Fuege der Datei bar.py eine Funktion foo() hinzu."}'
+        '"task": "Fuege der Datei bar.py eine Funktion foo() hinzu."}'  # i18n-allow: quotes a German chat turn
     )
     await _route(
         _Stub(), reply, "bau mir die funktion foo in bar.py", language="de", may_delegate=True
