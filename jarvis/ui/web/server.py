@@ -569,7 +569,6 @@ class WebServer:
         from .sub_agents_routes import router as sub_agents_router
         from .tasks_routes import router as tasks_router
         from .team_thread_routes import router as team_thread_router
-        from .telephony_routes import router as telephony_router
         from .tool_model_routes import router as tool_model_router
         from .tools_routes import router as tools_router
         from .update_routes import router as update_router
@@ -667,10 +666,29 @@ class WebServer:
         app.state.channel_chat_bridge = None
         # Twilio telephony voice agent (webhook + media WS + REST status/config).
         # Degrades gracefully when the `twilio` extra is not installed (AD-T8).
-        app.include_router(telephony_router)
-        from jarvis.telephony.status import TelephonyManager
+        #
+        # Opt-in, because the whole feature is: ``integrations.twilio.enabled``
+        # already defaults to false, the extra is not part of the base install,
+        # and the routes answer 409 without it. Mounting it regardless cost
+        # every boot the import of the telephony surface -- measured at 254 ms
+        # marginal on this machine, with the shared machinery already warm --
+        # for a feature nobody had switched on. The direct PC-to-phone path
+        # (``jarvis/channels/mobile.py``, ``/api/m/call``, ``/ws/audio``) is
+        # independent of this and is unaffected either way.
+        integrations = getattr(self.cfg, "integrations", None)
+        twilio_integration = getattr(integrations, "twilio", None)
+        if bool(getattr(twilio_integration, "enabled", False)):
+            # Imported here, not with the other routers: the import IS the cost
+            # this switch exists to avoid.
+            from .telephony_routes import router as telephony_router
 
-        app.state.telephony_manager = TelephonyManager()
+            app.include_router(telephony_router)
+            from jarvis.telephony.status import TelephonyManager
+
+            app.state.telephony_manager = TelephonyManager()
+        else:
+            # Named explicitly so a caller sees "off", not "missing".
+            app.state.telephony_manager = None
         # Browser-microphone voice bridge (B2): /ws/audio — the headless/VPS
         # voice path via the browser's own mic/speaker, no sounddevice. Always
         # mounted; checked at connect time: realtime mode always serves it,
