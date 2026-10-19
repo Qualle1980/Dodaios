@@ -533,6 +533,16 @@ _PHRASES: dict[str, dict[str, str]] = {
         "es": "No puedo iniciar la tarea ahora. Reiníciame, por favor.",
         "pt": "Não consigo iniciar a tarefa agora. Reinicia-me, por favor.",
     },
+    # A text-only brain (no tool_calls, e.g. the ChatGPT-web bridge) routed the
+    # turn to a background worker via the JSON routing envelope. The spoken
+    # promise for that path — the mission's own result is announced later by the
+    # readback, so this says only that the work started.
+    "delegate_task_started": {
+        "de": "Ich lasse das im Hintergrund erledigen und melde mich.",  # i18n-allow
+        "en": "I'm having that done in the background and will report back.",
+        "es": "Haré que se haga en segundo plano y te aviso.",
+        "pt": "Vou mandar fazer isso em segundo plano e depois aviso.",
+    },
     # ``create_artifact`` handed the page to a background agent. The promise
     # names the artifact and says the result will be announced — the tool's
     # fallback when the brain supplied no ``spoken_ack`` of its own.
