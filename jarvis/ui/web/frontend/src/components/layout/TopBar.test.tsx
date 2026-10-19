@@ -137,6 +137,40 @@ describe("TopBar caption on every section", () => {
     }
   });
 
+  it("hands a caption drag to the system instead of moving the window itself", async () => {
+    // The chrome probe only runs inside the desktop shell, so without this the
+    // window stays "a browser tab" and nothing is frameless.
+    (window as unknown as { pywebview?: { api: object } }).pywebview = { api: {} };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, frameless: true, controls: "trailing", platform: "windows" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+    await act(async () => { render(<TopBar />); });
+    const strip = screen.getByTestId("window-drag");
+    // pywebview's own drag region repositions the window from JavaScript, which
+    // Windows never learns about — so Snap would do nothing. The two must not
+    // both be active.
+    expect(strip.className).not.toContain("pywebview-drag-region");
+
+    fireEvent.mouseDown(strip, { button: 0 });
+    const body = JSON.parse(
+      (fetchMock.mock.calls.find(([url]) => url === "/api/window/command")?.[1] as RequestInit)
+        .body as string,
+    );
+    expect(body.action).toBe("begin-move");
+
+    // A right-click belongs to the system menu, not to a drag.
+    fetchMock.mockClear();
+    fireEvent.mouseDown(strip, { button: 2 });
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/window/command")).toBe(false);
+    } finally {
+      delete (window as unknown as { pywebview?: unknown }).pywebview;
+    }
+  });
+
   it.each(["chats", "agents", "agentic-ide-classic", "dictation"] as const)(
     "renders the caption on %s",
     (section) => {
