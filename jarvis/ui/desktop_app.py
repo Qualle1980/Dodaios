@@ -5396,15 +5396,30 @@ class DesktopApp:
         return info
 
     def window_command(self, action: str, view: str | None) -> dict[str, Any]:
-        """Minimize, maximize or close one live window. Worker-thread safe.
+        """Minimize, maximize, close or start dragging one live window.
 
-        A detached view targets only that window. An omitted view targets the main
-        window. Maximize toggles, using the real zoomed state on Windows when
-        the frame hook can read it.
+        Worker-thread safe. A detached view targets only that window. An
+        omitted view targets the main window. Maximize toggles, using the real
+        zoomed state on Windows when the frame hook can read it.
         """
-        from jarvis.ui.window_command import run_window_command
+        from jarvis.ui.window_command import begin_native_move, run_window_command
 
         window = self._detached_windows.get(section_window(view)) if view else self._window
+        if action == "begin-move":
+            # Separate from the button actions: this one blocks for as long as
+            # the user drags, because Windows runs its move loop inside
+            # SendMessageW. The route already calls us on a worker thread.
+            if window is None:
+                return {"ok": False, "reason": "no_window"}
+            try:
+                from jarvis.ui.window_frame import native_hwnd
+
+                return begin_native_move(native_hwnd(window))
+            except Exception:  # noqa: BLE001
+                from loguru import logger
+
+                logger.exception("Could not hand the window drag to the system")
+                return {"ok": False, "reason": "drag_failed"}
         maximized: bool | None = None
         if sys.platform == "win32" and window is not None:
             try:

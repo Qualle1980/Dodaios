@@ -100,7 +100,21 @@ export function TopBar() {
       {/* Modal hubs carry this action inside their own focus scope. */}
       {(solo || !["settings", "plugins"].includes(section)) && <SectionWindowButton />}
       <div
-        className="pywebview-drag-region min-w-0 flex-1"
+        data-testid="window-drag"
+        // Without `frameless` this is a browser tab: no window to drag, and the
+        // pywebview class would be inert anyway. With it, the drag goes to the
+        // system (`begin-move`) instead of pywebview's JavaScript reposition,
+        // because only the system's own move loop brings Snap, the edge
+        // previews and Aero shake. The two must not both run, so the class is
+        // dropped in that case.
+        className={cn("min-w-0 flex-1", !chrome.frameless && "pywebview-drag-region")}
+        onMouseDown={(event) => {
+          // Primary button only: a right-click belongs to the system menu, and
+          // a drag started from a caption button would fight its click.
+          if (!chrome.frameless || event.button !== 0) return;
+          event.preventDefault();
+          chrome.command("begin-move");
+        }}
         onDoubleClick={() => {
           if (chrome.frameless) chrome.command("maximize");
         }}

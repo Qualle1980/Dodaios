@@ -7,6 +7,14 @@ import { cn } from "@/lib/utils";
 import { useEventStore } from "@/store/events";
 import { windowIdentity } from "@/lib/sectionWindows";
 
+/**
+ * What the page may ask the desktop window to do. "begin-move" is not a
+ * button: it hands an in-progress caption drag to the system's own move loop,
+ * so Snap and the edge previews work (see jarvis/ui/window_command.py).
+ */
+export type CaptionButtonAction = "minimize" | "maximize" | "close";
+export type WindowAction = CaptionButtonAction | "begin-move";
+
 export interface DesktopChrome {
   frameless: boolean;
   controls: "leading" | "trailing" | "none";
@@ -21,7 +29,7 @@ const IDLE: DesktopChrome = { frameless: false, controls: "none", maximized: fal
  * provides them, and a fake set would close nothing.
  */
 export function useDesktopChrome(): DesktopChrome & {
-  command: (action: "minimize" | "maximize" | "close") => void;
+  command: (action: WindowAction) => void;
 } {
   const [chrome, setChrome] = useState<DesktopChrome>(IDLE);
 
@@ -43,7 +51,7 @@ export function useDesktopChrome(): DesktopChrome & {
     };
   }, []);
 
-  const command = useCallback((action: "minimize" | "maximize" | "close") => {
+  const command = useCallback((action: WindowAction) => {
     const solo = useEventStore.getState().solo;
     const view = solo ? windowIdentity(window.location.search, useEventStore.getState().activeSection) : null;
     void fetch("/api/window/command", {
@@ -77,7 +85,9 @@ export function WindowControls({
 }: {
   controls: DesktopChrome["controls"];
   maximized: boolean;
-  onCommand: (action: "minimize" | "maximize" | "close") => void;
+  // The buttons emit only the three caption actions; "begin-move" comes from
+  // the drag strip, not from a button. A wider handler still fits here.
+  onCommand: (action: CaptionButtonAction) => void;
 }) {
   const t = useT();
   if (controls === "none") return null;

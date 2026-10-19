@@ -152,7 +152,9 @@ class FullscreenBody(BaseModel):
 
 
 class WindowCommandBody(BaseModel):
-    action: Literal["minimize", "maximize", "close"]
+    # "begin-move" hands an in-progress caption drag to the system's own window
+    # move loop, which is what makes Snap work (see window_command).
+    action: Literal["minimize", "maximize", "close", "begin-move"]
     view: str | None = Field(default=None, max_length=64)
 
 
