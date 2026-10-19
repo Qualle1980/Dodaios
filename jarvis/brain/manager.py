@@ -10825,6 +10825,119 @@ class BrainManager:
             self._active_name, self._fast_model(self._active_name)
         )
 
+    async def _route_text_only_delegation(
+        self, reply: str, user_text: str, *, language: str, may_delegate: bool
+    ) -> str | None:
+        """Router of last resort for a brain that cannot emit ``tool_calls``.
+
+        The normal path for a tool-incapable talker is the intelligent router
+        (``_build_fallback_chain``): a tool-capable provider LEADS the turn and
+        picks ``spawn_worker`` itself. But ``_first_tool_capable_provider``
+        returns ``None`` when no such provider is reachable (no credential,
+        rate-limited, dead) — then nothing in the chain can delegate at all and
+        the brain's own JSON routing envelope is the only rail left.
+
+        This is the same two-part shape every orchestrator uses: a destination
+        validated against a known list and a payload carrying the task. The
+        parsing and the validation already live in ``parse_route_decision``; the
+        transport is the mission stack, exactly as ``spawn_worker`` drives it —
+        ``dispatch()`` persists a PENDING mission and ``run_mission()`` must
+        follow, or the mission sits until the next app start marks it crashed
+        (BUG-016). The target rides the mission prompt as ``Zielort/Kontext``,
+        like ``spawn_worker._build_mission_prompt``; the worker itself is chosen
+        later by ``_worker_factory`` from the step model.
+
+        Returns the text to answer with, or ``None`` when this is an ordinary
+        answer that must stay untouched (which is also every failure case: a
+        badly parsed reply never delegates).
+        """
+        from jarvis.plugins.brain.chatgpt_web import parse_route_decision
+
+        decision = parse_route_decision(reply)
+        if decision.kind == "self":
+            return None
+        if decision.kind == "clarify":
+            # A question back to the user is the whole turn: no mission, no ack.
+            return decision.text
+        if not may_delegate:
+            # The intelligent router led this turn and already had first crack
+            # at the tools, so a second delegation here would duplicate the
+            # work. Still unwrap the envelope: raw JSON must never be shown or
+            # spoken to the user.
+            log.info(
+                "Text-only routing: envelope unwrapped, delegation skipped "
+                "(a tool-capable provider led this turn)."
+            )
+            return decision.text
+
+        from jarvis.brain.factory import (
+            _resolve_kontrollierer,
+            _resolve_mission_manager,
+        )
+        from jarvis.missions.events import coerce_mission_language
+        from jarvis.missions.stream_evidence import is_informational_request
+
+        manager = _resolve_mission_manager()
+        kontrollierer = _resolve_kontrollierer()
+        if manager is None or kontrollierer is None:
+            # Honest: the mission stack has not finished bootstrapping. Never
+            # promise work nobody will run — answer the reply as it came in.
+            log.warning(
+                "Text-only delegation: no mission stack yet (manager=%s, "
+                "kontrollierer=%s) — answering the turn directly.",
+                manager is not None, kontrollierer is not None,
+            )
+            return None
+
+        # The prompt SHAPE decides whether the mission can ever be approved.
+        # A mission whose request is informational is approved on the spoken
+        # answer instead of a diff (``CriticRunner`` + ``is_informational_request``);
+        # an imperative "Aufgabe: ..." lead destroys that detection, so a
+        # delegated question burned all three critic loops and ended in
+        # ``critic_loop_exhausted`` even though the worker had answered
+        # correctly (measured on a live mission, 2026-10-19). A question
+        # therefore leads with the user's own wording; only real work gets the
+        # task shape.
+        target_line = f"Zielort/Kontext: {decision.target}."
+        if is_informational_request(user_text):
+            lines = [user_text.strip(), target_line, f"Details: {decision.text}"]
+            # Self-check: keep the detail line only while it does not flip the
+            # request back to "work with a file deliverable".
+            if not is_informational_request("\n".join(lines)):
+                lines.pop()
+        else:
+            lines = [
+                f"Aufgabe: {decision.text}",
+                target_line,
+                f"Urspruengliche Nutzeranfrage: {user_text}",
+            ]
+        prompt = "\n".join(lines)
+        mission_language = coerce_mission_language(language)
+
+        async def _run() -> None:
+            try:
+                mission_id = await manager.dispatch(
+                    prompt=prompt,
+                    language=mission_language,
+                    source_actor="hauptjarvis",
+                )
+                await kontrollierer.run_mission(mission_id)
+            except asyncio.CancelledError:
+                raise  # app shutdown: let the loop clean up
+            except BaseException:  # noqa: BLE001 — a crash must not kill the turn
+                log.exception("Text-only delegation: background mission crashed")
+
+        try:
+            asyncio.create_task(_run(), name="text-only-delegation")
+        except RuntimeError:  # no running loop (sync context)
+            log.debug("Text-only delegation: no event loop, mission not started")
+            return None
+        log.info(
+            "Text-only delegation: %s -> background mission (target=%s)",
+            self._active_name, decision.target,
+        )
+        return action_phrase("delegate_task_started", language)
+
     def _first_tool_capable_provider(
         self, level: str, *, exclude: str | None = None
     ) -> tuple[str, str | None] | None:
@@ -12960,6 +13073,32 @@ class BrainManager:
             response_text = honest_response
             if full_action_fallback and turn_override is not None:
                 turn_override.receipt.mark_guard_failure("unbacked_action_claim")
+
+        # 3b. Delegation for a brain that cannot emit tool_calls. Placed BEFORE
+        # the history append so a routing envelope never becomes the recorded
+        # assistant text. It only fires when the intelligent router did NOT lead
+        # this turn (``_router_lead_key is None``, i.e. no tool-capable provider
+        # was reachable) — otherwise that router already had first crack at the
+        # tools and must stay the only delegation path. The envelope is unwrapped
+        # either way, so raw JSON never reaches the user.
+        # The cheap shape test comes FIRST: ``_active_can_call_tools()`` builds
+        # the brain instance, and doing that on every ordinary turn is a
+        # side effect (it showed up as a provider being constructed where no
+        # turn asked for it).
+        stripped = response_text.strip()
+        if (
+            stripped.startswith(("{", "```"))
+            and stripped.endswith(("}", "```"))
+            and not self._active_can_call_tools()
+        ):
+            routed = await self._route_text_only_delegation(
+                response_text,
+                user_text,
+                language=honesty_lang,
+                may_delegate=self._router_lead_key is None,
+            )
+            if routed is not None:
+                response_text = routed
 
         # 4. History + Events
         if use_history:
