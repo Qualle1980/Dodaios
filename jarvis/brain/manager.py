@@ -4476,6 +4476,22 @@ class BrainManager:
             )
         )
 
+        # WHO THE USER IS, straight after who the assistant is, and before any
+        # guidance block. Position is not cosmetic: a brain with a prompt cap
+        # keeps only the head of the system prompt (the ChatGPT-web bridge cuts
+        # at 8_000 characters, because every character is typed into the web
+        # composer). This block used to sit after the persona and the standing
+        # instructions, which start at ~1_400 and ~14_600 characters, so the
+        # profile began around 18_000 and was cut away entirely: asked "who am
+        # I", the assistant answered that it did not know the user's name while
+        # USER.md held it all along (live 2026-10-19). Identity is ~1k
+        # characters and belongs where no cap can reach it.
+        if self._user_profile is not None:
+            try:
+                parts.append(self._user_profile.render_for_prompt())
+            except Exception:  # noqa: BLE001 — a profile read must never break a turn
+                pass
+
         # Mandate phase 2 (reactivated 2026-04-28): persona block from
         # JARVIS_PERSONA.md incl. ECHO-PARAPHRASE section and hangup contract.
         # The "effective" loader returns the user's custom system prompt when one
@@ -4500,12 +4516,6 @@ class BrainManager:
                 parts.append(prefs_block)
         except Exception:  # noqa: BLE001
             pass
-
-        if self._user_profile is not None:
-            try:
-                parts.append(self._user_profile.render_for_prompt())
-            except Exception:  # noqa: BLE001
-                pass
 
         # What Jarvis learned across earlier calls and chats (the background
         # review loop in jarvis/memory/learning). A cached snapshot that only
