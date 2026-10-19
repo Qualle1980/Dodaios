@@ -45,8 +45,15 @@ def test_no_output_language_call_pins_its_own_default() -> None:
 
 
 def test_the_two_honesty_guards_share_one_resolution() -> None:
-    """The evidence fallback and the action-honesty guard read one variable."""
+    """The evidence fallback and the action-honesty guard read one variable.
+
+    The invariant is ONE resolution per turn, not one consumer of it: a later
+    layer may legitimately read the same variable (the text-only delegation
+    path does), and that is the behaviour this guard wants. What must never
+    come back is a SECOND ``resolve_output_language`` call for an honesty
+    phrase, which is what let one turn answer in two languages (audit OF-17).
+    """
     source = _MANAGER.read_text(encoding="utf-8")
-    assert "honesty_lang = resolve_output_language(" in source
+    assert source.count("honesty_lang = resolve_output_language(") == 1
     assert source.count("lang=honesty_lang") == 1
-    assert source.count("language=honesty_lang") == 1
+    assert source.count("language=honesty_lang") >= 1
