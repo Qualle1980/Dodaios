@@ -25,18 +25,19 @@ def test_a_minimized_window_is_asked_about_through_its_restore_rect() -> None:
     ) == LAPTOP
 
 
-def test_a_visible_window_is_asked_about_through_its_own_rect() -> None:
-    """Dragged to the other screen and maximized there: that screen wins, not
-    the one the restore rectangle remembers."""
+def test_the_restore_rect_wins_even_when_not_minimized() -> None:
+    """During the restore itself ``IsIconic`` is already false while the window
+    rectangle still holds the old position, so gating on "minimized" left the
+    bug in place. The restore rectangle is correct in every state."""
     assert maximize_reference_rect(
         minimized=False, window_rect=EXTERNAL, restore_rect=LAPTOP
-    ) == EXTERNAL
-
-
-def test_a_missing_window_rect_falls_back_to_the_restore_rect() -> None:
-    assert maximize_reference_rect(
-        minimized=False, window_rect=None, restore_rect=LAPTOP
     ) == LAPTOP
+
+
+def test_without_a_restore_rect_the_window_rect_is_all_there_is() -> None:
+    assert maximize_reference_rect(
+        minimized=False, window_rect=EXTERNAL, restore_rect=None
+    ) == EXTERNAL
 
 
 def test_a_minimized_window_without_a_restore_rect_uses_what_it_has() -> None:
