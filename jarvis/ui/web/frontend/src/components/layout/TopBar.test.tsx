@@ -143,7 +143,9 @@ describe("TopBar caption on every section", () => {
     (window as unknown as { pywebview?: { api: object } }).pywebview = { api: {} };
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ ok: true, frameless: true, controls: "trailing", platform: "windows" }),
+      json: async () => ({
+        ok: true, frameless: true, controls: "trailing", platform: "windows", native_drag: true,
+      }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -199,5 +201,31 @@ describe("TopBar caption on every section", () => {
     expect(minimize.compareDocumentPosition(screen.getByTestId("window-close")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     delete (window as unknown as { pywebview?: unknown }).pywebview;
+  });
+});
+
+describe("TopBar caption drag fallback", () => {
+  it("keeps pywebview's drag region when the shell cannot do the native handoff", async () => {
+    // Reporting the handoff as available where it is not is what left the
+    // window unmovable: the class was dropped and nothing replaced it.
+    (window as unknown as { pywebview?: { api: object } }).pywebview = { api: {} };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true, frameless: true, controls: "trailing", platform: "windows", native_drag: false,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await act(async () => { render(<TopBar />); });
+      const strip = screen.getByTestId("window-drag");
+      expect(strip.className).toContain("pywebview-drag-region");
+
+      fireEvent.mouseDown(strip, { button: 0 });
+      expect(fetchMock.mock.calls.some(([url]) => url === "/api/window/command")).toBe(false);
+    } finally {
+      delete (window as unknown as { pywebview?: unknown }).pywebview;
+    }
   });
 });

@@ -101,17 +101,17 @@ export function TopBar() {
       {(solo || !["settings", "plugins"].includes(section)) && <SectionWindowButton />}
       <div
         data-testid="window-drag"
-        // Without `frameless` this is a browser tab: no window to drag, and the
-        // pywebview class would be inert anyway. With it, the drag goes to the
-        // system (`begin-move`) instead of pywebview's JavaScript reposition,
-        // because only the system's own move loop brings Snap, the edge
-        // previews and Aero shake. The two must not both run, so the class is
-        // dropped in that case.
-        className={cn("min-w-0 flex-1", !chrome.frameless && "pywebview-drag-region")}
+        // EXACTLY ONE drag mechanism runs. The system's own move loop is the
+        // one that brings Snap, the edge previews and Aero shake, so it wins
+        // wherever the shell reports it can do the handoff. Everywhere else —
+        // a browser tab, a host without a marshalling UI thread — pywebview's
+        // drag region stays, because the alternative is a window that cannot be
+        // moved at all (live 2026-10-19). Running both would have them fight.
+        className={cn("min-w-0 flex-1", !chrome.nativeDrag && "pywebview-drag-region")}
         onMouseDown={(event) => {
           // Primary button only: a right-click belongs to the system menu, and
           // a drag started from a caption button would fight its click.
-          if (!chrome.frameless || event.button !== 0) return;
+          if (!chrome.nativeDrag || event.button !== 0) return;
           event.preventDefault();
           chrome.command("begin-move");
         }}

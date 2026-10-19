@@ -19,9 +19,17 @@ export interface DesktopChrome {
   frameless: boolean;
   controls: "leading" | "trailing" | "none";
   maximized: boolean;
+  /**
+   * Whether the desktop shell can hand a caption drag to the system (Snap, the
+   * edge previews, Aero shake). False means keep pywebview's drag region: a
+   * host that cannot do the native handoff must not be left with no drag.
+   */
+  nativeDrag: boolean;
 }
 
-const IDLE: DesktopChrome = { frameless: false, controls: "none", maximized: false };
+const IDLE: DesktopChrome = {
+  frameless: false, controls: "none", maximized: false, nativeDrag: false,
+};
 
 /**
  * The desktop window's own buttons, drawn by the page once the native title
@@ -38,10 +46,15 @@ export function useDesktopChrome(): DesktopChrome & {
     let live = true;
     fetch("/api/window/chrome")
       .then((res) => (res.ok ? res.json() : null))
-      .then((body: { frameless?: boolean; controls?: string } | null) => {
+      .then((body: { frameless?: boolean; controls?: string; native_drag?: boolean } | null) => {
         if (!live || !body) return;
         const controls = body.controls === "leading" || body.controls === "trailing" ? body.controls : "none";
-        setChrome({ frameless: Boolean(body.frameless), controls, maximized: false });
+        setChrome({
+          frameless: Boolean(body.frameless),
+          controls,
+          maximized: false,
+          nativeDrag: Boolean(body.native_drag),
+        });
       })
       .catch((error: unknown) => {
         console.warn("Window chrome is unavailable", error);
