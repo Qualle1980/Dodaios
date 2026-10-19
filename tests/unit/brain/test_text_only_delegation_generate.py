@@ -127,11 +127,11 @@ async def test_generate_leaves_an_ordinary_turn_alone(
     mission, kontrollierer = _MissionManager(), _Kontrollierer()
     _patch_stack(monkeypatch, mission, kontrollierer)
 
-    answer = await _manager("Berlin ist die Hauptstadt.").generate(  # i18n-allow: quotes a German chat turn
-        "was ist die hauptstadt"
-    )
+    reply = "Berlin ist die Hauptstadt."  # i18n-allow: quotes a German chat turn
+    question = "was ist die hauptstadt"  # i18n-allow: quotes a German chat turn
+    answer = await _manager(reply).generate(question)
 
-    assert answer == "Berlin ist die Hauptstadt."  # i18n-allow: quotes a German chat turn
+    assert answer == reply
     await asyncio.sleep(0)
     assert mission.prompts == []
     assert kontrollierer.ran == []
