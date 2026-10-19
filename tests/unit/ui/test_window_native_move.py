@@ -116,7 +116,12 @@ def test_the_marshalled_work_releases_then_posts_a_caption_click(
             calls.append(("send", (getattr(hwnd, "value", hwnd), msg, wparam, lparam)))
             return 0
 
-    monkeypatch.setattr(ctypes, "windll", type("_W", (), {"user32": _User32()})())
+    # raising=False: a non-Windows runner has no ``ctypes.windll`` to replace,
+    # and the message plumbing is worth checking on every OS rather than only
+    # where it can really run.
+    monkeypatch.setattr(
+        ctypes, "windll", type("_W", (), {"user32": _User32()})(), raising=False
+    )
 
     window_command._grab_caption(4242)
 
