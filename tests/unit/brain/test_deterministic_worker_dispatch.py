@@ -4,15 +4,16 @@ An explicit heavy request is identified without a model: ``_should_force_spawn``
 matches an explicit trigger and ``_force_spawn_worker`` calls the spawn tool
 directly, before any provider chain is built. One gate stood in front of that
 path and asked the wrong question. With no worker provider configured it
-refused the whole dispatch unless the TALKER happened to be claude-api or
+refused the whole dispatch unless the TALKER was claude-api or
 gemini — measured on a default install, chatgpt-web, chatgpt-plan, claude-cli,
-ollama and openai were all refused, although the default worker route is the
-Jarvis-Agent bridge and never touches Gemini. The refusal pushed an already
-identified action back onto an LLM routing round it did not need.
+ollama and openai were all refused, although the factory resolves an
+unconfigured worker to the user's ACTIVE brain and builds a real worker for it.
+The refusal pushed an already identified action back onto an LLM routing round
+it did not need.
 
-The gate now asks the mission layer's own routing function whether the default
-route would land on the Gemini API worker, which is the only thing BUG-017 was
-about, and keeps refusing exactly that case.
+The gate now asks the mission layer's own routing function with the same input
+the factory gives it, and refuses only BUG-017's blind Gemini spawn — an
+install with no provider configured at all.
 
 Deterministic — no provider call, no network, no model inference.
 """
@@ -90,18 +91,15 @@ def test_the_default_worker_route_is_viable_for_any_talker(primary: str) -> None
     assert mgr._heavy_worker_provider_viable() is True
 
 
-@pytest.mark.parametrize("primary", ["chatgpt-web", "ollama"])
-def test_a_gemini_api_worker_route_is_still_refused_without_gemini(primary: str) -> None:
-    """BUG-017 kept: that route 403s on an account without Gemini access."""
-    mgr, _, _ = _manager(
-        primary, worker=BrainTierConfig(provider="", model="gemini-3-flash")
-    )
+@pytest.mark.parametrize("primary", ["chatgpt-web", "ollama", "gemini", "claude-api"])
+def test_a_gemini_step_model_cannot_divert_a_resolved_provider(primary: str) -> None:
+    """A resolved provider is a hard lock: the step model routes nothing.
 
-    assert mgr._heavy_worker_provider_viable() is False
-
-
-@pytest.mark.parametrize("primary", ["gemini", "claude-api"])
-def test_the_gemini_route_stays_open_for_an_account_that_has_it(primary: str) -> None:
+    An earlier version of this gate refused these configs, reasoning that a
+    gemini step model would reach the Gemini API worker. It does not — the
+    worker factory resolves the provider first, and only an install with NO
+    provider at all can land there (see test_worker_precheck_parity).
+    """
     mgr, _, _ = _manager(
         primary, worker=BrainTierConfig(provider="", model="gemini-3-flash")
     )
