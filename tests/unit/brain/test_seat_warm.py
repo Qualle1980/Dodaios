@@ -88,3 +88,23 @@ async def test_a_key_billed_provider_is_never_warmed(provider: str) -> None:
 async def test_the_switch_has_exactly_one_reader() -> None:
     assert seat_warm.warm_seat_enabled(_config("chatgpt-web", on=True)) is True
     assert seat_warm.warm_seat_enabled(_config("chatgpt-web", on=False)) is False
+
+
+# --------------------------------------------------------------------------
+# The wiring, not just the module.
+# --------------------------------------------------------------------------
+
+async def test_the_servers_hook_reaches_a_real_registry() -> None:
+    """The first version imported a name the registry module does not have.
+
+    The module tests passed — they hand in their own registry — and the task
+    died with an ImportError that never reached the log, so the warm-up
+    silently did nothing in the running app. This asserts the accessor the
+    server actually uses exists and can be built.
+    """
+    from jarvis.brain.provider_registry import BrainProviderRegistry
+
+    registry = BrainProviderRegistry()
+
+    assert hasattr(registry, "instantiate")
+    assert callable(registry.available)

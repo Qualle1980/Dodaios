@@ -2683,11 +2683,15 @@ class WebServer:
             return
 
         async def _warm_seat() -> None:
-            from jarvis.brain.provider_registry import get_registry
-            from jarvis.brain.seat_warm import warm_chat_seat
-
+            # Everything the task touches lives inside the guard: an import
+            # that does not resolve must reach the log like any other failure,
+            # not escape as a never-retrieved task exception. That is exactly
+            # how the first version of this hook failed silently.
             try:
-                outcome = await warm_chat_seat(self.config, get_registry())
+                from jarvis.brain.provider_registry import BrainProviderRegistry
+                from jarvis.brain.seat_warm import warm_chat_seat
+
+                outcome = await warm_chat_seat(self.config, BrainProviderRegistry())
             except Exception:  # noqa: BLE001 — advisory by contract (AP-30)
                 logger.warning(
                     "Chat-seat warm failed — the first question pays the cold "
