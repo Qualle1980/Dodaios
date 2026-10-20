@@ -136,6 +136,18 @@ def test_chat_chain_has_no_foreign_lead_or_fallback(monkeypatch) -> None:
     for level in ("fast", "deep", "code"):
         chain = mgr._build_fallback_chain(level)
         names = [name for name, _ in chain]
-        assert names and names[0] == seat, level
+        # The seat answers, and only keyless local runtimes join it: no other
+        # account and no stored API key appear, at any level.
+        assert names, level
         assert all(n == seat or background_policy.keyless_local(n) for n in names), names
-        assert mgr._router_lead_key is None
+        # A tool lead is allowed again (a seat brain cannot emit tool_calls at
+        # all), but only a keyless local one, and it leads from the front so
+        # the turn can actually reach a tool. Everything behind it is the seat
+        # the turn falls through to.
+        lead = mgr._router_lead_key
+        if lead is not None:
+            assert background_policy.keyless_local(lead[0]), lead
+            assert names[0] == lead[0], names
+            assert seat in names, names
+        else:
+            assert names[0] == seat, level

@@ -598,16 +598,31 @@ def test_force_spawn_codex_worker_with_codex_talker() -> None:
 
 
 @pytest.mark.parametrize("brain_primary", ["mistral", "openai", "ollama"])
-def test_force_spawn_blocked_when_no_worker_and_nonviable_talker(
+def test_force_spawn_follows_the_active_brain_when_no_worker_is_configured(
     brain_primary: str,
 ) -> None:
-    """Regression guard for the legacy no-worker-configured path: with NO
-    [brain.sub_jarvis].provider set, the factory may fall back to the Gemini API
-    worker, so the conservative talker check still blocks a non-viable talker."""
+    """With no worker configured, the dispatch follows the ACTIVE BRAIN.
+
+    This guard used to assert the opposite, on the premise that the factory
+    "may fall back to the Gemini API worker" without a configured provider.
+    Traced 2026-10-20, that premise is false: ``_live_subagent_provider``
+    resolves an unset ``[brain.worker].provider`` to ``brain.primary``, so the
+    factory builds a worker for the user's own family — asserted below — and
+    never reaches the Gemini API path. Blocking here refused the deterministic
+    dispatch for every talker outside {claude-api, gemini} and pushed an
+    already identified action back onto an LLM routing round.
+
+    BUG-017's real shape — no provider configured at all — is still refused;
+    that case lives in tests/unit/brain/test_worker_precheck_parity.py.
+    """
+    from jarvis.missions.init import _select_subagent_worker_kind
+
+    assert _select_subagent_worker_kind(brain_primary, "") != "gemini"
+
     manager, _executor = _manager_with_worker_provider(
         brain_primary=brain_primary, worker_provider=None,
     )
-    assert manager._should_force_spawn("Bau eine Landingpage") is False
+    assert manager._should_force_spawn("Bau eine Landingpage") is True
 
 
 # ---------------------------------------------------------------------------
