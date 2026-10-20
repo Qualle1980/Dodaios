@@ -4600,6 +4600,8 @@ class Kontrollierer:
                 confidence=verdict.confidence,
                 axes=axes_dict,
                 iteration=iteration,
+                reviewer_family=verdict.reviewer_family,
+                reviewer_independent=verdict.reviewer_independent,
             ),
         )
         await self._manager.store.append_and_publish(env)
