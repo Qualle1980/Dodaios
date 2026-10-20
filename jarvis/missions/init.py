@@ -1213,7 +1213,9 @@ async def bootstrap_missions(
 
     # 2. MissionManager + Recovery (only the primary instance sweeps — #2)
     manager = MissionManager(db_path, bus=bus)
-    recovered = await manager.start(recover=recover_missions)
+    recovered = await manager.start(
+        recover=recover_missions, isolation_root=isolation_root
+    )
     if recovered:
         logger.info("Phase-6 startup-recover: %d stale missions -> FAILED", len(recovered))
     elif not recover_missions:

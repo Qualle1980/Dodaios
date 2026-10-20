@@ -69,6 +69,7 @@ class MissionManager:
         *,
         recover: bool = False,
         stale_after_ms: int = RECOVERY_STALE_AFTER_MS,
+        isolation_root: Path | None = None,
     ) -> list[str]:
         """Open store, optionally run crash-recovery.
 
@@ -105,7 +106,11 @@ class MissionManager:
                 "— not marking non-terminal missions as crash_recovery"
             )
             return []
-        return await startup_recover(self._store, stale_after_ms=stale_after_ms)
+        return await startup_recover(
+            self._store,
+            stale_after_ms=stale_after_ms,
+            isolation_root=isolation_root,
+        )
 
     async def stop(self) -> None:
         if self._started:

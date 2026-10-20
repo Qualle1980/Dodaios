@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from .event_store import MissionEventStore
 from .events import (
@@ -53,6 +54,7 @@ from .events import (
     now_ms,
 )
 from .ownership import owner_is_alive
+from .replay import CRASH_RESUME_REASON, RESUMABLE_FROM, replay_checkpoint
 from .state_machine import MissionState
 
 log = logging.getLogger(__name__)
@@ -109,6 +111,7 @@ async def startup_recover(
     now: int | None = None,
     now_fn: Callable[[], int] = now_ms,
     owner_alive_fn: Callable[[int, int], bool | None] = owner_is_alive,
+    isolation_root: Path | None = None,
 ) -> list[str]:
     """Recover genuinely-orphaned missions; never touch live or finished ones.
 
@@ -132,6 +135,10 @@ async def startup_recover(
         now_fn: clock function (default :func:`now_ms`).
         owner_alive_fn: liveness probe for a stamped ``(pid, start_ms)``
             owner (default :func:`owner_is_alive`); injectable for tests.
+        isolation_root: mission output root. When given, an orphan whose event
+            log shows approved steps is PARKED for resume instead of failed —
+            see :mod:`jarvis.missions.replay`. Without it the sweep behaves
+            exactly as before, so a caller that knows no root loses nothing.
 
     Returns:
         The list of mission_ids actually swept to FAILED (empty if nothing was
@@ -143,6 +150,7 @@ async def startup_recover(
     crash_ids: list[str] = []
     interrupted_ids: list[str] = []
     reconciled_ids: list[str] = []
+    resumable_ids: list[str] = []
     skipped_active: list[str] = []
     owner_dead_ids: list[str] = []
 
@@ -211,6 +219,30 @@ async def startup_recover(
         if owner_dead:
             owner_dead_ids.append(mission_id)
 
+        # 3a. Genuinely orphaned, but the log shows finished work: park it for
+        #     resume instead of failing it. A crash used to cost every approved
+        #     step — the sweep failed the mission and a re-run re-dispatched the
+        #     prompt as a new mission from zero, redoing work that had already
+        #     passed review and already been paid for. Nothing extra is written
+        #     while a mission runs: the checkpoint is REPLAYED from this very
+        #     event log (jarvis/missions/replay.py), which has held the plan,
+        #     the worker/step mapping and the approving verdicts all along.
+        #     The resume path itself is unchanged and already proven.
+        if isolation_root is not None and last_state in RESUMABLE_FROM:
+            replayed = replay_checkpoint(mission_id, prompt, events)
+            if replayed is not None:
+                parked = await _park_for_resume(
+                    store,
+                    mission_id=mission_id,
+                    last_state=last_state,
+                    checkpoint=replayed,
+                    isolation_root=isolation_root,
+                    ts_ms=now_ts,
+                )
+                if parked:
+                    resumable_ids.append(mission_id)
+                    continue
+
         # 3. Genuinely orphaned → sweep to FAILED.
         #    Distinguish "had delivered work" (interrupted delivery) from a bare
         #    empty crash so the Outputs view can surface preserved artifacts.
@@ -257,6 +289,14 @@ async def startup_recover(
             crash_ids.append(mission_id)
         recovered_ids.append(mission_id)
 
+    if resumable_ids:
+        log.warning(
+            "Mission recovery: parked %d interrupted mission(s) for resume "
+            "instead of failing them — their approved steps are not run again: "
+            "%s",
+            len(resumable_ids),
+            resumable_ids,
+        )
     if crash_ids:
         log.warning(
             "Mission recovery: marked %d mission(s) FAILED('crash_recovery'): %s",
@@ -416,3 +456,59 @@ def _delivered_artifacts(events: list[EventEnvelope]) -> list[str]:
             seen.add(entry)
             artifacts.append(entry)
     return artifacts
+
+
+async def _park_for_resume(
+    store: MissionEventStore,
+    *,
+    mission_id: str,
+    last_state: str,
+    checkpoint: dict,
+    isolation_root: Path,
+    ts_ms: int,
+) -> bool:
+    """Write the replayed checkpoint and move the mission to WAITING_CAPACITY.
+
+    Returns False when the checkpoint cannot be written — the caller then
+    falls through to the ordinary sweep, because a park whose checkpoint is
+    missing would strand the mission in a state nothing can resume.
+    """
+    from .capacity import write_checkpoint
+
+    mission_dir = isolation_root / f"mission_{mission_id[:13]}"
+    try:
+        await asyncio.to_thread(mission_dir.mkdir, parents=True, exist_ok=True)
+        path = await asyncio.to_thread(write_checkpoint, mission_dir, checkpoint)
+    except OSError:
+        log.warning(
+            "Mission recovery: could not write the replayed checkpoint for %s "
+            "— failing it as before rather than parking it unresumably",
+            mission_id, exc_info=True,
+        )
+        return False
+
+    env = EventEnvelope(
+        mission_id=mission_id,
+        source_actor="system",
+        ts_ms=ts_ms,
+        payload=MissionStateChanged(
+            from_state=last_state,
+            to_state=MissionState.WAITING_CAPACITY.value,
+            reason=CRASH_RESUME_REASON,
+        ),
+    )
+    await store.append_and_publish(env)
+    await store.upsert_mission(
+        mission_id=mission_id,
+        prompt=str(checkpoint.get("prompt") or ""),
+        state=MissionState.WAITING_CAPACITY.value,
+        language="de",
+        ts_ms=ts_ms,
+    )
+    done = sum(1 for step in checkpoint.get("steps", []) if step.get("done"))
+    log.info(
+        "Mission recovery: %s was interrupted with %d/%d steps approved — "
+        "parked for resume, checkpoint replayed from its event log (%s)",
+        mission_id, done, len(checkpoint.get("steps", [])), path,
+    )
+    return True
