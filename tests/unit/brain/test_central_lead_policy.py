@@ -142,13 +142,16 @@ def test_the_policy_steers_the_turn_when_switched_on() -> None:
 
 def test_switched_off_the_policy_is_not_evaluated() -> None:
     mgr = _manager("off")
-    mgr._first_tool_capable_provider = (  # type: ignore[assignment]
-        lambda level, **kw: _LEAD
-    )
+    searches: list[int] = []
 
-    mode, decision = mgr._central_lead("fast", True)
+    def _lookup():
+        searches.append(1)
+        return _LEAD
+
+    mode, decision = mgr._central_lead(True, _lookup)
 
     assert (mode, decision) == ("off", None)
+    assert not searches, "off must not even cost a candidate search"
     # The legacy branches still route the turn, unchanged.
     assert mgr._build_fallback_chain("fast")[0] == _LEAD
 
@@ -156,7 +159,7 @@ def test_switched_off_the_policy_is_not_evaluated() -> None:
 def test_an_unknown_mode_falls_back_to_shadow() -> None:
     mgr = _manager("nonsense")
 
-    mode, _ = mgr._central_lead("fast", True)
+    mode, _ = mgr._central_lead(True, lambda: _LEAD)
 
     assert mode == "shadow"
 
@@ -169,6 +172,191 @@ def test_a_real_divergence_is_logged_loudly(caplog) -> None:
     decision = LeadDecision(("gemini", "g"), True, "a drifted policy")
 
     with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
-        mgr._audit_central_lead("shadow", decision, _LEAD)
+        mgr._audit_central_lead("shadow", decision, _LEAD, True)
 
     assert any("SHADOW divergence" in r.getMessage() for r in caplog.records)
+
+
+# --------------------------------------------------------------------------
+# One candidate search per turn (finding a lead instantiates brains).
+# --------------------------------------------------------------------------
+
+def _count_searches(mgr: BrainManager) -> list[int]:
+    """Counts candidate searches without changing what they return."""
+    original = mgr._first_tool_capable_provider
+    searches: list[int] = []
+
+    def _counted(level, **kw):
+        searches.append(1)
+        return original(level, **kw)
+
+    mgr._first_tool_capable_provider = _counted  # type: ignore[assignment]
+    return searches
+
+
+def test_shadow_mode_searches_for_a_candidate_exactly_once() -> None:
+    """The policy and the branches beside it ran a search each: 2 instead of 1."""
+    mgr = _manager("shadow")
+    searches = _count_searches(mgr)
+
+    chain = mgr._build_fallback_chain("fast")
+
+    assert len(searches) == 1, f"expected one candidate search, got {len(searches)}"
+    assert chain[0] == _LEAD
+
+
+def test_a_tool_capable_talker_costs_no_candidate_search_in_any_mode() -> None:
+    """An ordinary chat turn on a tool-capable talker: no lead, no search."""
+    for mode in ("off", "shadow", "on"):
+        mgr = _manager(mode)
+        mgr._active_can_call_tools = lambda: True  # type: ignore[assignment]
+        searches = _count_searches(mgr)
+
+        chain = mgr._build_fallback_chain("fast")
+
+        assert not searches, mode
+        assert mgr._router_lead_key is None, mode
+        assert chain[0][0] == "chatgpt-web", mode
+
+
+# --------------------------------------------------------------------------
+# "on" is authoritative.
+# --------------------------------------------------------------------------
+
+def test_on_with_no_lead_does_not_fall_back_to_the_legacy_branches() -> None:
+    """A no-lead decision must END the decision, not pass it to the old path.
+
+    The legacy branches would find a perfectly good lead here, which is the
+    point: in "on" the policy alone decides, so its refusal has to hold.
+    """
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("on")
+    mgr._central_lead = (  # type: ignore[assignment]
+        lambda intelligent, candidate: (
+            "on", LeadDecision(None, False, "policy says no")
+        )
+    )
+
+    chain = mgr._build_fallback_chain("fast")
+
+    assert mgr._router_lead_key is None
+    assert all(name != "ollama" for name, _ in chain), chain
+    assert chain[0][0] == "chatgpt-web"
+
+
+def test_on_with_a_lead_installs_exactly_that_lead() -> None:
+    mgr = _manager("on")
+
+    chain = mgr._build_fallback_chain("fast")
+
+    assert mgr._router_lead_key == _LEAD
+    assert chain[0] == _LEAD
+    assert [name for name, _ in chain].count("ollama") == 1, "no double lead"
+
+
+def test_an_action_turn_with_the_router_off_does_not_fall_through() -> None:
+    """The other fall-through shape: the lead answers the whole turn."""
+    mgr = _manager("on")
+    mgr._config.brain.routing.intelligent_router = False
+    mgr._turn_substantive = False  # type: ignore[attr-defined]
+    mgr._turn_needs_tools = True  # type: ignore[attr-defined]
+
+    chain = mgr._build_fallback_chain("fast")
+
+    assert chain[0] == _LEAD
+    assert mgr._router_lead_key is None, (
+        "no fall-through: the lead owns this answer, the talker does not speak"
+    )
+
+
+def test_on_keeps_the_plan_seat_off_every_paid_provider() -> None:
+    """The seat guard is untouched by who decides the lead."""
+    mgr = _manager("on")
+    mgr._registry._classes["gemini"] = object  # type: ignore[attr-defined]
+    mgr._fast_model = (  # type: ignore[method-assign]
+        lambda name: "qwen3.5:4b" if name == "ollama" else "paid-model"
+    )
+    mgr._brain_cache[("gemini", "paid-model")] = _ToolCapableBrain()
+
+    chain = mgr._build_fallback_chain("fast")
+
+    assert [name for name, _ in chain] == ["ollama", "chatgpt-web"]
+
+
+# --------------------------------------------------------------------------
+# The shadow comparison covers more than the provider name.
+# --------------------------------------------------------------------------
+
+def _divergence(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if "SHADOW divergence" in r.getMessage()
+    ]
+
+
+def test_a_drifted_model_on_the_same_provider_is_a_divergence(caplog) -> None:
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("shadow")
+    decision = LeadDecision(("ollama", "some-other-model"), True, "drifted")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
+        mgr._audit_central_lead("shadow", decision, _LEAD, True)
+
+    assert _divergence(caplog), "a different model is a different lead"
+    assert "model:" in _divergence(caplog)[0]
+
+
+def test_a_drifted_fall_through_is_a_divergence(caplog) -> None:
+    """Same lead, but the talker would no longer get the last word."""
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("shadow")
+    decision = LeadDecision(_LEAD, False, "drifted")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
+        mgr._audit_central_lead("shadow", decision, _LEAD, True)
+
+    assert _divergence(caplog)
+    assert "falls through" in _divergence(caplog)[0]
+
+
+def test_a_missing_lead_on_one_side_is_a_divergence(caplog) -> None:
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("shadow")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
+        mgr._audit_central_lead(
+            "shadow", LeadDecision(None, False, "none"), _LEAD, False
+        )
+
+    assert _divergence(caplog)
+    assert "lead present:" in _divergence(caplog)[0]
+
+
+def test_an_identical_decision_logs_nothing(caplog) -> None:
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("shadow")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
+        mgr._audit_central_lead("shadow", LeadDecision(_LEAD, True, "same"), _LEAD, True)
+
+    assert not _divergence(caplog)
+
+
+def test_the_divergence_warning_carries_only_routing_shape(caplog) -> None:
+    """Provider and model names are routing shape; the turn text is not logged."""
+    from jarvis.brain.routing_policy import LeadDecision
+
+    mgr = _manager("shadow")
+
+    with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
+        mgr._audit_central_lead(
+            "shadow", LeadDecision(("gemini", "g"), True, "drifted"), _LEAD, True
+        )
+
+    message = _divergence(caplog)[0]
+    assert "gemini" in message and "ollama" in message
+    assert "qwen3.5:4b" in message

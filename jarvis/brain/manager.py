@@ -10904,15 +10904,33 @@ class BrainManager:
                 return (name, model)
         return on_voice_key
 
+    def _lead_lookup(self, level: str) -> Callable[[], tuple[str, str | None] | None]:
+        """One memoised candidate search for this turn.
+
+        Finding a lead instantiates brains, so the central policy and the
+        inline branches beside it must share a single search instead of
+        running one each. The lookup is lazy: a turn that never wants a lead
+        never performs it.
+        """
+        cached: list[tuple[str, str | None] | None] = []
+
+        def _lookup() -> tuple[str, str | None] | None:
+            if not cached:
+                cached.append(self._first_tool_capable_provider(level))
+            return cached[0]
+
+        return _lookup
+
     def _central_lead(
-        self, level: str, intelligent: bool
+        self,
+        intelligent: bool,
+        candidate: Callable[[], tuple[str, str | None] | None],
     ) -> tuple[str, LeadDecision | None]:
         """The central lead policy's answer for this turn, and its rollout mode.
 
         Phase 3 of the orchestrator rebuild. Returns ``("off", None)`` when the
-        flag disables the policy, so nothing is computed. The candidate lookup
-        is memoised: the policy and the inline branches it runs beside must not
-        pay for two separate candidate searches.
+        flag disables the policy, so nothing is computed — not even the
+        candidate search, which the caller passes in memoised.
         """
         mode = str(
             getattr(self._config.brain.routing, "central_lead_policy", "shadow")
@@ -10923,13 +10941,6 @@ class BrainManager:
         if mode == "off":
             return ("off", None)
 
-        cached: list[tuple[str, str | None] | None] = []
-
-        def _candidate() -> tuple[str, str | None] | None:
-            if not cached:
-                cached.append(self._first_tool_capable_provider(level))
-            return cached[0]
-
         facts = TurnFacts(
             active=self._active_name,
             active_can_call_tools=False,  # the caller already established this
@@ -10937,13 +10948,14 @@ class BrainManager:
             needs_tools=bool(getattr(self, "_turn_needs_tools", False)),
             intelligent_router=intelligent,
         )
-        return (mode, decide_lead(facts, _candidate))
+        return (mode, decide_lead(facts, candidate))
 
     def _audit_central_lead(
         self,
         mode: str,
         decision: LeadDecision | None,
         tool_lead: tuple[str, str | None] | None,
+        live_falls_through: bool,
     ) -> None:
         """In shadow mode: report when the policy and the live path disagree.
 
@@ -10951,15 +10963,44 @@ class BrainManager:
         the evidence that turning it on changes nothing. A divergence is a real
         finding (one of the two sides was edited alone) and must be loud, so it
         is logged at warning level with both answers.
+
+        Compared, in this order: whether a lead exists at all, which provider
+        it is, which model, and whether the turn still falls through to the
+        talker. A lead with a drifted MODEL and the same provider name, or the
+        same lead that no longer returns the voice to the talker, is as real a
+        divergence as a different provider — and the shape, not the user's
+        turn, is what gets logged: provider and model names only, never the
+        conversation.
         """
         if mode != "shadow" or decision is None:
             return
-        if decision.lead == tool_lead:
+        differences: list[str] = []
+        if decision.leads != (tool_lead is not None):
+            differences.append(
+                f"lead present: policy={decision.leads} live={tool_lead is not None}"
+            )
+        else:
+            policy_lead = decision.lead or (None, None)
+            live_lead = tool_lead or (None, None)
+            if policy_lead[0] != live_lead[0]:
+                differences.append(
+                    f"provider: policy={policy_lead[0]!r} live={live_lead[0]!r}"
+                )
+            if policy_lead[1] != live_lead[1]:
+                differences.append(
+                    f"model: policy={policy_lead[1]!r} live={live_lead[1]!r}"
+                )
+        if decision.falls_through != live_falls_through:
+            differences.append(
+                f"falls through to the talker: policy={decision.falls_through} "
+                f"live={live_falls_through}"
+            )
+        if not differences:
             return
         log.warning(
-            "Central lead policy SHADOW divergence: policy would use %s (%s), "
-            "the live path used %s. The live path still decided this turn.",
-            decision.lead, decision.reason, tool_lead,
+            "Central lead policy SHADOW divergence (%s). Policy reason: %s. "
+            "The live path still decided this turn.",
+            "; ".join(differences), decision.reason,
         )
 
     def _turn_has_action_intent(self, user_text: str) -> bool:
@@ -11042,18 +11083,34 @@ class BrainManager:
             # as the branches below, and the flag says what its answer is worth
             # — "shadow" compares and logs, "on" steers, "off" skips it. The
             # branches stay until the policy is the default so the rollback is
-            # a config change, not a revert; the lookup is memoised so both
-            # sides pick from ONE candidate search.
-            policy_mode, policy_lead = self._central_lead(level, intelligent)
-            if policy_mode == "on" and policy_lead is not None and policy_lead.leads:
-                if policy_lead.falls_through:
-                    self._router_lead_key = policy_lead.lead
-                tool_lead = policy_lead.lead
-                chain.append(policy_lead.lead)
-                log.info(
-                    "Central lead policy: %s leads this turn (%s).",
-                    policy_lead.lead[0], policy_lead.reason,
-                )
+            # a config change, not a revert.
+            #
+            # ONE candidate search per turn, shared by both sides: finding a
+            # lead instantiates brains, and the policy plus the branch below it
+            # each ran their own search in shadow mode (measured: 2 instead of
+            # 1). A talker that can call tools never reaches this block, so it
+            # still pays for no search at all.
+            lead_lookup = self._lead_lookup(level)
+            policy_mode, policy_lead = self._central_lead(intelligent, lead_lookup)
+            if policy_mode == "on":
+                # Authoritative: in "on" the policy ALONE decides the tool lead.
+                # Reached through an elif, a no-lead decision fell into the
+                # legacy branches below and they could still install one, so
+                # "on" was never actually the single decider it claims to be.
+                if policy_lead is not None and policy_lead.leads:
+                    if policy_lead.falls_through:
+                        self._router_lead_key = policy_lead.lead
+                    tool_lead = policy_lead.lead
+                    chain.append(policy_lead.lead)
+                    log.info(
+                        "Central lead policy: %s leads this turn (%s).",
+                        policy_lead.lead[0], policy_lead.reason,
+                    )
+                else:
+                    log.debug(
+                        "Central lead policy: no lead for this turn (%s).",
+                        policy_lead.reason if policy_lead is not None else "no decision",
+                    )
             elif intelligent and getattr(self, "_turn_substantive", False):
                 # INTELLIGENT ROUTER (2026-06-21 mandate): a tool-capable provider
                 # LEADS every substantive turn and the LLM itself picks the tool
@@ -11062,7 +11119,7 @@ class BrainManager:
                 # generate()'s chain loop FALLS THROUGH to the chosen talker (see
                 # ``_router_lead_key``), so the user keeps their selected brain's
                 # voice. The deterministic gates stay as high-precision guardrails.
-                helper = self._first_tool_capable_provider(level)
+                helper = lead_lookup()
                 if helper is not None and helper[0] != active:
                     log.info(
                         "Intelligent router: %s cannot call tools — %s leads this "
@@ -11076,7 +11133,7 @@ class BrainManager:
                 # Flag OFF (kill switch): the narrower action-intent delegation —
                 # delegate ONLY when a deterministic action signal fired, and let
                 # the tool-capable provider answer the whole turn (no fall-through).
-                helper = self._first_tool_capable_provider(level)
+                helper = lead_lookup()
                 if helper is not None and helper[0] != active:
                     log.info(
                         "Tool delegation (legacy): %s cannot call tools — leading "
@@ -11084,7 +11141,12 @@ class BrainManager:
                     )
                     tool_lead = helper
                     chain.append(helper)
-            self._audit_central_lead(policy_mode, policy_lead, tool_lead)
+            self._audit_central_lead(
+                policy_mode,
+                policy_lead,
+                tool_lead,
+                self._router_lead_key is not None,
+            )
 
         # 0. Deep/code intents: dedicated deep_brain first (e.g. gemini via
         #    subscription — bypasses /v1/messages API quota). Bug fix 2026-04-29:
