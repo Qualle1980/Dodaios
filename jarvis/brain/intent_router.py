@@ -50,37 +50,74 @@ _TOKEN_RE = re.compile(r"[\w'’-]+", re.UNICODE)
 # Utterances that are complete in themselves and need no reasoning whatsoever.
 # Matched against the WHOLE text (anchored), never as a substring: "danke" is a
 # one-shot, "Danke, und wie geht das jetzt weiter?" is a real question.
-_ONE_SHOT_PATTERNS = [
-    # Greetings — DE / EN / ES
-    r"hallo|hi|hey|moin|servus|na\b",  # i18n-allow: DE greeting
-    r"gu?ten\s+(?:morgen|tag|abend)",  # i18n-allow: DE greeting
-    r"hello|hey\s+there|good\s+(?:morning|afternoon|evening)",
-    r"hola|buenos\s+d[íi]as|buenas\s+(?:tardes|noches)",
-    # Thanks
-    r"danke(?:\s+(?:sch[öo]n|dir|sehr|vielmals))?|vielen\s+dank",  # i18n-allow: DE thanks
-    r"thanks(?:\s+a\s+lot)?|thank\s+you|cheers",
-    r"gracias(?:\s+mil)?|muchas\s+gracias",
-    # Acknowledgements
-    r"ok(?:ay)?|alles\s+klar|passt|verstanden|geht\s+klar",  # i18n-allow: DE acknowledgement
-    r"alright|all\s+right|got\s+it|understood|sounds\s+good|sure",
-    r"vale|entendido|de\s+acuerdo",
-    # Farewells
-    r"tsch[üu]ss|ciao|bis\s+(?:sp[äa]ter|dann|morgen)|gute\s+nacht",  # i18n-allow: DE farewell
-    r"bye|goodbye|see\s+you|good\s+night",
-    r"adi[óo]s|hasta\s+luego|buenas\s+noches",
+# The SAME patterns, now carrying the kind they match. The grouping was a
+# comment before; naming it lets a caller answer a greeting or a clock
+# question without a model (:mod:`jarvis.brain.one_shot_reply`) instead of
+# only knowing that the turn is trivial. No pattern was added or changed —
+# one vocabulary, two readers.
+_ONE_SHOT_BY_KIND: dict[str, tuple[str, ...]] = {
+    "greeting": (
+        r"hallo|hi|hey|moin|servus|na\b",  # i18n-allow: DE greeting
+        r"gu?ten\s+(?:morgen|tag|abend)",  # i18n-allow: DE greeting
+        r"hello|hey\s+there|good\s+(?:morning|afternoon|evening)",
+        r"hola|buenos\s+d[íi]as|buenas\s+(?:tardes|noches)",
+    ),
+    "thanks": (
+        r"danke(?:\s+(?:sch[öo]n|dir|sehr|vielmals))?|vielen\s+dank",  # i18n-allow: DE thanks
+        r"thanks(?:\s+a\s+lot)?|thank\s+you|cheers",
+        r"gracias(?:\s+mil)?|muchas\s+gracias",
+    ),
+    "ack": (
+        r"ok(?:ay)?|alles\s+klar|passt|verstanden|geht\s+klar",  # i18n-allow: DE acknowledgement
+        r"alright|all\s+right|got\s+it|understood|sounds\s+good|sure",
+        r"vale|entendido|de\s+acuerdo",
+    ),
+    "farewell": (
+        r"tsch[üu]ss|ciao|bis\s+(?:sp[äa]ter|dann|morgen)|gute\s+nacht",  # i18n-allow: DE farewell
+        r"bye|goodbye|see\s+you|good\s+night",
+        r"adi[óo]s|hasta\s+luego|buenas\s+noches",
+    ),
     # Clock / date — a single lookup with one right answer.
-    r"wie\s+sp[äa]e?t\s+(?:ist\s+es|haben\s+wir)",  # i18n-allow: DE clock question
-    r"wie\s?viel\s+uhr\s+(?:ist\s+es|haben\s+wir)",  # i18n-allow: DE clock question
-    r"welchen?\s+(?:tag|datum)\s+(?:ist|haben\s+wir)\s*(?:heute|wir)?",  # i18n-allow
-    r"welches\s+datum\s+(?:ist\s+heute|haben\s+wir)",  # i18n-allow: DE date question
-    r"what(?:'s|\s+is)\s+the\s+(?:time|date)|what\s+time\s+is\s+it",
-    r"what\s+day\s+is\s+(?:it|today)",
-    r"qu[ée]\s+hora\s+es|qu[ée]\s+d[íi]a\s+es(?:\s+hoy)?",
-]
+    "clock": (
+        r"wie\s+sp[äa]e?t\s+(?:ist\s+es|haben\s+wir)",  # i18n-allow: DE clock question
+        r"wie\s?viel\s+uhr\s+(?:ist\s+es|haben\s+wir)",  # i18n-allow: DE clock question
+        r"what\s+time\s+is\s+it|what(?:'s|\s+is)\s+the\s+time",
+        r"qu[ée]\s+hora\s+es",
+    ),
+    "date": (
+        r"welchen?\s+(?:tag|datum)\s+(?:ist|haben\s+wir)\s*(?:heute|wir)?",  # i18n-allow
+        r"welches\s+datum\s+(?:ist\s+heute|haben\s+wir)",  # i18n-allow: DE date question
+        r"what(?:'s|\s+is)\s+the\s+date|what\s+day\s+is\s+(?:it|today)",
+        r"qu[ée]\s+d[íi]a\s+es(?:\s+hoy)?",
+    ),
+}
+_ONE_SHOT_PATTERNS = [p for group in _ONE_SHOT_BY_KIND.values() for p in group]
 _ONE_SHOT_RE = re.compile(
     r"^(?:" + "|".join(_ONE_SHOT_PATTERNS) + r")[\s.!?,…]*$",
     re.IGNORECASE,
 )
+_ONE_SHOT_KIND_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        kind,
+        re.compile(r"^(?:" + "|".join(group) + r")[\s.!?,…]*$", re.IGNORECASE),
+    )
+    for kind, group in _ONE_SHOT_BY_KIND.items()
+)
+
+
+def one_shot_kind(user_text: str) -> str | None:
+    """Which closed-set one-shot this utterance is, or None.
+
+    ``classify`` answers *how capable* a model has to be; this answers *what
+    was said*, for the turns a model does not need to see at all.
+    """
+    text = user_text.strip()
+    if not text:
+        return None
+    for kind, pattern in _ONE_SHOT_KIND_RES:
+        if pattern.match(text):
+            return kind
+    return None
 
 # A leading acknowledgement before the real request ("Ok, öffne Notepad").  # i18n-allow
 # Stripped before the opener test so the ack does not hide the verb — and it
