@@ -1,8 +1,8 @@
 """Answer a closed-set one-shot without asking a model.
 
-Measured live on 2026-10-20: "danke" took 7.8 s, because the turn went the
-whole way to ChatGPT like any other. There is nothing for a model to decide
-there — the intent router already recognises the utterance as a closed-set
+Measured live on 2026-10-20: "danke" took 7.8 s, because the turn walked the
+whole provider chain and waited for a model answer. There is nothing for a
+model to decide there — the intent router already recognises the utterance as a closed-set
 one-shot, and a thank-you, a greeting, a farewell, an acknowledgement, the
 time and the date all have one right answer that this process can give in
 microseconds.

@@ -12404,8 +12404,8 @@ class BrainManager:
 
         # A closed-set one-shot is answered here, with no model at all.
         # Measured live 2026-10-20: "danke" cost 7.8 s because it travelled
-        # the whole chain to ChatGPT like any other turn — and there is
-        # nothing in a thank-you for a model to decide. The matcher is the
+        # the whole provider chain and waited for a model answer — and there
+        # is nothing in a thank-you for a model to decide. The matcher is the
         # intent router's existing one, anchored to the WHOLE utterance, so
         # "Danke, und wie weiter?" is not one of these and still goes to the
         # model; an unknown reply language returns None for the same reason.
