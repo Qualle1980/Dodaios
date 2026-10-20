@@ -2657,10 +2657,14 @@ class WebServer:
                 from jarvis.brain.seat_warm import warm_chat_seat
 
                 outcome = await warm_chat_seat(self.config, BrainProviderRegistry())
-            except Exception:  # noqa: BLE001 — advisory by contract (AP-30)
+            except Exception as exc:  # noqa: BLE001 — advisory by contract (AP-30)
+                # The cause belongs IN the line: this handler's `exc_info` did
+                # not render under the app's logging setup, so two live
+                # failures were reported with no reason at all and had to be
+                # chased by reproducing them by hand.
                 logger.warning(
-                    "Chat-seat warm failed — the first question pays the cold "
-                    "conversation it pays today.", exc_info=True
+                    "Chat-seat warm failed ({}) — the first question pays the "
+                    "cold conversation it pays today.", repr(exc)
                 )
                 return
             logger.info("Chat-seat warm: %s", outcome)
