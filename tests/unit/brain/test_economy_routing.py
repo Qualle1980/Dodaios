@@ -41,7 +41,7 @@ _SMALLTALK = ("danke", "wie spaet ist es", "hallo")
 _SUBSTANTIVE = (
     "fix the typo in the README",
     "add a health endpoint to the gateway",
-    "fuehre die tests aus",
+    "fuehre die tests aus",  # i18n-allow: simulated German user utterance
 )
 
 
@@ -150,7 +150,7 @@ def test_an_explicit_trigger_dispatches_without_a_routing_round() -> None:
     mgr, _ = _manager()
 
     assert mgr._should_force_spawn(
-        "mach bitte einen subagent der die landingpage baut"
+        "mach bitte einen subagent der die landingpage baut"  # i18n-allow
     ) is True
 
 
@@ -199,7 +199,7 @@ def test_a_provider_without_a_resolved_model_still_leads_its_own_chain() -> None
         "premise: this provider resolves no model in a default config"
     )
 
-    chain = _chain(mgr, "was ist die hauptstadt von frankreich")
+    chain = _chain(mgr, "was ist die hauptstadt von frankreich")  # i18n-allow
 
     assert chain[0][0] == "ollama"
     billed_before = [n for n, _ in chain[: _index_of(chain, "ollama")] if n in _KEY_BILLED]
