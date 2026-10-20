@@ -26,7 +26,7 @@ _NOON = _dt.datetime(2026, 10, 20, 14, 7)
     "text,kind",
     [
         ("danke", "thanks"),  # i18n-allow: simulated German utterance
-        ("hallo", "greeting"),  # i18n-allow
+        ("hallo", "greeting"),  # i18n-allow — recognised, deliberately unanswered
         ("ok", "ack"),
         ("thanks", "thanks"),
         ("what time is it", "clock"),
@@ -52,6 +52,15 @@ def test_an_opener_in_front_of_a_real_request_is_not_one(text: str) -> None:
 
 def test_a_thank_you_is_answered_without_a_model() -> None:
     assert one_shot_reply("danke", "de") is not None  # i18n-allow
+
+
+@pytest.mark.parametrize("greeting", ["hallo", "hi", "hello", "hola"])  # i18n-allow
+def test_a_greeting_still_reaches_the_model(greeting: str) -> None:
+    """A greeting opens an interaction - character and whatever the assistant
+    can see belong there, so it is NOT answered from a pool, even though the
+    router recognises it."""
+    assert one_shot_kind(greeting) == "greeting"
+    assert one_shot_reply(greeting, "de") is None
 
 
 def test_the_clock_answer_is_computed_not_guessed() -> None:

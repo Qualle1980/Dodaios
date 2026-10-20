@@ -12,6 +12,10 @@ Deliberately narrow:
 * only the kinds :func:`jarvis.brain.intent_router.one_shot_kind` recognises,
   which match the WHOLE utterance — "Danke, und wie weiter?" is not one of
   them and still reaches the model;
+* a GREETING is deliberately NOT answered here, although the router
+  recognises one. A greeting usually opens an interaction, and that is where
+  the assistant's own character and whatever it can see belong; the turns
+  below are closing noise or a lookup, where a canned line loses nothing;
 * only the languages a line exists for. An unknown reply language returns
   ``None`` and the turn proceeds normally, because a German answer to a
   Portuguese greeting is worse than a slow one;
@@ -35,11 +39,6 @@ _LINES: dict[str, dict[str, tuple[str, ...]]] = {
         "de": ("Gerne.", "Jederzeit.", "Immer gern."),  # i18n-allow: runtime reply
         "en": ("Anytime.", "Happy to help.", "Sure thing."),
         "es": ("De nada.", "Cuando quieras.", "Un placer."),  # i18n-allow
-    },
-    "greeting": {
-        "de": ("Hallo.", "Hey.", "Moin."),  # i18n-allow: runtime reply
-        "en": ("Hello.", "Hey.", "Hi there."),
-        "es": ("Hola.", "Buenas.", "¿Qué tal?"),  # i18n-allow
     },
     "ack": {
         "de": ("Alles klar.", "Passt.", "Verstanden."),  # i18n-allow: runtime reply
@@ -90,6 +89,11 @@ def one_shot_reply(
     if kind in _LINES:
         pool = _LINES[kind].get(language)
         return _rotate(pool, user_text.strip().lower()) if pool else None
+    if kind not in ("clock", "date"):
+        # A recognised kind with no line of its own — a greeting — belongs to
+        # the model. Falling through to the computed branch below would have
+        # answered "hallo" with today's date.
+        return None
 
     template = (_CLOCK if kind == "clock" else _DATE).get(language)
     if template is None:
