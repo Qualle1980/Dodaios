@@ -276,10 +276,21 @@ def _voice(user: str, answer: str = "Okay.") -> Turn:
 
 
 async def _drain(loop: JarvisLearningLoop) -> None:
+    """Wait for the loop's review tasks, however long they take to be scheduled.
+
+    This used to poll every 10 ms for 50 rounds — a half-second wall-clock
+    budget for work that is only asynchronous, not slow. On a loaded CI shard
+    half a second runs out, and the whole file then failed on timing rather
+    than on behaviour (Windows shard 2, PR #26, two IDs the ratchet reported as
+    new; both passed on a re-run of the same commit). Awaiting the tasks
+    themselves removes the race: a review that completes keeps the test fast,
+    and a review that genuinely hangs still fails inside the bound below.
+    """
     for _ in range(50):
-        if not loop._tasks:
+        tasks = set(loop._tasks)
+        if not tasks:
             return
-        await asyncio.sleep(0.01)
+        await asyncio.wait(tasks, timeout=5.0)
     raise AssertionError("reviews did not finish")
 
 
