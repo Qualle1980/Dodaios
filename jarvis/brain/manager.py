@@ -11049,6 +11049,19 @@ class BrainManager:
             # provider's answer as final.
             if name in self._dead_providers:
                 continue
+            # A provider the health ledger last saw UNREACHABLE is not a lead.
+            # The dead-list above is per session and starts empty after every
+            # restart, so a local runtime that is not installed was re-probed
+            # on the first turn of each run and the turn paid its connect
+            # timeout. Measured 2026-10-20 on a machine without Ollama: the
+            # lead spent 11 s of a 20 s answer building a tool surface for
+            # qwen3.5:4b and then timing out, before the seat answered. The
+            # ledger already knew ("Provider health: ollama/brain none ->
+            # unreachable"); nothing asked it. ``effective`` expires a
+            # transient outcome by itself, so a runtime that comes back is
+            # tried again without a restart.
+            if self._lead_is_unreachable(name):
+                continue
             model = (
                 self._deep_model(name) if level in ("deep", "code")
                 else self._fast_model(name)
@@ -11061,6 +11074,24 @@ class BrainManager:
                     continue
                 return (name, model)
         return on_voice_key
+
+    def _lead_is_unreachable(self, provider: str) -> bool:
+        """True when the health ledger last saw ``provider``'s brain offline.
+
+        Only ``unreachable`` counts — a network/DNS/timeout answer, which is
+        what an uninstalled local runtime gives. An account problem (no key,
+        no credits) is deliberately NOT a reason to skip a lead here: that is
+        the chain walk's business and it has its own honest reporting.
+        """
+        try:
+            from jarvis.brain import provider_health_ledger as ledger
+            from jarvis.brain import provider_test as pt
+
+            outcome = ledger.get_ledger().effective(provider, ledger.MODALITY_BRAIN)
+        except Exception:  # noqa: BLE001 — an unreadable ledger must not veto a lead
+            log.debug("Lead health probe failed for %s", provider, exc_info=True)
+            return False
+        return bool(outcome is not None and outcome.status == pt.UNREACHABLE)
 
     def _lead_lookup(self, level: str) -> Callable[[], tuple[str, str | None] | None]:
         """One memoised candidate search for this turn.
