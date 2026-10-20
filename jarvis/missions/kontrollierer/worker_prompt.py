@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from jarvis.core.secret_scrub import scrub_secrets
+
 # Prepended to every worker prompt. Kept provider-agnostic and language-neutral:
 # it must hold no matter what language the request arrived in (the leak was
 # "German request -> German code"), so it can never be a de/en toggle.
@@ -118,9 +120,17 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
         f"{ARTIFACT_LANGUAGE_DIRECTIVE}\n\n{OUTPUT_SHAPE_DIRECTIVE}\n\n"
         f"{SUPERVISOR_BOUNDARY_DIRECTIVE}\n\n{FINAL_REPORT_DIRECTIVE}"
     )
-    if prior_block and prior_block.strip():
-        return f"{head}\n\n{prior_block}\n\n{step_prompt}"
-    return f"{head}\n\n{step_prompt}"
+    body = (
+        f"{head}\n\n{prior_block}\n\n{step_prompt}"
+        if prior_block and prior_block.strip()
+        else f"{head}\n\n{step_prompt}"
+    )
+    # Last stop before the text becomes a worker CLI's input. The step prompt
+    # is already redacted where it is built, but the reflection block is critic
+    # output about a diff and a log, so it is not under that guarantee — and
+    # this is the one place every decomposition path, every CLI and every
+    # iteration passes through. Redacting twice costs nothing.
+    return scrub_secrets(body)
 
 
 __all__ = [

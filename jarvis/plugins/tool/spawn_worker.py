@@ -41,6 +41,7 @@ from jarvis.brain.ack_brain.spawn_announcement import SpawnAnnouncementComposer
 from jarvis.core.bus import EventBus
 from jarvis.core.events import JarvisAgentAnnouncement, JarvisAgentBackgroundCompleted
 from jarvis.core.protocols import ExecutionContext, ToolResult
+from jarvis.core.secret_scrub import scrub_secrets
 from jarvis.missions.events import coerce_mission_language
 from jarvis.missions.manager import MissionManager
 from jarvis.missions.stream_evidence import (
@@ -255,7 +256,7 @@ def _bounded_context_hints(context_hints: list[str] | None) -> list[str]:
         hint = re.sub(r"\s{2,}", " ", hint).strip()
         if not hint:
             continue
-        hints.append(hint[:_MAX_CONTEXT_HINT_CHARS])
+        hints.append(scrub_secrets(hint)[:_MAX_CONTEXT_HINT_CHARS])
         if len(hints) >= _MAX_CONTEXT_HINTS:
             break
     return hints
@@ -345,7 +346,14 @@ def _build_mission_prompt(
         return ""
     # Prepend the standing quality directive so a lazy/minimal brief from the
     # router tier cannot downgrade the deliverable to a stub (2026-05-31 fix).
-    return f"{_QUALITY_DIRECTIVE}\n\n{body}"
+    #
+    # The whole brief is redacted on the way out, not just the hints: a key
+    # the person typed is an ordinary sentence to every layer above, and this
+    # prompt becomes a third-party CLI's input, its log, and a stored mission
+    # event. Measured 2026-10-20: an `sk-...` in the recent conversation
+    # reached the mission prompt verbatim. Redacting is a safety net, not the
+    # guarantee - credentials belong in `get_secret` and never in a prompt.
+    return scrub_secrets(f"{_QUALITY_DIRECTIVE}\n\n{body}")
 
 
 class SpawnWorkerTool:
