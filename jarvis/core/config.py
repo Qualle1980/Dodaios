@@ -1274,6 +1274,18 @@ class BrainRoutingConfig(BaseModel):
     # delegation). See manager._build_fallback_chain / the router fall-through.
     intelligent_router: bool = True
 
+    # Central lead policy (orchestrator rebuild, phase 3). Who leads a turn is
+    # decided by jarvis.brain.routing_policy.decide_lead — one pure function
+    # instead of branches inside the chain assembly, so the decision and its
+    # reason exist before any provider is picked. Rollout flag:
+    #   "shadow" (default) — the policy decides and its answer is compared with
+    #       the inline branches that still steer the turn; a divergence is
+    #       logged. Behaviour is bit-for-bit the previous one.
+    #   "on"  — the policy's decision steers the turn.
+    #   "off" — the policy is not even evaluated (full rollback).
+    # Read in manager._build_fallback_chain.
+    central_lead_policy: Literal["off", "shadow", "on"] = "shadow"
+
     # Per-mission MCP relevance filter (mirror of the router's plugin-relevance
     # gate, one layer below). A mission WORKER runs --permission-mode
     # bypassPermissions, so every exported MCP server is actually reachable; an
