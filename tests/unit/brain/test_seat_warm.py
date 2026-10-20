@@ -57,8 +57,8 @@ def _config(primary: str, *, on: bool) -> JarvisConfig:
 async def test_a_plan_seat_is_opened_once() -> None:
     registry = _Registry()
 
-    first = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=True), registry)
-    second = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=True), registry)
+    first = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=True), registry, delay_s=0)
+    second = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=True), registry, delay_s=0)
 
     assert registry.instantiated == ["chatgpt-web"], "exactly one warm per process"
     assert "opened" in first and "already" in second
@@ -68,7 +68,7 @@ async def test_a_plan_seat_is_opened_once() -> None:
 async def test_it_does_nothing_unless_the_install_asked() -> None:
     registry = _Registry()
 
-    outcome = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=False), registry)
+    outcome = await seat_warm.warm_chat_seat(_config("chatgpt-web", on=False), registry, delay_s=0)
 
     assert outcome == "off"
     assert registry.instantiated == []
@@ -79,7 +79,7 @@ async def test_a_key_billed_provider_is_never_warmed(provider: str) -> None:
     """The warm turn is one nobody asked for: it may never spend money."""
     registry = _Registry()
 
-    outcome = await seat_warm.warm_chat_seat(_config(provider, on=True), registry)
+    outcome = await seat_warm.warm_chat_seat(_config(provider, on=True), registry, delay_s=0)
 
     assert registry.instantiated == []
     assert "not a plan seat" in outcome
@@ -108,3 +108,26 @@ async def test_the_servers_hook_reaches_a_real_registry() -> None:
 
     assert hasattr(registry, "instantiate")
     assert callable(registry.available)
+
+
+async def test_the_attempt_waits_for_the_seat_to_come_up() -> None:
+    """Scheduled at boot the attempt failed 0.2 s later: a browser-backed seat
+    is not reachable that early. The wait is for a dependency, not a retry -
+    after it the attempt is made exactly once."""
+    registry = _Registry()
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    import asyncio as _asyncio
+
+    real_sleep = _asyncio.sleep
+    _asyncio.sleep = _record  # type: ignore[assignment]
+    try:
+        await seat_warm.warm_chat_seat(_config("chatgpt-web", on=True), registry)
+    finally:
+        _asyncio.sleep = real_sleep  # type: ignore[assignment]
+
+    assert slept == [seat_warm.WARM_DELAY_S]
+    assert registry.instantiated == ["chatgpt-web"]
