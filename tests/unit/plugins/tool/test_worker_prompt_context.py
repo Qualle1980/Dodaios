@@ -103,3 +103,44 @@ def test_control_characters_are_flattened() -> None:
     bounded = _bounded_context_hints(["a\x00b\x07c\nd"])
 
     assert bounded == ["a b c d"]
+
+
+# --------------------------------------------------------------------------
+# The other two channels that become an agent's input.
+# --------------------------------------------------------------------------
+
+def test_a_coding_pane_is_not_typed_a_credential() -> None:
+    """An Agentic-IDE brief carries the recent conversation to resolve
+    references, and is typed into a third-party agent's pane and recorded in
+    its transcript. ``sanitize_prompt`` is the one place that text becomes an
+    agent's input, which is why the control characters are dropped there too.
+    """
+    from jarvis.agentic_ide.session import sanitize_prompt
+
+    cleaned = sanitize_prompt(f"fix the gateway, my key is {_KEY}")
+
+    assert _KEY not in cleaned
+    assert "fix the gateway" in cleaned
+
+
+def test_naming_an_env_variable_is_not_a_credential() -> None:
+    """Over-redaction would delete the task: only a key SHAPE is redacted."""
+    from jarvis.agentic_ide.session import sanitize_prompt
+
+    assert sanitize_prompt("set OPENAI_API_KEY in the env file") == (
+        "set OPENAI_API_KEY in the env file"
+    )
+
+
+def test_a_credential_quoted_by_the_critic_does_not_reach_the_worker() -> None:
+    """The reflection block is critic output about a diff and a log, so it is
+    not covered by the redaction at the mission-prompt builder."""
+    from jarvis.missions.kontrollierer.worker_prompt import compose_worker_prompt
+
+    prompt = compose_worker_prompt(
+        f"Prior feedback: the test log printed {_TOKEN}", "fix the build"
+    )
+
+    assert _TOKEN not in prompt
+    assert "fix the build" in prompt, "the task itself survives"
+    assert "Prior feedback" in prompt, "so does the correction context"

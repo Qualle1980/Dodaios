@@ -589,9 +589,19 @@ def sanitize_prompt(text: str, *, keep_newlines: bool = False) -> str:
     and ``\\t`` still do not survive: a lone carriage return IS the submit
     keystroke, and a tab is a completion key. Runs of blank lines collapse to
     one, so a stray gap cannot push the prompt out of the visible pane.
+    Credentials are redacted here as well, for the same reason the control
+    characters are: this is the one place text becomes an agent's input. A key
+    the person typed is an ordinary sentence to every layer above, and a brief
+    carries the recent conversation to resolve references - so without this the
+    key would be typed into a third-party agent's pane and recorded in its
+    transcript. A safety net, not the guarantee: credentials belong in
+    ``get_secret`` (AGENTS.md §3/AP-2, AP-12).
     """
+    from jarvis.core.secret_scrub import scrub_secrets
+
     from .transcript import strip_ansi
 
+    text = scrub_secrets(text)
     kept: list[str] = []
     for ch in strip_ansi(text):
         if keep_newlines and ch == "\n":
