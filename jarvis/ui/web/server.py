@@ -96,6 +96,7 @@ REALTIME_WARM_BOOT_DELAY_S = 5.0
 # Both surfaces schedule onto ONE event loop in a desktop boot, so the task
 # name is what keeps that boot from warming the same transports twice.
 REALTIME_WARM_TASK_NAME = "realtime-transport-warm"
+CHAT_SEAT_WARM_TASK_NAME = "chat-seat-warm"
 _REGISTRY_BOOTSTRAP_STOP_TIMEOUT_S = 5.0
 
 
@@ -2628,6 +2629,42 @@ class WebServer:
 
         self._appshot_shortcut_task = loop.create_task(_arm(), name="appshot-shortcut")
 
+    def _schedule_chat_seat_warm(self) -> None:
+        """Open the plan seat's conversation off the boot path, when asked to.
+
+        Switched on per install (``[brain.routing] warm_seat_on_boot``) and
+        refused for any provider that bills a key — see
+        :mod:`jarvis.brain.seat_warm` for why both guards exist. Boot never
+        waits for it: a failure leaves the first question paying exactly what
+        it pays today.
+        """
+        existing = getattr(self, "_chat_seat_warm_task", None)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("Chat-seat warm not scheduled — no running event loop.")
+            return
+
+        async def _warm_seat() -> None:
+            from jarvis.brain.provider_registry import get_registry
+            from jarvis.brain.seat_warm import warm_chat_seat
+
+            try:
+                outcome = await warm_chat_seat(self.config, get_registry())
+            except Exception:  # noqa: BLE001 — advisory by contract (AP-30)
+                logger.warning(
+                    "Chat-seat warm failed — the first question pays the cold "
+                    "conversation it pays today.", exc_info=True
+                )
+                return
+            logger.info("Chat-seat warm: %s", outcome)
+
+        self._chat_seat_warm_task = loop.create_task(
+            _warm_seat(), name=CHAT_SEAT_WARM_TASK_NAME
+        )
+
     def _schedule_realtime_transport_warm(self) -> None:
         """Pre-open the selected realtime transports off the boot path.
 
@@ -3075,6 +3112,7 @@ class WebServer:
         # browser-only install has no desktop shell to warm the realtime
         # transport for it.
         self._schedule_realtime_transport_warm()
+        self._schedule_chat_seat_warm()
         self._schedule_appshot_shortcut()
         # Browser provisioning includes a Chromium probe and may need Linux
         # system libraries. Leave it to explicit browser use/setup; boot and

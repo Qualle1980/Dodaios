@@ -1274,6 +1274,15 @@ class BrainRoutingConfig(BaseModel):
     # delegation). See manager._build_fallback_chain / the router fall-through.
     intelligent_router: bool = True
 
+    # Open the plan seat's conversation once after boot, so the FIRST question
+    # does not pay for it. Measured 2026-10-20: a fresh web-seat conversation
+    # costs ~12 s of browser setup (effort menu, prompt entry, send) that a
+    # reused one does in 1.5 s. OFF by default on purpose — it is a provider
+    # call nobody asked for, so it belongs to installs that chose it. Read by
+    # jarvis.brain.seat_warm.warm_seat_enabled (AP-31), which also refuses
+    # every provider that bills a key.
+    warm_seat_on_boot: bool = False
+
     # Central lead policy (orchestrator rebuild, phase 3). Who leads a turn is
     # decided by jarvis.brain.routing_policy.decide_lead — one pure function
     # instead of branches inside the chain assembly, so the decision and its
