@@ -176,12 +176,16 @@ _TASK_TIME_BUDGET_S: float = 1380.0
 # One critic subprocess call (mirrors critic.runner.DEFAULT_TIMEOUT_SECONDS).
 _CRITIC_TIME_RESERVE_S: float = 240.0
 
-# Leads the first worker prompt of a step resumed from a capacity checkpoint.
+# Leads the first worker prompt of a resumed step. Deliberately says nothing
+# about WHY the earlier attempt stopped: since 2026-10-20 a checkpoint is also
+# replayed from the event log after a crash (jarvis/missions/replay.py), so the
+# old wording ("the provider ran out of capacity") would have told the worker
+# something untrue about half the resumes. The cause is not what the worker
+# needs; the state of the workspace is.
 _RESUME_NOTE: Final[str] = (
     "RESUMED TASK: this workspace already contains the partial work of an "
-    "earlier attempt at this task, which stopped when the provider ran out of "
-    "capacity. Inspect it and continue from it; do not start over or redo "
-    "finished parts."
+    "earlier attempt at this task, which stopped before it was finished. "
+    "Inspect it and continue from it; do not start over or redo finished parts."
 )
 
 

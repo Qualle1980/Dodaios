@@ -6,7 +6,6 @@ the first part of stderr (500 characters, secret-scrubbed) are stored.
 from __future__ import annotations
 
 import logging
-import re
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -17,30 +16,12 @@ from typing import Any
 
 from jarvis.core.paths import cli_usage_db_path, ensure_user_dirs
 
+# One vocabulary for both callers: the worker-prompt path redacts with the
+# same patterns, and two copies would drift apart.
+from jarvis.core.secret_scrub import scrub_secrets
+
 log = logging.getLogger(__name__)
 
-
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{36}"),
-    re.compile(r"gho_[A-Za-z0-9]{36}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{80,}"),
-    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
-    re.compile(r"ya29\.[0-9A-Za-z_-]{50,}"),
-    re.compile(r"xox[bpoa]-[A-Za-z0-9-]{20,}"),
-    re.compile(r"sk_(live|test)_[A-Za-z0-9]{20,}"),
-    re.compile(r"rk_(live|test)_[A-Za-z0-9]{20,}"),
-    re.compile(r"(?i)(?:authorization|api[_-]?key|bearer)[\s:=]+[A-Za-z0-9._-]{16,}"),
-)
-
-
-def scrub_secrets(text: str) -> str:
-    """Replaces known secret patterns with ``<REDACTED>``."""
-    if not text:
-        return ""
-    for pattern in _SECRET_PATTERNS:
-        text = pattern.sub("<REDACTED>", text)
-    return text
 
 
 @dataclass(frozen=True, slots=True)
