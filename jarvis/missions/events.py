@@ -94,6 +94,11 @@ class CriticVerdictReady(_PayloadBase):
     confidence: float
     axes: dict[str, dict[str, Any]] = Field(default_factory=dict)
     iteration: int
+    #: Which subscription family graded, and whether it was independent of the
+    #: builder. ``None`` means the producer did not record it (an event written
+    #: before this field existed) — never a synonym for "independent".
+    reviewer_family: str = ""
+    reviewer_independent: bool | None = None
 
 
 class WorkerCorrectionRequired(_PayloadBase):

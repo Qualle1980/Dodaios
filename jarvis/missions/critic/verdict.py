@@ -75,10 +75,34 @@ class CriticVerdict(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     suggested_next_action: NextAction
 
+    # --- Stamped by the runner, never asked of the model ---
+    #
+    # Who graded, and whether that reviewer was independent of the builder. A
+    # review by the family that wrote the code is still worth having, but it
+    # must not be reported as if another party had checked the work, so the
+    # answer travels with the verdict instead of living only in a log line.
+    # ``None`` means the runner did not record it (an older event, a test
+    # fixture); it is NOT a synonym for "independent".
+    reviewer_family: str = ""
+    reviewer_independent: bool | None = None
+
 
 # --- Schema export (for openclaw agent --json-schema <inline-json>) ---
+#
+# The runner-stamped fields are removed from the exported schema: it is the
+# contract the grading model is handed, and a model asked for
+# ``reviewer_independent`` would answer the question about itself.
+_RUNNER_STAMPED: Final[tuple[str, ...]] = ("reviewer_family", "reviewer_independent")
 
-CRITIC_JSON_SCHEMA: Final[dict] = CriticVerdict.model_json_schema()
+
+def _model_facing_schema() -> dict:
+    schema = CriticVerdict.model_json_schema()
+    for name in _RUNNER_STAMPED:
+        schema.get("properties", {}).pop(name, None)
+    return schema
+
+
+CRITIC_JSON_SCHEMA: Final[dict] = _model_facing_schema()
 
 
 # --- Aggregation helpers ---
