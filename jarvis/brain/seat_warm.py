@@ -34,6 +34,14 @@ log = logging.getLogger(__name__)
 #: anyone: the reply is read and dropped.
 WARM_PROMPT = "ok"
 
+#: How long to wait after boot before the single warm attempt.
+#:
+#: Measured 2026-10-20: scheduled at boot the attempt failed 0.2 s later,
+#: because a browser-backed seat is not reachable yet — its bridge needs about
+#: a minute to report ready. This is a wait for a dependency, not a retry:
+#: after it, the attempt is made exactly once and a failure stays a failure.
+WARM_DELAY_S = 120.0
+
 _warmed: set[str] = set()
 
 
@@ -43,8 +51,12 @@ def warm_seat_enabled(config: Any) -> bool:
     return bool(getattr(routing, "warm_seat_on_boot", False))
 
 
-async def warm_chat_seat(config: Any, registry: Any) -> str:
+async def warm_chat_seat(
+    config: Any, registry: Any, *, delay_s: float = WARM_DELAY_S
+) -> str:
     """Open the seat's conversation. Returns what happened, for the log."""
+    import asyncio
+
     from jarvis.brain.background_policy import seat_bound
 
     provider = str(getattr(getattr(config, "brain", None), "primary", "") or "")
@@ -57,6 +69,11 @@ async def warm_chat_seat(config: Any, registry: Any) -> str:
     if provider in _warmed:
         return "already warmed this process"
     _warmed.add(provider)
+
+    if delay_s > 0:
+        # Off the critical path by construction: nothing awaits this task, so
+        # sleeping here costs boot nothing and lets the seat come up first.
+        await asyncio.sleep(delay_s)
 
     brain = registry.instantiate(provider)
     request = BrainRequest(
