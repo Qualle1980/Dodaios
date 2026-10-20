@@ -11353,6 +11353,23 @@ class BrainManager:
             if fast:
                 chain.append((active, fast))
 
+        if not fast and not deep:
+            # The active provider resolved NO model for this level, so none of
+            # the branches above put it on its own chain and the next family
+            # inherits the turn. Measured 2026-10-20 with brain.primary set to
+            # a local runtime that has no model tag yet: the chain began with
+            # claude-api and the selected provider appeared nowhere, so an
+            # ordinary chat turn moved onto a stored key the user never pointed
+            # it at. The registry lists a provider because its plugin loaded,
+            # never because a credential exists, so nothing downstream catches
+            # that. Keep the selected provider at the front on its own default
+            # — the same repair the plan-seat branch below already performs,
+            # which is why that branch then finds it present and stands down.
+            # A provider that cannot answer without a model still fails here
+            # and the chain continues; what it no longer does is hand the turn
+            # to another family before its own was ever tried.
+            chain.append((active, None))
+
         # 2. Explicit tier fallbacks from jarvis.toml. These must run before
         # generic cross-provider probing so runtime matches healthcheck order.
         available = set(self._registry.available())
