@@ -10,8 +10,8 @@ microseconds.
 Deliberately narrow:
 
 * only the kinds :func:`jarvis.brain.intent_router.one_shot_kind` recognises,
-  which match the WHOLE utterance — "Danke, und wie weiter?" is not one of
-  them and still reaches the model;
+  which match the WHOLE utterance, so a thank-you followed by a real
+  question is not one of them and still reaches the model;
 * a GREETING is deliberately NOT answered here, although the router
   recognises one. A greeting usually opens an interaction, and that is where
   the assistant's own character and whatever it can see belong; the turns
