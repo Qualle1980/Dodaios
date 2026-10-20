@@ -51,6 +51,7 @@ from jarvis.brain.local_context import LOCAL_CONTEXT_MARKER
 # classifier (provider_test.classify_provider_error) so the live fallback chain and
 # the API-Keys badge can never disagree on "out of credits / over budget" (AP-22).
 from jarvis.brain.provider_test import BILLING_LIMIT_MARKERS
+from jarvis.brain.routing_policy import MODES, LeadDecision, TurnFacts, decide_lead
 from jarvis.brain.spawn_gate import effort_warrants_delegation
 from jarvis.core.bus import EventBus
 from jarvis.core.config import (
@@ -9160,22 +9161,57 @@ class BrainManager:
         without silencing every action request (AP-6: never couple routing to a
         hardcoded talker provider).
 
-        Only the LEGACY no-worker-configured path keeps the conservative
-        ``brain.primary in {claude-api, gemini}`` check, because there the mission
-        factory may fall back to the Gemini API worker, which 403s on an account
-        without Gemini access (the original BUG-017, 2026-05-13)."""
+        With NO worker configured the factory does NOT route to a "no provider"
+        default: ``_live_subagent_provider`` resolves the provider to the ACTIVE
+        brain, and the resulting kind decides the worker (a ``subjarvis`` kind
+        is not a Jarvis-Agent worker any more — that one was removed; it falls
+        through to the subscription-first cross-family last resort). So this
+        precheck asks the mission layer's OWN pure routing function with the
+        SAME input the factory gives it, or the two answer differently.
+
+        The one case left to refuse is BUG-017 (2026-05-13): an install with
+        nothing configured at all whose step model routes to the Gemini API
+        worker, which 403s without Gemini access. A resolved provider means the
+        user picked that family, and an unreachable worker then raises
+        ``WorkerCapacityUnavailable`` or fails legibly — it is never replaced by
+        a metered key behind the user's back (missions/capacity.py).
+
+        The legacy check here was ``brain.primary in {claude-api, gemini}``,
+        which refused the whole deterministic dispatch for every other talker —
+        measured on a default install: chatgpt-web, chatgpt-plan, claude-cli,
+        ollama and openai all got False. An explicit "build me X" was pushed
+        back onto an LLM routing round it did not need (AP-6: never couple
+        routing to a hardcoded talker provider).
+
+        ``brain.worker.model`` stands in for the per-step model the factory
+        reads. It only decides anything when NOTHING is configured, because a
+        resolved provider is a hard lock no step model can divert; the factory
+        stays the authority either way."""
         try:
             sub = getattr(self._config.brain, "worker", None)
             worker_provider = (getattr(sub, "provider", "") or "").strip().lower()
+            step_model = (getattr(sub, "model", "") or "").strip()
+            primary = (self._config.brain.primary or "").strip().lower()
         except Exception:  # noqa: BLE001 — config hiccup must not block dispatch
             return True
         if worker_provider:
             return True
+        # The factory's own fallback when no worker provider is configured.
+        provider = primary
         try:
-            primary = (self._config.brain.primary or "").strip().lower()
-        except Exception:  # noqa: BLE001
-            primary = ""
-        return primary in ("claude-api", "gemini")
+            from jarvis.missions.init import (  # noqa: PLC0415
+                _select_subagent_worker_kind,
+            )
+
+            kind = _select_subagent_worker_kind(provider or None, step_model)
+        except Exception:  # noqa: BLE001 — never block dispatch on an import
+            log.debug("worker viability: kind lookup failed", exc_info=True)
+            return True
+        if kind != "gemini":
+            return True
+        # The Gemini API worker. Reached with a resolved provider only when the
+        # user picked gemini themselves; with none it is BUG-017's blind spawn.
+        return bool(provider)
 
     async def _honest_failure_readback(
         self,
@@ -10964,7 +11000,36 @@ class BrainManager:
         if db:
             order.append(db)
         order += ["gemini", "claude-api", "openai", "openrouter", "grok", "nvidia", "groq"]
+        def _leftover_rank(name: str) -> tuple[int, str]:
+            # A candidate with a configured model first: a lead has to name
+            # a model to call one. Several local runtimes are registered on
+            # every install and usually only one is configured, so plain
+            # alphabetical order could hand the lead to a runtime with an
+            # empty model that can never answer. Ordering, not filtering: a
+            # runtime that resolves its model at call time stays a usable lead.
+            model = self._fast_model(name) or self._deep_model(name) or ""
+            return (0 if str(model).strip() else 1, name)
+
+        # Everything else the registry offers closes the list, in a stable
+        # order. The list above names only key-billed providers, so without
+        # this a keyless install (local runtime only) and a plan-seat talker
+        # (see the seat narrowing below) found NO lead at all: the tool turn
+        # then ran toolless, and a ChatGPT plan/web talker could never reach
+        # the delegation tools that hand coding work to Codex CLI / Claude
+        # Code. Enumerated from the registry, never a second name list (AP-21).
+        order += sorted(
+            (name for name in available if name not in order), key=_leftover_rank
+        )
+        from jarvis.brain.background_policy import seat_successors
         from jarvis.brain.voice_key import bills_voice_key
+
+        # A plan-seat talker (signed-in subscription, no key slot) may only be
+        # led by what the seat policy permits — itself and keyless local
+        # runtimes. ``_build_fallback_chain`` drops a lead outside that set
+        # anyway (the seat filter there), so picking one here produced a lead
+        # the chain never reached. Narrowing with the SAME policy function
+        # keeps one source of truth and lets a local lead actually survive.
+        order = seat_successors(skip, order)
 
         # The realtime voice key leads a turn only when no other provider can
         # call tools (mandate 2026-09-29: that key pays for the voice call).
@@ -10996,6 +11061,105 @@ class BrainManager:
                     continue
                 return (name, model)
         return on_voice_key
+
+    def _lead_lookup(self, level: str) -> Callable[[], tuple[str, str | None] | None]:
+        """One memoised candidate search for this turn.
+
+        Finding a lead instantiates brains, so the central policy and the
+        inline branches beside it must share a single search instead of
+        running one each. The lookup is lazy: a turn that never wants a lead
+        never performs it.
+        """
+        cached: list[tuple[str, str | None] | None] = []
+
+        def _lookup() -> tuple[str, str | None] | None:
+            if not cached:
+                cached.append(self._first_tool_capable_provider(level))
+            return cached[0]
+
+        return _lookup
+
+    def _central_lead(
+        self,
+        intelligent: bool,
+        candidate: Callable[[], tuple[str, str | None] | None],
+    ) -> tuple[str, LeadDecision | None]:
+        """The central lead policy's answer for this turn, and its rollout mode.
+
+        Phase 3 of the orchestrator rebuild. Returns ``("off", None)`` when the
+        flag disables the policy, so nothing is computed — not even the
+        candidate search, which the caller passes in memoised.
+        """
+        mode = str(
+            getattr(self._config.brain.routing, "central_lead_policy", "shadow")
+            or "shadow"
+        ).strip().lower()
+        if mode not in MODES:
+            mode = "shadow"
+        if mode == "off":
+            return ("off", None)
+
+        facts = TurnFacts(
+            active=self._active_name,
+            active_can_call_tools=False,  # the caller already established this
+            substantive=bool(getattr(self, "_turn_substantive", False)),
+            needs_tools=bool(getattr(self, "_turn_needs_tools", False)),
+            intelligent_router=intelligent,
+        )
+        return (mode, decide_lead(facts, candidate))
+
+    def _audit_central_lead(
+        self,
+        mode: str,
+        decision: LeadDecision | None,
+        tool_lead: tuple[str, str | None] | None,
+        live_falls_through: bool,
+    ) -> None:
+        """In shadow mode: report when the policy and the live path disagree.
+
+        Silence means the central policy reproduces today's routing exactly —
+        the evidence that turning it on changes nothing. A divergence is a real
+        finding (one of the two sides was edited alone) and must be loud, so it
+        is logged at warning level with both answers.
+
+        Compared, in this order: whether a lead exists at all, which provider
+        it is, which model, and whether the turn still falls through to the
+        talker. A lead with a drifted MODEL and the same provider name, or the
+        same lead that no longer returns the voice to the talker, is as real a
+        divergence as a different provider — and the shape, not the user's
+        turn, is what gets logged: provider and model names only, never the
+        conversation.
+        """
+        if mode != "shadow" or decision is None:
+            return
+        differences: list[str] = []
+        if decision.leads != (tool_lead is not None):
+            differences.append(
+                f"lead present: policy={decision.leads} live={tool_lead is not None}"
+            )
+        else:
+            policy_lead = decision.lead or (None, None)
+            live_lead = tool_lead or (None, None)
+            if policy_lead[0] != live_lead[0]:
+                differences.append(
+                    f"provider: policy={policy_lead[0]!r} live={live_lead[0]!r}"
+                )
+            if policy_lead[1] != live_lead[1]:
+                differences.append(
+                    f"model: policy={policy_lead[1]!r} live={live_lead[1]!r}"
+                )
+        if decision.falls_through != live_falls_through:
+            differences.append(
+                f"falls through to the talker: policy={decision.falls_through} "
+                f"live={live_falls_through}"
+            )
+        if not differences:
+            return
+        log.warning(
+            "Central lead policy SHADOW divergence (%s). Policy reason: %s. "
+            "The live path still decided this turn.",
+            "; ".join(differences), decision.reason,
+        )
 
     def _turn_has_action_intent(self, user_text: str) -> bool:
         """Best-effort, provider-agnostic 'this turn wants a tool/desktop action'
@@ -11073,7 +11237,39 @@ class BrainManager:
             intelligent = bool(
                 getattr(self._config.brain.routing, "intelligent_router", True)
             )
-            if intelligent and getattr(self, "_turn_substantive", False):
+            # Phase 3: the central lead policy. It decides from the same facts
+            # as the branches below, and the flag says what its answer is worth
+            # — "shadow" compares and logs, "on" steers, "off" skips it. The
+            # branches stay until the policy is the default so the rollback is
+            # a config change, not a revert.
+            #
+            # ONE candidate search per turn, shared by both sides: finding a
+            # lead instantiates brains, and the policy plus the branch below it
+            # each ran their own search in shadow mode (measured: 2 instead of
+            # 1). A talker that can call tools never reaches this block, so it
+            # still pays for no search at all.
+            lead_lookup = self._lead_lookup(level)
+            policy_mode, policy_lead = self._central_lead(intelligent, lead_lookup)
+            if policy_mode == "on":
+                # Authoritative: in "on" the policy ALONE decides the tool lead.
+                # Reached through an elif, a no-lead decision fell into the
+                # legacy branches below and they could still install one, so
+                # "on" was never actually the single decider it claims to be.
+                if policy_lead is not None and policy_lead.leads:
+                    if policy_lead.falls_through:
+                        self._router_lead_key = policy_lead.lead
+                    tool_lead = policy_lead.lead
+                    chain.append(policy_lead.lead)
+                    log.info(
+                        "Central lead policy: %s leads this turn (%s).",
+                        policy_lead.lead[0], policy_lead.reason,
+                    )
+                else:
+                    log.debug(
+                        "Central lead policy: no lead for this turn (%s).",
+                        policy_lead.reason if policy_lead is not None else "no decision",
+                    )
+            elif intelligent and getattr(self, "_turn_substantive", False):
                 # INTELLIGENT ROUTER (2026-06-21 mandate): a tool-capable provider
                 # LEADS every substantive turn and the LLM itself picks the tool
                 # via its tool-use loop + the router system prompt — no signal-word
@@ -11081,7 +11277,7 @@ class BrainManager:
                 # generate()'s chain loop FALLS THROUGH to the chosen talker (see
                 # ``_router_lead_key``), so the user keeps their selected brain's
                 # voice. The deterministic gates stay as high-precision guardrails.
-                helper = self._first_tool_capable_provider(level)
+                helper = lead_lookup()
                 if helper is not None and helper[0] != active:
                     log.info(
                         "Intelligent router: %s cannot call tools — %s leads this "
@@ -11095,7 +11291,7 @@ class BrainManager:
                 # Flag OFF (kill switch): the narrower action-intent delegation —
                 # delegate ONLY when a deterministic action signal fired, and let
                 # the tool-capable provider answer the whole turn (no fall-through).
-                helper = self._first_tool_capable_provider(level)
+                helper = lead_lookup()
                 if helper is not None and helper[0] != active:
                     log.info(
                         "Tool delegation (legacy): %s cannot call tools — leading "
@@ -11103,6 +11299,12 @@ class BrainManager:
                     )
                     tool_lead = helper
                     chain.append(helper)
+            self._audit_central_lead(
+                policy_mode,
+                policy_lead,
+                tool_lead,
+                self._router_lead_key is not None,
+            )
 
         # 0. Deep/code intents: dedicated deep_brain first (e.g. gemini via
         #    subscription — bypasses /v1/messages API quota). Bug fix 2026-04-29:
@@ -11151,6 +11353,23 @@ class BrainManager:
             if fast:
                 chain.append((active, fast))
 
+        if not fast and not deep:
+            # The active provider resolved NO model for this level, so none of
+            # the branches above put it on its own chain and the next family
+            # inherits the turn. Measured 2026-10-20 with brain.primary set to
+            # a local runtime that has no model tag yet: the chain began with
+            # claude-api and the selected provider appeared nowhere, so an
+            # ordinary chat turn moved onto a stored key the user never pointed
+            # it at. The registry lists a provider because its plugin loaded,
+            # never because a credential exists, so nothing downstream catches
+            # that. Keep the selected provider at the front on its own default
+            # — the same repair the plan-seat branch below already performs,
+            # which is why that branch then finds it present and stands down.
+            # A provider that cannot answer without a model still fails here
+            # and the chain continues; what it no longer does is hand the turn
+            # to another family before its own was ever tried.
+            chain.append((active, None))
+
         # 2. Explicit tier fallbacks from jarvis.toml. These must run before
         # generic cross-provider probing so runtime matches healthcheck order.
         available = set(self._registry.available())
@@ -11185,16 +11404,24 @@ class BrainManager:
             chain.append((name, preferred or m_fast or m_deep))
 
         # A plan-seat talker (signed-in subscription, no key slot) is never
-        # led or replaced by another account: no tool lead, deep_brain or
-        # configured/cross-provider fallback. Only keyless local runtimes may
-        # follow it; a tool turn it cannot serve runs without tools instead.
-        # A seat with no configured model still answers on the plan's default.
+        # replaced by another ACCOUNT: no deep_brain, no configured or
+        # cross-provider fallback, and no key-billed tool lead. Only keyless
+        # local runtimes may follow it — and lead it, since a seat brain cannot
+        # emit tool_calls at all; without that lead a tool turn runs without
+        # tools instead. A seat with no configured model still answers on the
+        # plan's default.
         from jarvis.brain.background_policy import seat_bound, seat_successors
 
         allowed = set(seat_successors(active, [name for name, _ in chain]))
         chain = [entry for entry in chain if entry[0] in allowed]
         if seat_bound(active) and all(name != active for name, _ in chain):
-            chain.insert(0, (active, None))
+            # BEHIND a surviving tool lead, never ahead of it. The lead is
+            # there to pick the tool, and generate() falls through to the seat
+            # when it picks none. Inserted at the front, the seat answered the
+            # turn first — toolless — and the lead was never reached, so a
+            # ChatGPT plan/web talker could not delegate anything.
+            at = 1 if tool_lead is not None and chain[:1] == [tool_lead] else 0
+            chain.insert(at, (active, None))
         if tool_lead is not None and tool_lead[0] not in allowed:
             tool_lead = None
             self._router_lead_key = None

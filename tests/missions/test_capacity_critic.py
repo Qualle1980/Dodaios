@@ -13,6 +13,7 @@ revised 2026-10-07).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -179,9 +180,20 @@ async def test_spent_codex_critic_grades_on_the_claude_subscription(
     assert verdict.verdict == "approve" and graded == ["claude"]
 
 
-async def test_spent_claude_critic_grades_on_the_codex_subscription(
+async def test_the_independent_subscription_grades_when_it_has_capacity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """The configured family built the code, so another connected plan reviews.
+
+    Until 2026-10-20 the configured family graded first and the other one was
+    the fallback; this asserted that a SPENT claude handed over to codex, and
+    with it that the spent window was remembered. The handover is now the
+    normal case — an independent reviewer is preferred whenever a connected
+    subscription has capacity, and no paid key is ever used to buy that
+    independence. Claude is therefore not called at all here, so it learns
+    nothing about its own window; that arming is asserted where claude really
+    is attempted (``test_spent_window_on_the_critic_raises_capacity_not_a_paid_fallback``).
+    """
     _patch_direct(monkeypatch, stdout=SESSION_LIMIT, returncode=1)
     _pin(monkeypatch, codex_login=True)
     monkeypatch.setattr("jarvis.codex_quota_state.codex_in_quota_cooldown", lambda **_k: False)
@@ -197,7 +209,30 @@ async def test_spent_claude_critic_grades_on_the_codex_subscription(
     verdict = await _review(tmp_path)
     assert verdict.verdict == "approve"
     assert seen["model"] == ""  # a Claude model id is never handed to codex
-    assert claude_in_quota_cooldown()  # the spent window is remembered
+    assert verdict.reviewer_family == "codex"
+    assert verdict.reviewer_independent is True
+
+
+async def test_the_builders_own_family_is_marked_as_not_independent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no other plan connected, the builder's family reviews — and says so.
+
+    A self-review still catches an empty diff, a failed build or a missed
+    requirement, so it is worth having. What it must not do is reach the
+    mission log looking like a second opinion, which is why the verdict now
+    carries who graded instead of only a log line.
+    """
+    verdict_json = json.dumps(_approve_verdict().model_dump())
+    _patch_direct(monkeypatch, stdout=verdict_json, returncode=0)
+    _pin(monkeypatch, codex_login=False)  # claude is the only connected plan
+    _no_paid_critic(monkeypatch)
+
+    verdict = await _review(tmp_path)
+
+    assert verdict.verdict == "approve"
+    assert verdict.reviewer_family == "claude"
+    assert verdict.reviewer_independent is False
 
 
 # --- What counts as a capacity signal ---------------------------------------------

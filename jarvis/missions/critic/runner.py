@@ -1688,7 +1688,11 @@ class CriticRunner:
                 adversarial_reframe=adversarial_reframe,
             )
             if api_verdict is not None:
-                return api_verdict
+                return _stamp_reviewer(
+                    api_verdict,
+                    _critic_family(api_provider),
+                    builder=_critic_family(primary_provider),
+                )
             logger.warning(
                 "CriticRunner: in-process API critic (%r) produced no "
                 "schema-valid verdict; trying the next viable family.",
@@ -1758,10 +1762,24 @@ class CriticRunner:
         """
         configured = _critic_family(primary_provider)
         first: tuple[CapacityWaitReason, str, str] | None = None
-        for family in dict.fromkeys((configured, *_CRITIC_SUBSCRIPTION_FALLBACK)):
+        # An INDEPENDENT reviewer first. The configured family is the one the
+        # worker just built with (both read the same chain), so grading there
+        # is the builder checking itself. Another CONNECTED SUBSCRIPTION costs
+        # nothing extra, so when one has capacity it reviews; the builder's own
+        # family stays the last resort and the verdict then says so rather than
+        # presenting a self-review as a second opinion. No paid key is used to
+        # force independence — the order only ever moves between subscriptions.
+        independent_first = [
+            family for family in _CRITIC_SUBSCRIPTION_FALLBACK if family != configured
+        ]
+        for family in dict.fromkeys((*independent_first, configured)):
             reason = _critic_family_unavailable(family)
             if reason is not None:
-                if first is None:
+                # The reported blocker is the CONFIGURED family's: that is the
+                # plan the person set up and the one they can act on. An
+                # independent family tried first and found closed is a detour,
+                # not the reason the mission is parked.
+                if first is None or family == configured:
                     first = (reason, family, "")
                 continue
             if first is not None:
@@ -1786,10 +1804,10 @@ class CriticRunner:
                 capacity_signals=signals,
             )
             if verdict is not None:
-                return verdict
+                return _stamp_reviewer(verdict, family, builder=configured)
             if not signals:
                 return None  # not a capacity problem: the caller's retry handles it
-            if first is None:
+            if first is None or family == configured:
                 first = (signals[0][0], family, signals[0][1])
         if paid_gate is not None:
             logger.warning(
@@ -2473,6 +2491,24 @@ def _note_capacity_signal(
         from jarvis.codex_auth_state import mark_codex_needs_reauth
 
         mark_codex_needs_reauth()
+
+
+def _stamp_reviewer(
+    verdict: CriticVerdict, reviewer_family: str, *, builder: str
+) -> CriticVerdict:
+    """Record WHO graded and whether that reviewer was independent.
+
+    A review by the family that wrote the code is still worth having — it
+    catches an empty diff, a failed build, a missed requirement — but it is not
+    a second opinion, and the mission log must not read as though it were. The
+    verdict is frozen, so this returns a copy.
+    """
+    return verdict.model_copy(
+        update={
+            "reviewer_family": reviewer_family,
+            "reviewer_independent": reviewer_family != builder,
+        }
+    )
 
 
 def _critic_family(primary_provider: str | None) -> str:

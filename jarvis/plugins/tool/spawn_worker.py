@@ -556,6 +556,39 @@ class SpawnWorkerTool:
             return self._manager_resolver()
         return None
 
+    async def _mission_already_running(self, utterance: str) -> str | None:
+        """The id of a non-terminal mission that names this work, else None.
+
+        Same-work is decided by :func:`_names_same_work` in BOTH directions —
+        each order has to name at least half of the other's content words — so
+        a follow-up that merely shares a noun with a running mission still
+        gets its own worker, and only a genuine repeat is deferred.
+        """
+        manager = self._resolve_manager()
+        store = getattr(manager, "store", None)
+        lister = getattr(store, "list_non_terminal_missions", None)
+        if lister is None:
+            # No mission stack yet (or a manager that keeps none): there is no
+            # running mission this one could duplicate, so the dispatch below
+            # is the correct outcome, not a swallowed error.
+            return None
+        try:
+            missions = await lister()
+        except Exception:
+            log.warning(
+                "spawn_worker: could not read the running missions — "
+                "dispatching rather than refusing the order", exc_info=True
+            )
+            return None
+        for mission_id, prompt, _state in missions:
+            if not prompt:
+                continue
+            if _names_same_work(prompt, utterance) and _names_same_work(
+                utterance, prompt
+            ):
+                return mission_id
+        return None
+
     def _resolve_kontrollierer(self) -> Any | None:
         """Returns the active Kontrollierer or None if not yet bootstrapped."""
         if self._kontrollierer is not None:
@@ -670,6 +703,39 @@ class SpawnWorkerTool:
                 success=True,
                 output=ack,
                 artifacts=({"cooldown_suppressed": True, "utterance": utterance},),
+            )
+
+        # The other duplicate, the one the clock cannot see: a mission that is
+        # ALREADY RUNNING on this work. The cooldown above was sized for the
+        # VAD-fragment regression (one sentence, three turns, 30 s). A worker
+        # runs for minutes, and nothing visible happens while it does, so the
+        # person says the same thing again — and a second worker started on the
+        # same task: two worktrees, two subscription turns, two critic loops,
+        # two diffs for one piece of work. Ask the mission store instead of the
+        # clock. A DIFFERENT order still dispatches while the first one runs,
+        # which is exactly what the typed-order exception above protects.
+        running = await self._mission_already_running(utterance)
+        if running is not None:
+            ack = await self._announcer.compose(
+                utterance=utterance,
+                language=ack_language,
+                kind="already_running",
+            )
+            log.info(
+                "spawn_worker: mission %s already runs this work — suppressing "
+                "a second dispatch, returning ACK %r",
+                running, ack,
+            )
+            return ToolResult(
+                success=True,
+                output=ack,
+                artifacts=(
+                    {
+                        "cooldown_suppressed": True,
+                        "already_running_mission": running,
+                        "utterance": utterance,
+                    },
+                ),
             )
 
         # Short-circuit on permanent bootstrap failure (server.py's
