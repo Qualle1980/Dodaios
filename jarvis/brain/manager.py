@@ -116,6 +116,7 @@ from .dispatcher import BrainDispatcher
 from .evidence_gate import live_surface_covers
 from .identity import identity_block
 from .intent_router import RoutingDecision, classify
+from .one_shot_reply import one_shot_reply
 from .local_action_gate import (
     HARNESS_NAME,
     LocalActionMode,
@@ -12400,6 +12401,25 @@ class BrainManager:
         # instead of confabulating a refusal. Substantive turns only.
         if not is_smalltalk_turn and self._is_self_control_turn(user_text):
             self._self_control_directive = _SELF_CONTROL_DIRECTIVE
+
+        # A closed-set one-shot is answered here, with no model at all.
+        # Measured live 2026-10-20: "danke" cost 7.8 s because it travelled
+        # the whole chain to ChatGPT like any other turn — and there is
+        # nothing in a thank-you for a model to decide. The matcher is the
+        # intent router's existing one, anchored to the WHOLE utterance, so
+        # "Danke, und wie weiter?" is not one of these and still goes to the
+        # model; an unknown reply language returns None for the same reason.
+        if not self._force_level:
+            one_shot = one_shot_reply(user_text, self._resolve_turn_lang())
+            if one_shot is not None:
+                log.info("One-shot answered without a model: %r", user_text[:40])
+                await self._record_response_side_effects(
+                    user_text=user_text,
+                    response_text=one_shot,
+                    use_history=use_history,
+                    trace_id=trace_uuid,
+                )
+                return one_shot
 
         # 2. Router: which level applies?
         decision = self._picked_level(user_text)
