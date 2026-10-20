@@ -9151,16 +9151,40 @@ class BrainManager:
         without silencing every action request (AP-6: never couple routing to a
         hardcoded talker provider).
 
-        Only the LEGACY no-worker-configured path keeps the conservative
-        ``brain.primary in {claude-api, gemini}`` check, because there the mission
-        factory may fall back to the Gemini API worker, which 403s on an account
-        without Gemini access (the original BUG-017, 2026-05-13)."""
+        With NO worker configured the question is only whether the default path
+        would land on the Gemini API worker, which 403s on an account without
+        Gemini access (the original BUG-017, 2026-05-13). That is decided by the
+        step model alone, so this asks the mission layer's own pure routing
+        function instead of guessing from the talker: the legacy check here was
+        ``brain.primary in {claude-api, gemini}``, which refused the whole
+        deterministic dispatch for every other talker — measured on a default
+        install: chatgpt-web, chatgpt-plan, claude-cli, ollama and openai all
+        got False although the default path is the Jarvis-Agent worker and has
+        nothing to do with Gemini. An explicit "build me X" on such an install
+        was pushed back onto an LLM routing round it did not need (AP-6: never
+        couple routing to a hardcoded talker provider)."""
         try:
             sub = getattr(self._config.brain, "worker", None)
             worker_provider = (getattr(sub, "provider", "") or "").strip().lower()
+            step_model = (getattr(sub, "model", "") or "").strip()
         except Exception:  # noqa: BLE001 — config hiccup must not block dispatch
             return True
         if worker_provider:
+            return True
+        try:
+            # The ONE decision of which worker an unconfigured install uses.
+            from jarvis.missions.init import (  # noqa: PLC0415
+                _select_subagent_worker_kind,
+            )
+
+            kind = _select_subagent_worker_kind(None, step_model)
+        except Exception:  # noqa: BLE001 — never block dispatch on an import
+            log.debug("worker viability: kind lookup failed", exc_info=True)
+            return True
+        if kind != "gemini":
+            # The Jarvis-Agent worker. It runs for any talker; if it cannot,
+            # the mission reports that failure honestly rather than being
+            # refused before it is tried.
             return True
         try:
             primary = (self._config.brain.primary or "").strip().lower()
