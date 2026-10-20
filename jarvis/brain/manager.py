@@ -10841,7 +10841,36 @@ class BrainManager:
         if db:
             order.append(db)
         order += ["gemini", "claude-api", "openai", "openrouter", "grok", "nvidia", "groq"]
+        def _leftover_rank(name: str) -> tuple[int, str]:
+            # A candidate with a configured model first: a lead has to name
+            # a model to call one. Several local runtimes are registered on
+            # every install and usually only one is configured, so plain
+            # alphabetical order could hand the lead to a runtime with an
+            # empty model that can never answer. Ordering, not filtering: a
+            # runtime that resolves its model at call time stays a usable lead.
+            model = self._fast_model(name) or self._deep_model(name) or ""
+            return (0 if str(model).strip() else 1, name)
+
+        # Everything else the registry offers closes the list, in a stable
+        # order. The list above names only key-billed providers, so without
+        # this a keyless install (local runtime only) and a plan-seat talker
+        # (see the seat narrowing below) found NO lead at all: the tool turn
+        # then ran toolless, and a ChatGPT plan/web talker could never reach
+        # the delegation tools that hand coding work to Codex CLI / Claude
+        # Code. Enumerated from the registry, never a second name list (AP-21).
+        order += sorted(
+            (name for name in available if name not in order), key=_leftover_rank
+        )
+        from jarvis.brain.background_policy import seat_successors
         from jarvis.brain.voice_key import bills_voice_key
+
+        # A plan-seat talker (signed-in subscription, no key slot) may only be
+        # led by what the seat policy permits — itself and keyless local
+        # runtimes. ``_build_fallback_chain`` drops a lead outside that set
+        # anyway (the seat filter there), so picking one here produced a lead
+        # the chain never reached. Narrowing with the SAME policy function
+        # keeps one source of truth and lets a local lead actually survive.
+        order = seat_successors(skip, order)
 
         # The realtime voice key leads a turn only when no other provider can
         # call tools (mandate 2026-09-29: that key pays for the voice call).
@@ -11062,16 +11091,24 @@ class BrainManager:
             chain.append((name, preferred or m_fast or m_deep))
 
         # A plan-seat talker (signed-in subscription, no key slot) is never
-        # led or replaced by another account: no tool lead, deep_brain or
-        # configured/cross-provider fallback. Only keyless local runtimes may
-        # follow it; a tool turn it cannot serve runs without tools instead.
-        # A seat with no configured model still answers on the plan's default.
+        # replaced by another ACCOUNT: no deep_brain, no configured or
+        # cross-provider fallback, and no key-billed tool lead. Only keyless
+        # local runtimes may follow it — and lead it, since a seat brain cannot
+        # emit tool_calls at all; without that lead a tool turn runs without
+        # tools instead. A seat with no configured model still answers on the
+        # plan's default.
         from jarvis.brain.background_policy import seat_bound, seat_successors
 
         allowed = set(seat_successors(active, [name for name, _ in chain]))
         chain = [entry for entry in chain if entry[0] in allowed]
         if seat_bound(active) and all(name != active for name, _ in chain):
-            chain.insert(0, (active, None))
+            # BEHIND a surviving tool lead, never ahead of it. The lead is
+            # there to pick the tool, and generate() falls through to the seat
+            # when it picks none. Inserted at the front, the seat answered the
+            # turn first — toolless — and the lead was never reached, so a
+            # ChatGPT plan/web talker could not delegate anything.
+            at = 1 if tool_lead is not None and chain[:1] == [tool_lead] else 0
+            chain.insert(at, (active, None))
         if tool_lead is not None and tool_lead[0] not in allowed:
             tool_lead = None
             self._router_lead_key = None
