@@ -30,6 +30,69 @@ from typing import Final
 _DEFAULT_GRACE_MS: Final[int] = 2500
 _DEFAULT_MAX_CHAIN: Final[int] = 3
 
+#: Hard ceiling on how long a freeze (``note_speech_resumed``) may keep the
+#: window open past the arming turn. A resumed utterance used to clear the
+#: deadline outright, which armed the window FOREVER — and the microphone hears
+#: the assistant's own speech tail, so that freeze fired after every single
+#: answer. Measured live 2026-10-21: a VAD "speech start" landed 0.4-1.3 s after
+#: each reply at rms 0.003-0.034 (near-silence, not the user), and the next real
+#: question — seconds later — was glued onto the previous one. Three questions
+#: in a row were answered together, and the local zero-token answers were
+#: bypassed because the combined text matched no one-shot pattern.
+#:
+#: A spoken continuation finalizes within a few seconds of starting; anything
+#: longer is a new request. This bounds the freeze without shortening a genuine
+#: continuation.
+_DEFAULT_FREEZE_CEILING_MS: Final[int] = 5000
+
+
+#: Openers that start a question or a command outright. A continuation
+#: fragment does not begin this way — it begins mid-thought, with a
+#: conjunction, a correction or a bare noun phrase.
+_REQUEST_OPENERS: Final[tuple[str, ...]] = (
+    # DE question words and polite command openers
+    "wie", "was", "wer", "wen", "wem", "wann", "wo", "warum", "wieso",
+    "weshalb", "welche", "welcher", "welches", "welchen", "wieviel",
+    "kannst", "kannst du", "könntest", "koenntest", "zeig", "zeige",
+    "sag", "sage", "erzähl", "erzaehl", "erkläre", "erklaere", "mach",
+    "öffne", "oeffne", "starte", "schreib", "schreibe", "such", "suche",
+    "rechne", "gib", "nenne", "bitte", "hallo", "jarvis", "danke",
+    # EN
+    "how", "what", "who", "whom", "when", "where", "why", "which",
+    "can", "could", "would", "please", "show", "tell", "explain", "open",
+    "start", "write", "search", "give", "hello", "thanks",
+    # AR
+    "كم", "ما", "ماذا", "من", "كيف", "متى", "وين", "ليش", "لماذا", "أي",
+)
+
+
+def is_self_contained_request(text: str) -> bool:
+    """True when ``text`` reads as a complete new request, not a continuation.
+
+    Deliberately conservative: it must be WRONG as rarely as possible in the
+    direction that splits a real continuation, because that only costs an
+    extra turn, while a false merge produces a wrong answer to two questions
+    at once. So it says "self-contained" only on a clear signal — the
+    utterance opens with a question word or an imperative, or it ends in a
+    question mark.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if stripped.endswith("?") or stripped.endswith("؟"):
+        return True
+    lowered = stripped.lower().lstrip("\"'“„«(-– ")
+    # Trailing punctuation is part of the utterance, not of the word: without
+    # stripping it "Danke." never matched the opener "danke".
+    words = [w.strip(".,!?;:…\"'»«)") for w in lowered.split()]
+    words = [w for w in words if w]
+    if not words:
+        return False
+    first_two = " ".join(words[:2])
+    return any(
+        candidate in _REQUEST_OPENERS for candidate in (first_two, words[0])
+    )
+
 
 class ContinuationWindow:
     """Tracks the last dispatched utterance so a continuation can re-attach."""
@@ -39,18 +102,26 @@ class ContinuationWindow:
         *,
         grace_ms: int = _DEFAULT_GRACE_MS,
         max_chain: int = _DEFAULT_MAX_CHAIN,
+        freeze_ceiling_ms: int = _DEFAULT_FREEZE_CEILING_MS,
         clock: Callable[[], int] | None = None,
     ) -> None:
         if grace_ms < 0:
             raise ValueError("grace_ms must be >= 0")
         if max_chain < 1:
             raise ValueError("max_chain must be >= 1")
+        if freeze_ceiling_ms < 0:
+            raise ValueError("freeze_ceiling_ms must be >= 0")
         self._grace_ns = int(grace_ms) * 1_000_000
+        self._freeze_ceiling_ns = int(freeze_ceiling_ms) * 1_000_000
         self._max_chain = int(max_chain)
         self._clock = clock or time.monotonic_ns
         self._text: str = ""
         self._chain: int = 0
         self._deadline_ns: int | None = None
+        #: Absolute cutoff for a frozen window, set when the arming turn goes
+        #: idle. ``note_speech_resumed`` may push the deadline out but never
+        #: past this, so a spurious VAD trigger cannot arm the window forever.
+        self._freeze_cutoff_ns: int | None = None
 
     @property
     def text(self) -> str:
@@ -70,11 +141,15 @@ class ContinuationWindow:
         self._text = text.strip()
         self._chain = (self._chain + 1) if continued else 1
         self._deadline_ns = None
+        self._freeze_cutoff_ns = None
 
     def mark_idle(self) -> None:
         """The armed turn finished (answer spoken or aborted): start grace."""
         if self.is_armed:
-            self._deadline_ns = self._clock() + self._grace_ns
+            now = self._clock()
+            self._deadline_ns = now + self._grace_ns
+            # From here a freeze may extend the deadline, but only this far.
+            self._freeze_cutoff_ns = now + self._freeze_ceiling_ns
 
     def note_speech_resumed(self) -> None:
         """The user started speaking again — freeze the grace countdown.
@@ -91,9 +166,25 @@ class ContinuationWindow:
         """
         if not self.is_armed:
             return
-        if self._deadline_ns is not None and self._clock() > self._deadline_ns:
+        now = self._clock()
+        if self._deadline_ns is not None and now > self._deadline_ns:
             return
-        self._deadline_ns = None
+        if self._freeze_cutoff_ns is not None and now > self._freeze_cutoff_ns:
+            # The freeze has already been extended as far as it may go. Leave
+            # the expired deadline in place: a VAD trigger this late is noise
+            # or a new request, not the continuation of a finished turn.
+            return
+        # Extend to the hard ceiling -- once, and no further. The user needs
+        # room to formulate a follow-up (~3 s measured, session 71f2d2de),
+        # which is why this does more than restart the grace; clearing the
+        # deadline OUTRIGHT is what armed the window indefinitely, and the
+        # microphone hears the assistant's own speech tail, so that fired
+        # after every single answer (see _DEFAULT_FREEZE_CEILING_MS).
+        # Naturally idempotent: a second trigger cannot push it past the cap.
+        if self._freeze_cutoff_ns is None:
+            self._deadline_ns = now + self._grace_ns
+        else:
+            self._deadline_ns = self._freeze_cutoff_ns
 
     def is_live(self) -> bool:
         """True if the NEXT utterance WOULD recombine — armed, not expired, and
@@ -123,12 +214,26 @@ class ContinuationWindow:
         if self._chain >= self._max_chain:
             self.clear()
             return None
+        if is_self_contained_request(new_text):
+            # A whole new question is not the tail of the previous one. Gluing
+            # them made the model answer BOTH, and the answers piled up across
+            # turns: measured live 2026-10-21, "Wie viel ist 10 plus 10?" was
+            # sent as "wie viel ist 100 plus 100? كم هو 2 مقارنة مع 2؟ Wie viel
+            # ist 10 plus 10?" and came back as all three answers in one
+            # breath. It also bypassed the local zero-token answers, because
+            # the combined text matches no one-shot pattern.
+            #
+            # The feature's own examples are FRAGMENTS ("…nicht australische",
+            # "sondern der weiteste Ort"), which this still merges.
+            self.clear()
+            return None
         return f"{self._text} {new_text.strip()}".strip()
 
     def clear(self) -> None:
         self._text = ""
         self._chain = 0
         self._deadline_ns = None
+        self._freeze_cutoff_ns = None
 
 
 __all__ = ["ContinuationWindow"]
