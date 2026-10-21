@@ -68,8 +68,11 @@ def test_the_clock_answer_is_computed_not_guessed() -> None:
 
 
 def test_the_date_answer_is_computed_not_guessed() -> None:
+    """The weekday leads: "was haben wir heute für einen Tag" asks for the day,
+    not the ordinal, and that phrasing is the one measured live on 2026-10-21.
+    The date stays in the answer, so both questions are served."""
     assert one_shot_reply("welches datum ist heute", "de", now=_NOON) == (  # i18n-allow
-        "Heute ist 20.10.2026."  # i18n-allow
+        "Heute ist Dienstag, 20.10.2026."  # i18n-allow
     )
 
 

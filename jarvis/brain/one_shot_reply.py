@@ -27,6 +27,7 @@ row do not read like a stuck recording.
 from __future__ import annotations
 
 import datetime as _dt
+import re as _re
 from zoneinfo import ZoneInfo
 
 from .intent_router import one_shot_kind
@@ -63,8 +64,83 @@ _DATE: dict[str, str] = {
     "en": "Today is {date}.",
     "es": "Hoy es {date}.",  # i18n-allow
 }
+#: The weekday leads: "was haben wir heute fuer einen Tag" asks for the day,
+#: not the ordinal, and locale-independent names keep this off the OS locale
+#: (``%A`` returns whatever the host is set to).
+_WEEKDAYS: dict[str, tuple[str, ...]] = {
+    "de": ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag",  # i18n-allow
+           "Samstag", "Sonntag"),
+    "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+           "Saturday", "Sunday"),
+    "es": ("lunes", "martes", "miércoles", "jueves", "viernes",  # i18n-allow
+           "sábado", "domingo"),
+}
 _DATE_FORMAT: dict[str, str] = {"de": "%d.%m.%Y", "en": "%B %d, %Y", "es": "%d/%m/%Y"}
 _TIME_FORMAT: dict[str, str] = {"de": "%H:%M", "en": "%I:%M %p", "es": "%H:%M"}
+
+
+#: Spoken arithmetic -> operator. Only two-operand sums land here.
+_OPS: dict[str, str] = {
+    "plus": "+", "+": "+",
+    "minus": "-", "-": "-",
+    "mal": "*", "times": "*", "*": "*", "x": "*", "×": "*",
+    "geteilt durch": "/", "durch": "/", "divided by": "/", "/": "/", "÷": "/",
+}
+_MATH_RE = _re.compile(
+    r"(-?\d+(?:[.,]\d+)?)\s*"
+    r"(plus|minus|mal|times|geteilt\s+durch|durch|divided\s+by|[+\-*/x×÷])\s*"
+    r"(-?\d+(?:[.,]\d+)?)",
+    _re.IGNORECASE,
+)
+_MATH: dict[str, str] = {
+    "de": "{a} {verb} {b} ist {r}.",  # i18n-allow: runtime reply
+    "en": "{a} {verb} {b} is {r}.",
+    "es": "{a} {verb} {b} es {r}.",  # i18n-allow
+}
+_MATH_VERB: dict[str, dict[str, str]] = {
+    "de": {"+": "plus", "-": "minus", "*": "mal", "/": "geteilt durch"},  # i18n-allow
+    "en": {"+": "plus", "-": "minus", "*": "times", "/": "divided by"},
+    "es": {"+": "más", "-": "menos", "*": "por", "/": "entre"},  # i18n-allow
+}
+
+
+def _format_number(value: float) -> str:
+    """A spoken number: no trailing ``.0``, and no float noise."""
+    rounded = round(value, 6)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:g}"
+
+
+def _math_answer(text: str, language: str) -> str | None:
+    """The computed answer for a two-operand sum, or None.
+
+    Pure arithmetic on parsed numbers -- never ``eval``, so no utterance can
+    execute anything. A division by zero returns None and the turn proceeds
+    normally: a model can explain it, this cannot.
+    """
+    template = _MATH.get(language)
+    verbs = _MATH_VERB.get(language)
+    if template is None or verbs is None:
+        return None
+    m = _MATH_RE.search(text)
+    if m is None:
+        return None
+    raw_op = " ".join(m.group(2).lower().split())
+    op = _OPS.get(raw_op)
+    if op is None:
+        return None
+    try:
+        a = float(m.group(1).replace(",", "."))
+        b = float(m.group(3).replace(",", "."))
+    except ValueError:
+        return None
+    if op == "/" and b == 0:
+        return None
+    result = {"+": a + b, "-": a - b, "*": a * b, "/": a / b if b else 0.0}[op]
+    return template.format(
+        a=_format_number(a), verb=verbs[op], b=_format_number(b), r=_format_number(result)
+    )
 
 
 def _rotate(pool: tuple[str, ...], seed: str) -> str:
@@ -89,6 +165,8 @@ def one_shot_reply(
     if kind in _LINES:
         pool = _LINES[kind].get(language)
         return _rotate(pool, user_text.strip().lower()) if pool else None
+    if kind == "math":
+        return _math_answer(user_text, language)
     if kind not in ("clock", "date"):
         # A recognised kind with no line of its own — a greeting — belongs to
         # the model. Falling through to the computed branch below would have
@@ -101,7 +179,10 @@ def one_shot_reply(
     moment = now or _dt.datetime.now(ZoneInfo(tz) if tz else None)
     if kind == "clock":
         return template.format(time=moment.strftime(_TIME_FORMAT[language]).lstrip("0"))
-    return template.format(date=moment.strftime(_DATE_FORMAT[language]))
+    weekday = _WEEKDAYS[language][moment.weekday()]
+    return template.format(
+        date=f"{weekday}, {moment.strftime(_DATE_FORMAT[language])}"
+    )
 
 
 __all__ = ["one_shot_reply"]

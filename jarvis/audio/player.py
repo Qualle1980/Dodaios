@@ -1573,6 +1573,30 @@ class AudioPlayer:
                     stm, dev_rate = await asyncio.to_thread(
                         _ensure_stream, pending_rate, pending_generation
                     )
+                    # The first audible sample reaches PortAudio when this
+                    # write STARTS, not when it returns: _write_samples blocks
+                    # for the whole block's playback. Publishing after it made
+                    # AudioOutFirst — and therefore the turn_to_first_audio
+                    # metric — late by the length of the first sentence.
+                    # Measured live 2026-10-21: a 6.9 s answer reported a 6.9 s
+                    # "gap" between TTS output and audible speech, and a 2.1 s
+                    # answer reported 2.3 s. The audio was never delayed; the
+                    # number was. Announce before the block, so the metric and
+                    # the mascot mouth both track the real start of speech.
+                    if not first_audio_published and arr.size and self._bus is not None:
+                        with stream_state_lock:
+                            superseded_now = (
+                                getattr(self, "_playback_generation", 0)
+                                != playback_generation
+                                or getattr(self, "_active_stream", None) is not stm
+                            )
+                        if not superseded_now:
+                            first_audio_published = True
+                            try:
+                                await self._bus.publish(AudioOutFirst())
+                                log.info("AudioOutFirst published")
+                            except Exception as exc:  # noqa: BLE001
+                                log.debug("AudioOutFirst publish failed: %s", exc)
                     await asyncio.to_thread(
                         self._write_samples,
                         stm,
@@ -1592,9 +1616,11 @@ class AudioPlayer:
                     )
                 if playback_superseded:
                     return getattr(self, "_playback_generation", 0) == playback_generation
-                # First audible sample reached PortAudio — tell the bus so the
-                # mascot mouth + SPEAKING bubble sync to actual audio start
-                # instead of the speculative SPEAKING state-transition.
+                # Fallback only: the announcement normally happens just before
+                # the blocking write above. This catches the cases that skipped
+                # it — an empty first block, or a playback that looked
+                # superseded at that moment. ``first_audio_published`` keeps it
+                # to one publish per turn either way.
                 # MUST be awaited: EventBus.publish is an async coroutine.
                 if not first_audio_published and self._bus is not None:
                     first_audio_published = True

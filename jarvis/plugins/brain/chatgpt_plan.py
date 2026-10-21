@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -149,6 +151,12 @@ class ChatGPTPlanBrain:
     def __init__(self, model: str | None = None) -> None:
         model = (model or "").strip()
         self._model = model.removeprefix("chatgpt-plan/")
+        #: The slug the LAST turn actually ran on. The chain may hand this
+        #: provider ``None`` and let it resolve its own default, and then the
+        #: caller has no way to name what answered: measured live 2026-10-21
+        #: every turn was recorded as model ``None``, which prices as $0.00
+        #: and hid 23_691 input tokens from the cost surface.
+        self.last_model: str | None = None
 
     @staticmethod
     def subscription_connected() -> bool:
@@ -177,16 +185,12 @@ class ChatGPTPlanBrain:
         token = a.access_token()
         model = self._model or status["model"]
         if not model:
-            models = a.models()
-            if not models:
-                raise ChatGPTPlanError(
-                    "no_models", "Your ChatGPT plan lists no models for Dodaios."
-                )
-            model = models[0]["slug"]
+            model = _resolved_default_model(a)
         return token, model
 
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
         token, model = await asyncio.to_thread(self._prepare)
+        self.last_model = model
         body = build_body(req, model)
         headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
         for attempt, delay in enumerate((0.0, *_RETRY_DELAYS)):
@@ -248,6 +252,45 @@ class ChatGPTPlanBrain:
                     "ChatGPT ended the answer without completing it; it was not re-sent.",
                 )
             return
+
+
+#: How long a resolved default model stays trusted. The plan's model list is
+#: a property of the account, not of the turn, so re-asking per turn buys
+#: nothing: measured live 2026-10-21 the ``GET /v1/models`` round trip ran on
+#: EVERY voice turn and cost 1.1-1.4 s of the time to first word.
+_MODEL_TTL_S = 900.0
+_model_memo: tuple[float, str] | None = None
+_model_lock = threading.Lock()
+
+
+def _resolved_default_model(auth_manager: Any) -> str:
+    """The plan's first listed model, remembered for :data:`_MODEL_TTL_S`.
+
+    Nothing is hardcoded: the slug still comes from the account's own list, so
+    a plan whose models change is followed rather than assumed. Only the
+    repetition is removed. A list that comes back empty is an error, never a
+    guessed slug.
+    """
+    global _model_memo
+    now = time.monotonic()
+    with _model_lock:
+        if _model_memo is not None and now - _model_memo[0] < _MODEL_TTL_S:
+            return _model_memo[1]
+    models = auth_manager.models()
+    if not models:
+        raise ChatGPTPlanError("no_models", "Your ChatGPT plan lists no models for Dodaios.")
+    slug = models[0]["slug"]
+    with _model_lock:
+        _model_memo = (now, slug)
+    log.info("chatgpt-plan: default model resolved to %s (cached %.0f s)", slug, _MODEL_TTL_S)
+    return slug
+
+
+def reset_model_cache() -> None:
+    """Forget the resolved model (test seam, and any explicit model change)."""
+    global _model_memo
+    with _model_lock:
+        _model_memo = None
 
 
 def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:

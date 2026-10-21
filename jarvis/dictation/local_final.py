@@ -426,7 +426,33 @@ class LocalFinalSTT:
                 return "the local speech engine (faster-whisper) is not installed here"
         except Exception as exc:  # noqa: BLE001 — a broken probe reads as "absent"
             return f"the local engine probe failed ({type(exc).__name__}: {exc})"
-        if self._allow_cpu or self._min_free_gb <= 0.0:
+        if self._allow_cpu:
+            return ""
+        # A worker that comes up on the CPU is declined below (device check in
+        # ``_spawn_worker_locked``) — AFTER the build. Measured on this host
+        # 2026-10-21: probe 4.7 s + build 85.9 s + first decode 18.4 s = 109 s
+        # of full-CPU work, and then the worker was closed unused. Worse, the
+        # wake word shares that CPU: vosk stage-1 was demoted for missing
+        # realtime and a real "Jarvis" was suppressed while this ran.
+        #
+        # So ask FIRST whether a non-CPU worker is even possible. The gate is
+        # the cached out-of-process inference verdict, never CUDA presence
+        # (AP-25): ``False`` and ``None`` both mean "not verified for GPU
+        # inference", which is exactly when the build cannot pay off.
+        try:
+            from jarvis.hardware.detection import cuda_inference_verified
+
+            gpu_inference = cuda_inference_verified()
+        except Exception:  # noqa: BLE001 — an unreadable probe must not veto
+            log.debug("local dictation: gpu-inference probe failed", exc_info=True)
+            gpu_inference = None
+        if gpu_inference is not True:
+            return (
+                "GPU inference is not verified on this host, so the worker could "
+                f"only run {self._model_name} on the CPU, which this final pass "
+                "declines anyway; the configured provider takes this dictation"
+            )
+        if self._min_free_gb <= 0.0:
             return ""
         try:
             from jarvis.hardware.detection import free_accelerator_gb

@@ -85,10 +85,31 @@ _ONE_SHOT_BY_KIND: dict[str, tuple[str, ...]] = {
         r"qu[ée]\s+hora\s+es",
     ),
     "date": (
-        r"welchen?\s+(?:tag|datum)\s+(?:ist|haben\s+wir)\s*(?:heute|wir)?",  # i18n-allow
+        r"welche[rns]?\s+(?:tag|datum|wochentag)\s+"  # i18n-allow
+        r"(?:ist|haben\s+wir)\s*(?:heute|wir)?",
         r"welches\s+datum\s+(?:ist\s+heute|haben\s+wir)",  # i18n-allow: DE date question
+        # Natural phrasings the narrow set above missed. Measured live
+        # 2026-10-21: "Hallo Jarvis, was haben wir heute für einen Tag?" found
+        # no one-shot and cost 11_670 input tokens for the current weekday.
+        r"was\s+(?:haben\s+wir|ist)\s+heute(?:\s+f[üu]r\s+ein(?:en)?\s+tag)?",  # i18n-allow
+        r"was\s+f[üu]r\s+ein(?:en)?\s+tag\s+(?:ist\s+es|haben\s+wir)(?:\s+heute)?",  # i18n-allow
+        r"der\s+wievielte\s+(?:ist\s+(?:es|heute)|haben\s+wir)",  # i18n-allow
         r"what(?:'s|\s+is)\s+the\s+date|what\s+day\s+is\s+(?:it|today)",
+        r"what\s+(?:weekday|day\s+of\s+the\s+week)\s+is\s+it",
         r"qu[ée]\s+d[íi]a\s+es(?:\s+hoy)?",
+    ),
+    # Arithmetic a calculator settles. The ANSWER is computed in
+    # ``one_shot_reply``; this only recognises the shape, and only for plain
+    # two-operand sums, so "was ist 10 plus 10" never reaches a model while
+    # "rechne mir die Marge aus" still does.
+    "math": (
+        r"(?:was\s+ist|wie\s?viel\s+ist|rechne)\s*"  # i18n-allow
+        r"-?\d+(?:[.,]\d+)?\s*(?:plus|minus|mal|geteilt\s+durch|durch|[+\-*/x×÷])\s*"  # i18n-allow
+        r"-?\d+(?:[.,]\d+)?",
+        r"-?\d+(?:[.,]\d+)?\s*(?:plus|minus|mal|geteilt\s+durch|durch|[+\-*/x×÷])\s*"  # i18n-allow
+        r"-?\d+(?:[.,]\d+)?",
+        r"what(?:'s|\s+is)\s+-?\d+(?:\.\d+)?\s*(?:plus|minus|times|divided\s+by|[+\-*/x×÷])\s*"
+        r"-?\d+(?:\.\d+)?",
     ),
 }
 _ONE_SHOT_PATTERNS = [p for group in _ONE_SHOT_BY_KIND.values() for p in group]
@@ -105,6 +126,15 @@ _ONE_SHOT_KIND_RES: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
+#: A spoken opening that addresses the assistant: an optional greeting and/or
+#: the wake name. Content words are never stripped.
+_ADDRESS_RE = re.compile(
+    r"^(?:(?:hallo|hey|hi|guten\s+(?:morgen|tag|abend)|hello)\b[\s,.:;!–-]*)?"  # i18n-allow
+    r"(?:jarvis\b[\s,.:;!–-]*)?",
+    re.IGNORECASE,
+)
+
+
 def one_shot_kind(user_text: str) -> str | None:
     """Which closed-set one-shot this utterance is, or None.
 
@@ -114,9 +144,17 @@ def one_shot_kind(user_text: str) -> str | None:
     text = user_text.strip()
     if not text:
         return None
-    for kind, pattern in _ONE_SHOT_KIND_RES:
-        if pattern.match(text):
-            return kind
+    # A spoken turn usually opens by addressing the assistant, and the
+    # patterns are anchored to the WHOLE utterance, so the address used to
+    # hide every one of them: measured live 2026-10-21, "Hallo Jarvis, was
+    # haben wir heute für einen Tag?" matched nothing and went to a model.
+    # Only the greeting and the assistant's own name are stripped, never a
+    # content word, so this cannot turn a real request into a one-shot.
+    stripped = _ADDRESS_RE.sub("", text).strip() or text
+    for candidate in (text, stripped):
+        for kind, pattern in _ONE_SHOT_KIND_RES:
+            if pattern.match(candidate):
+                return kind
     return None
 
 # A leading acknowledgement before the real request ("Ok, öffne Notepad").  # i18n-allow

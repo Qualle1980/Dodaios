@@ -1777,6 +1777,14 @@ def _ensure_writable_config_path(path: Path) -> Path:
 
     if path == _DEFAULT:
         path = resolve_config_path()
+    # Record whether this write targets the production config, so the two
+    # machine-global side layers (drift-soll file, User-scope ENV) can refuse
+    # when it does not. Compared after the JARVIS_CONFIG indirection above, so
+    # an install that relocates its config still counts as production.
+    try:
+        _write_target.is_production = path.resolve() == resolve_config_path().resolve()
+    except OSError:  # an unresolvable path is not something to sync from
+        _write_target.is_production = False
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("", encoding="utf-8")
@@ -3769,12 +3777,39 @@ def _update_config_soll_worker_key(key: str, value: str) -> None:  # i18n-allow
         _atomic_write_text(soll_path, out)  # i18n-allow
 
 
+#: Whether the TOML write in progress on THIS thread targeted the real
+#: production config. The drift-soll file and the User-scope ENV var are
+#: machine-global: they take no ``path`` argument and cannot be redirected to a
+#: tmp_path. So a test that called a setter with its own TOML still rewrote the
+#: user's ``scripts/config-soll.json`` and ``JARVIS__*`` registry values —
+#: found 2026-10-21, when a suite run left ``brain.primary`` pinned to
+#: ``openrouter`` in both while jarvis.toml said something else. Set by
+#: :func:`_ensure_writable_config_path`, read by the two global writers below.
+_write_target = threading.local()
+
+
+def _target_is_production() -> bool:
+    """True unless the current thread's last config write went elsewhere."""
+    return bool(getattr(_write_target, "is_production", True))
+
+
 def _atomic_write_text(path: Path, content: str) -> None:
     """Atomic tempfile + replace for a plain UTF-8 text file (no read-only flag).
 
     Used for config-soll.json, which — unlike jarvis.toml — does not carry the  # i18n-allow
     BUG-010 read-only defense flag.
+
+    Refuses when the TOML write it accompanies did not target the production
+    config: this file is machine-global and takes no redirectable path, so a
+    test writing its own jarvis.toml must not reach the user's pinned
+    desired-state values (see :data:`_write_target`).
     """
+    if not _target_is_production():
+        log.debug(
+            "drift-soll write skipped: this config write did not target the "
+            "production jarvis.toml"
+        )
+        return
     tmp = _write_unique_temp(path, content)
     try:
         _replace_with_retry(tmp, path, ensure_target_writable=False)
@@ -3789,7 +3824,15 @@ def _set_user_env_var(name: str, value: str) -> None:
     ``sys.platform == "win32"``. ``os.environ`` is always updated so the live
     process and any child it spawns immediately observe the new value — this
     is the cross-platform part that also benefits a Linux VPS.
+
+    Refuses when the accompanying TOML write did not target the production
+    config: the User-scope registry is machine-global and a test cannot
+    redirect it, so it would otherwise outlive the test run and silently
+    override the user's real provider choice on the next boot.
     """
+    if not _target_is_production():
+        log.debug("User-scope ENV write skipped: not a production config write")
+        return
     # Always update the live process (and inherited children).
     os.environ[name] = value
 

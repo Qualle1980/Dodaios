@@ -81,6 +81,12 @@ def _local_ok(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(preview_mod, "faster_whisper_available", lambda: True)
     monkeypatch.setattr(preview_mod, "_spawn_worker_model", _spawn)
     monkeypatch.setattr(detection, "free_accelerator_gb", lambda: (6.0, "nvml"))
+    # This fixture models a CUDA host, so it must say so on the channel the
+    # spawn gate reads. The gate asks the cached out-of-process inference
+    # verdict (AP-25) BEFORE building, because on an unverified host the worker
+    # can only come up on the CPU and is declined after a 109 s build
+    # (measured 2026-10-21).
+    monkeypatch.setattr(detection, "cuda_inference_verified", lambda: True)
     return spawned
 
 

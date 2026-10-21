@@ -120,6 +120,7 @@ from pathlib import Path
 
 from .local_status import StatusSources, local_status_answer
 from .one_shot_reply import one_shot_reply
+from .personal_context import wants_personal_context
 from .local_action_gate import (
     HARNESS_NAME,
     LocalActionMode,
@@ -4567,7 +4568,14 @@ class BrainManager:
                 "nothing, say so."
             )
 
-        if self._people is not None:
+        # The personal corpus (people, contact index, ambient card, core
+        # memory) goes out only when the utterance could use it. Measured
+        # live 2026-10-21: "Was ist 10 plus 10?" carried 12_021 input
+        # tokens, the whole corpus with it. The gate defaults to INCLUDING
+        # it, so only a provably impersonal clock/date/arithmetic/closing
+        # utterance drops it (jarvis.brain.personal_context).
+        _personal = self._turn_wants_personal_context()
+        if self._people is not None and _personal:
             try:
                 people_block = self._people.render_for_prompt()
                 if people_block:
@@ -4581,7 +4589,7 @@ class BrainManager:
         # book is empty — either way no block is injected. Defensive try/except
         # so a store error never crashes the system-prompt build (AP-9-adjacent);
         # ``getattr`` guard tolerates __init__-bypassing tests (see _tools above).
-        _contacts = getattr(self, "_contacts", None)
+        _contacts = getattr(self, "_contacts", None) if _personal else None
         if _contacts is not None:
             try:
                 contacts_block = _contacts.render_for_prompt(max_chars=8_000)
@@ -4630,30 +4638,38 @@ class BrainManager:
         # cached system prefix — mirrors the capability block below. Defensive try/except:
         # a renderer fault must never crash the system-prompt build. The lazy
         # import is intentional so a monkeypatched renderer resolves correctly.
-        try:
-            from jarvis.skills.prompt_injection import (
-                render_available_skills_section,
-            )
-            from jarvis.skills.skill_context import try_get_skill_context
+        # A skill is invoked through a tool call, so a turn that cannot call
+        # tools cannot invoke one either: listing them is tokens the answering
+        # model cannot spend. Same gate as the tool block below. The whole
+        # block is skipped rather than its contents, so the "context not
+        # initialized" warning still means what it says.
+        if self._turn_can_use_tools():
+            try:
+                from jarvis.skills.prompt_injection import (
+                    render_available_skills_section,
+                )
+                from jarvis.skills.skill_context import try_get_skill_context
 
-            _skill_ctx = try_get_skill_context()
-            if _skill_ctx is not None:
-                _skills_section = render_available_skills_section(_skill_ctx.registry)
-                if _skills_section:
-                    parts.append(_skills_section)
-            elif not self._skills_omit_warned:
-                # AD-S6: silently omitting the section was RC2 of "Jarvis
-                # never calls a skill" — warn once per manager lifetime.
-                self._skills_omit_warned = True
-                log.warning(
-                    "skills section omitted: skill context not initialized"
-                )
-        except Exception:  # noqa: BLE001
-            if not self._skills_omit_warned:
-                self._skills_omit_warned = True
-                log.warning(
-                    "skills section omitted: renderer failed", exc_info=True
-                )
+                _skill_ctx = try_get_skill_context()
+                if _skill_ctx is not None:
+                    _skills_section = render_available_skills_section(
+                        _skill_ctx.registry
+                    )
+                    if _skills_section:
+                        parts.append(_skills_section)
+                elif not self._skills_omit_warned:
+                    # AD-S6: silently omitting the section was RC2 of "Jarvis
+                    # never calls a skill" — warn once per manager lifetime.
+                    self._skills_omit_warned = True
+                    log.warning(
+                        "skills section omitted: skill context not initialized"
+                    )
+            except Exception:  # noqa: BLE001
+                if not self._skills_omit_warned:
+                    self._skills_omit_warned = True
+                    log.warning(
+                        "skills section omitted: renderer failed", exc_info=True
+                    )
 
         # CLI first-class capabilities (design 2026-06-10, §5.3): list the
         # connected CLIs so the brain can pick them for matching requests.
@@ -4663,7 +4679,8 @@ class BrainManager:
             from jarvis.clis.prompt_section import render_connected_clis_section
             from jarvis.clis.shared import get_active_registry
 
-            _cli_reg = get_active_registry()
+            # Same capability gate: a connected CLI is reached by a tool call.
+            _cli_reg = get_active_registry() if self._turn_can_use_tools() else None
             if _cli_reg is not None:
                 _cli_section = render_connected_clis_section(_cli_reg)
                 if _cli_section:
@@ -4740,7 +4757,16 @@ class BrainManager:
         # factory seeds the CapabilityRegistry on every brain build, so the
         # render was always truthy and the routing rules never reached a single
         # prompt. See _TOOL_ROUTING_RULES for the full rationale.
-        parts.append(_TOOL_ROUTING_RULES)
+        # ...unless nothing in this turn can call a tool. Measured live
+        # 2026-10-21: "Was ist 10 plus 10?" cost 12_021 input tokens on a seat
+        # whose ``can_call_tools()`` is False and with no tool-capable lead
+        # installed, so the routing rules and the whole tool/skill/CLI
+        # inventory were instructions the answering model could not act on.
+        # Capability-driven, never a provider name (AP-21): any future
+        # tool-incapable brain inherits this, and the moment a lead IS
+        # installed the blocks come back, because then something CAN act.
+        if self._turn_can_use_tools():
+            parts.append(_TOOL_ROUTING_RULES)
 
         # The honest tool list (PR-05). This used to render the
         # CapabilityRegistry under the header "REGISTRIERTE WERKZEUGE
@@ -4757,7 +4783,9 @@ class BrainManager:
         #       about exactly this drift.
         # The live surface is the only honest source, and it is the same one
         # ``_check_unsupported_intent`` already trusts.
-        tool_list_block = self._render_live_tool_block()
+        tool_list_block = (
+            self._render_live_tool_block() if self._turn_can_use_tools() else ""
+        )
         if tool_list_block:
             parts.append(tool_list_block)
 
@@ -10185,6 +10213,49 @@ class BrainManager:
         except Exception:  # noqa: BLE001
             log.debug("Background completion history mirror failed", exc_info=True)
 
+    def _turn_wants_personal_context(self) -> bool:
+        """Should this turn carry the people/contacts/memory corpus?
+
+        Set per turn by :meth:`generate` from the utterance; True whenever that
+        has not run, so any path that builds a prompt without classifying an
+        utterance keeps the full context. Erring this way is deliberate: a turn
+        that needed a name and did not get it answers wrongly, while a turn
+        that carried the corpus needlessly only costs tokens.
+        """
+        return bool(getattr(self, "_turn_personal_context", True))
+
+    def _turn_can_use_tools(self) -> bool:
+        """Can anything in THIS turn actually call a tool?
+
+        Decides whether the tool-selection rules, the live tool inventory and
+        the skill/CLI listings belong in the system prompt. They are only
+        instructions if something can act on them: measured live 2026-10-21, a
+        voice turn on a tool-incapable seat with no tool-capable lead carried
+        12_021 input tokens, a large share of it an inventory the answering
+        model had no way to use.
+
+        True when the answering provider can call tools, or when a
+        tool-capable provider was installed to lead this turn (the intelligent
+        router and the action-intent delegation both do that) — then the lead
+        reads them and the blocks must be present. Capability-driven, never a
+        provider name (AP-21). Any error reads as True, because dropping the
+        tool contract from a turn that needed it costs the answer, while
+        keeping it only costs tokens.
+        """
+        try:
+            if self._active_can_call_tools():
+                return True
+            if getattr(self, "_router_lead_key", None) is not None:
+                return True
+            return bool(
+                getattr(self, "_turn_needs_tools", False)
+                or getattr(self, "_turn_substantive", False)
+                and bool(getattr(self._config.brain.routing, "intelligent_router", True))
+            )
+        except Exception:  # noqa: BLE001 — err toward keeping the contract
+            log.debug("tool-capability gate failed; keeping tool blocks", exc_info=True)
+            return True
+
     def _status_sources(self) -> StatusSources:
         """Where a local status answer reads its facts.
 
@@ -12468,6 +12539,11 @@ class BrainManager:
                 )
                 return status
 
+        # Whether the people/contacts/memory corpus belongs in this turn's
+        # system prompt. Decided once, here, from the utterance, so every
+        # prompt build in this turn agrees (regex only, no model call).
+        self._turn_personal_context = wants_personal_context(user_text)
+
         # 2. Router: which level applies?
         decision = self._picked_level(user_text)
         log.debug("Router-Decision: level=%s reason=%s", decision.level, decision.reason)
@@ -13122,6 +13198,19 @@ class BrainManager:
                 # Call wirklich Daten lieferte (`continue`-Pfade kommen hier
                 # nicht an), also schreiben wir nur den ECHTEN Provider in
                 # die Voice-Session-DB.
+                # The chain may hand a provider no model and let it resolve its
+                # own default (see the ``chain.append((active, None))`` repair
+                # in _build_fallback_chain). The provider is then the only one
+                # who knows what ran, and without asking it every turn was
+                # recorded as model ``None`` — which prices as $0.00 and hid
+                # 23_691 real input tokens from the cost surface (live
+                # 2026-10-21). Ask the instance that just answered.
+                if not model:
+                    reported = getattr(getattr(disp, "brain", None), "last_model", None)
+                    if isinstance(reported, str) and reported:
+                        model = reported
+                        used_model = reported
+
                 tokens_in_total = int(agg.usage.get("input_tokens", 0)) if agg.usage else 0
                 tokens_out_total = int(agg.usage.get("output_tokens", 0)) if agg.usage else 0
                 # Every plugin reports cache hits under the protocol key and
@@ -13147,13 +13236,30 @@ class BrainManager:
                         # then renders the turn as free — that silence is how
                         # 1.87M deepseek tokens went unbilled for a month
                         # (2026-07-28 cost audit). Say it once per turn.
-                        log.warning(
-                            "No pricing for model %r (static table and "
-                            "provider feed) — %d in / %d out tokens recorded "
-                            "as $0.00; add it to jarvis/brain/cost.py "
-                            "PRICING_USD_PER_MTOK",
-                            model, tokens_in_total, tokens_out_total,
-                        )
+                        #
+                        # A plan seat is a DIFFERENT statement: there is no
+                        # per-token price to look up, and $0.00 of money is
+                        # correct — but the tokens still consume the user's
+                        # plan, so reporting the turn as simply free is just as
+                        # misleading. Name which of the two this is.
+                        from jarvis.brain.background_policy import seat_bound
+
+                        if seat_bound(prov_name):
+                            log.info(
+                                "Plan seat %s: %d in / %d out tokens consume the "
+                                "subscription, not a per-token bill — $0.00 of "
+                                "money is correct and is NOT evidence that the "
+                                "turn was free.",
+                                prov_name, tokens_in_total, tokens_out_total,
+                            )
+                        else:
+                            log.warning(
+                                "No pricing for model %r (static table and "
+                                "provider feed) — %d in / %d out tokens recorded "
+                                "as $0.00; add it to jarvis/brain/cost.py "
+                                "PRICING_USD_PER_MTOK",
+                                model, tokens_in_total, tokens_out_total,
+                            )
                 except Exception:  # noqa: BLE001
                     log.warning(
                         "Cost calculation failed for model %r — recording $0.00",
