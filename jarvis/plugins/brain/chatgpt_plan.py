@@ -250,6 +250,43 @@ class ChatGPTPlanBrain:
             return
 
 
+def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:
+    """Provider-reported token counts carried by a terminal Responses event.
+
+    Returns ``None`` only when the provider sent no ``usage`` object at all, so
+    a caller can tell "not reported" from a reported zero. Nothing is estimated
+    here and no second request is ever made to obtain a count.
+
+    ``input_tokens`` is the UNCACHED share, the same contract ``_openai_base``
+    and ``gemini`` follow: OpenAI counts cache hits inside its input figure, and
+    leaving them there bills every hit at the full rate. ``total_tokens`` is
+    passed through exactly as reported and never recomputed from the parts.
+    """
+    response = payload.get("response")
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    def count(value: Any) -> int:
+        return int(value) if isinstance(value, int | float) else 0
+
+    in_details = usage.get("input_tokens_details")
+    out_details = usage.get("output_tokens_details")
+    cached = count(in_details.get("cached_tokens")) if isinstance(in_details, dict) else 0
+    reasoning = count(out_details.get("reasoning_tokens")) if isinstance(out_details, dict) else 0
+    reported: dict[str, int] = {
+        "input_tokens": max(count(usage.get("input_tokens")) - cached, 0),
+        "output_tokens": count(usage.get("output_tokens")),
+    }
+    if cached > 0:
+        reported["cache_hit_tokens"] = cached
+    if reasoning > 0:
+        reported["reasoning_tokens"] = reasoning
+    if isinstance(usage.get("total_tokens"), int | float):
+        reported["total_tokens"] = int(usage["total_tokens"])
+    return reported
+
+
 async def _events(resp: httpx.Response) -> AsyncIterator[BrainDelta]:
     event = ""
     async for line in resp.aiter_lines():
@@ -273,11 +310,17 @@ async def _events(resp: httpx.Response) -> AsyncIterator[BrainDelta]:
                 yield BrainDelta(content=text)
         elif kind == "response.completed":
             yield BrainDelta(finish_reason="stop")
+            usage = _usage_of(payload)
+            if usage is not None:
+                yield BrainDelta(usage=usage)
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
             if reason == "max_output_tokens":
                 yield BrainDelta(finish_reason="length")
+                usage = _usage_of(payload)
+                if usage is not None:
+                    yield BrainDelta(usage=usage)
                 return
             raise ChatGPTPlanError(
                 "incomplete", f"ChatGPT stopped the answer early ({reason or 'unknown'})."

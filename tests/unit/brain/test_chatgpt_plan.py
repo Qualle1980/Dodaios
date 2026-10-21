@@ -642,3 +642,122 @@ def test_missing_plan_scope_blocks_turn(brain_env, plan) -> None:
         asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain()))
     assert exc.value.code == "plan_scope_missing"
     assert not server.requests
+
+
+def _run_with_usage(brain_env, usage: Any) -> list[Any]:
+    install, _ = brain_env
+    response: dict[str, Any] = {} if usage is None else {"usage": usage}
+    install(
+        [
+            httpx.Response(
+                200,
+                content=_sse(
+                    {"type": "response.output_text.delta", "delta": "Bereit."},
+                    {"type": "response.completed", "response": response},
+                ),
+            )
+        ]
+    )
+    return asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+
+
+def test_reported_usage_reaches_the_caller(brain_env) -> None:
+    """A full usage object is forwarded, with the cached share split out."""
+    deltas = _run_with_usage(
+        brain_env,
+        {
+            "input_tokens": 120,
+            "output_tokens": 7,
+            "total_tokens": 127,
+            "input_tokens_details": {"cached_tokens": 100},
+            "output_tokens_details": {"reasoning_tokens": 4},
+        },
+    )
+    usage = [d.usage for d in deltas if d.usage]
+    assert len(usage) == 1, "usage is reported exactly once per turn"
+    # input_tokens is the UNCACHED share; total_tokens stays the reported value.
+    assert usage[0] == {
+        "input_tokens": 20,
+        "output_tokens": 7,
+        "cache_hit_tokens": 100,
+        "reasoning_tokens": 4,
+        "total_tokens": 127,
+    }
+    assert "".join(d.content or "" for d in deltas) == "Bereit."
+
+
+def test_total_tokens_is_passed_through_even_when_parts_disagree(brain_env) -> None:
+    """An inconsistent provider total is never recomputed or overwritten."""
+    deltas = _run_with_usage(
+        brain_env, {"input_tokens": 10, "output_tokens": 5, "total_tokens": 999}
+    )
+    assert [d.usage for d in deltas if d.usage] == [
+        {"input_tokens": 10, "output_tokens": 5, "total_tokens": 999}
+    ]
+
+
+def test_missing_usage_reports_nothing_rather_than_zero(brain_env) -> None:
+    """No usage object means NOT reported: no delta, so nothing is invented."""
+    deltas = _run_with_usage(brain_env, None)
+    assert [d.usage for d in deltas if d.usage] == []
+    assert deltas[-1].finish_reason == "stop"
+
+
+def test_partial_usage_omits_what_was_not_reported(brain_env) -> None:
+    """Absent cache and reasoning counts stay absent instead of becoming 0."""
+    deltas = _run_with_usage(brain_env, {"input_tokens": 31})
+    assert [d.usage for d in deltas if d.usage] == [
+        {"input_tokens": 31, "output_tokens": 0}
+    ]
+
+
+def test_reported_zero_usage_is_kept(brain_env) -> None:
+    """A provider-reported zero is a measurement, not a missing value."""
+    deltas = _run_with_usage(brain_env, {"input_tokens": 0, "output_tokens": 0})
+    assert [d.usage for d in deltas if d.usage] == [
+        {"input_tokens": 0, "output_tokens": 0}
+    ]
+
+
+def test_failed_turn_reports_no_usage(brain_env) -> None:
+    """An aborted answer must not contribute a second, partial count."""
+    install, _ = brain_env
+    install(
+        [
+            httpx.Response(
+                200,
+                content=_sse(
+                    {"type": "response.output_text.delta", "delta": "a"},
+                    {"type": "response.failed", "response": {"error": {"code": "server_error"}}},
+                ),
+            )
+        ]
+    )
+    with pytest.raises(ChatGPTPlanError):
+        asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+
+
+def test_length_capped_turn_still_reports_usage(brain_env) -> None:
+    """A turn cut off by max_output_tokens was still billed, so it is counted."""
+    install, _ = brain_env
+    install(
+        [
+            httpx.Response(
+                200,
+                content=_sse(
+                    {"type": "response.output_text.delta", "delta": "Bere"},
+                    {
+                        "type": "response.incomplete",
+                        "response": {
+                            "incomplete_details": {"reason": "max_output_tokens"},
+                            "usage": {"input_tokens": 12, "output_tokens": 16},
+                        },
+                    },
+                ),
+            )
+        ]
+    )
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    assert [d.usage for d in deltas if d.usage] == [
+        {"input_tokens": 12, "output_tokens": 16}
+    ]
