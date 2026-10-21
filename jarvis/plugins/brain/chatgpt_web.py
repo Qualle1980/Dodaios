@@ -225,6 +225,17 @@ class ChatGPTWebBrain:
         return s.base_url, token
 
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
+        import contextlib  # noqa: PLC0415 — only for the idle lease below
+
+        # Hold the bridge open for THIS turn, so the idle reaper cannot close
+        # it mid-answer. Released in the generator's finally, which covers an
+        # abort and an error alike.
+        with contextlib.ExitStack() as _stack:
+            _stack.enter_context(supervisor.lease())
+            async for _delta in self._complete_leased(req):
+                yield _delta
+
+    async def _complete_leased(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
         import asyncio  # noqa: PLC0415 — only for the blocking supervisor probe
 
         from jarvis.core.chat_turn import current_chat_turn  # noqa: PLC0415

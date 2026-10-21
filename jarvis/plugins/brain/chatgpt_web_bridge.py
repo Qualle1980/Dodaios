@@ -22,6 +22,7 @@ otherwise from the bridge's own ``config.json``; it is never logged.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -53,6 +55,15 @@ BridgeStatus = Literal[
     "session_invalid",
     "failed",
 ]
+
+# How long an unused bridge is kept alive before the reaper closes it. The
+# browser profile costs real memory, and the next complex question pays only
+# the measured ~6.5 s start to get it back.
+DEFAULT_IDLE_SHUTDOWN_MINUTES = 15.0
+
+# How often the idle watcher looks. Coarse on purpose: the timeout is minutes,
+# so a tighter poll would only burn wakeups.
+REAP_POLL_S = 60.0
 
 # Bounded restarts: a bridge that keeps dying must surface as ``failed``
 # instead of being respawned in a loop.
@@ -119,6 +130,41 @@ def settings() -> BridgeSettings:
     )
 
 
+def idle_shutdown_seconds() -> float:
+    """How long the bridge may sit unused before the reaper closes it.
+
+    From ``[brain.providers."chatgpt-web"] idle_shutdown_minutes``, defaulting
+    to :data:`DEFAULT_IDLE_SHUTDOWN_MINUTES`. ``0`` (or anything unparsable
+    read as 0) disables reaping and keeps the bridge up for the session, which
+    is the old behaviour.
+
+    The bridge holds a browser profile open: measured 2026-10-21 it accounted
+    for ~1.5 GB of the 4.1 GB resident in Chrome on a box with 2.3 GB free, so
+    leaving it running after a single complex question is a real cost.
+    """
+    raw = _provider_extra("idle_shutdown_minutes")
+    if raw == "":
+        return DEFAULT_IDLE_SHUTDOWN_MINUTES * 60.0
+    try:
+        minutes = float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "chatgpt-web: idle_shutdown_minutes=%r is not a number; "
+            "falling back to %s minutes.", raw, DEFAULT_IDLE_SHUTDOWN_MINUTES,
+        )
+        return DEFAULT_IDLE_SHUTDOWN_MINUTES * 60.0
+    return max(minutes, 0.0) * 60.0
+
+
+def reap_if_idle() -> bool:
+    """Close the bridge if it has been idle past the configured timeout.
+
+    Safe to call on any timer: it is a no-op unless the bridge is running AND
+    provably unused (no lease held). Returns whether it stopped the bridge.
+    """
+    return supervisor.stop_if_idle(idle_shutdown_seconds())
+
+
 def is_loopback(base_url: str) -> bool:
     return (urlparse(base_url).hostname or "") in _LOOPBACK_HOSTS
 
@@ -150,6 +196,108 @@ class BridgeSupervisor:
         self._starts: deque[float] = deque()
         self._started_at: float | None = None
         self._session_invalid = False
+        # Idle accounting for the reaper. ``_leases`` counts turns currently
+        # streaming through the bridge; ``_released_at`` is when the last one
+        # finished. stop() itself kills unconditionally, so a timer that calls
+        # it without consulting these would cut a live answer in half.
+        self._leases = 0
+        self._released_at: float | None = None
+        self._reaper: threading.Thread | None = None
+
+    # ---- idle accounting ---------------------------------------------------
+
+    @contextlib.contextmanager
+    def lease(self) -> Iterator[None]:
+        """Hold the bridge open for one turn.
+
+        Every path that sends a request through the bridge takes a lease, so
+        :meth:`stop_if_idle` can tell "nobody is using it" from "an answer is
+        still streaming". Released in a ``finally``, so an abort, a timeout or
+        a raised error frees it too — a leaked lease would pin the browser
+        open forever, which is the failure mode this whole feature removes.
+        """
+        with self._lock:
+            self._leases += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._leases = max(self._leases - 1, 0)
+                if self._leases == 0:
+                    self._released_at = time.monotonic()
+
+    def in_use(self) -> bool:
+        """True while at least one turn is streaming through the bridge."""
+        with self._lock:
+            return self._leases > 0
+
+    def idle_seconds(self) -> float | None:
+        """Seconds since the last turn finished, or None if that is unknown.
+
+        None means "do not reap": either a turn is in flight, or the bridge has
+        been started but has not served a turn yet, and guessing an idle age
+        for it would let the reaper close a bridge the user just opened.
+        """
+        with self._lock:
+            if self._leases > 0 or self._released_at is None:
+                return None
+            return time.monotonic() - self._released_at
+
+    def start_reaper(self) -> None:
+        """Start the idle watcher, once, for as long as the bridge runs.
+
+        Deliberately owned by the bridge rather than the boot sequence: it
+        exists only while there is a bridge to close, so nothing initialises on
+        the boot critical path (AP-26) and an install that never asks a complex
+        question never runs this at all. A daemon thread nobody joins, like the
+        realtime supervisor's, so it cannot hold shutdown up.
+        """
+        with self._lock:
+            if self._reaper is not None and self._reaper.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._reap_loop, name="chatgpt-web-idle-reaper", daemon=True
+            )
+            self._reaper = thread
+        thread.start()
+
+    def _reap_loop(self) -> None:
+        while True:
+            time.sleep(REAP_POLL_S)
+            try:
+                if self._started_at is None:
+                    return  # the bridge is gone; this watcher has no job left
+                if reap_if_idle():
+                    return
+            except Exception:  # noqa: BLE001 — a watcher must not die silently
+                log.warning("chatgpt-web: idle reaper check failed", exc_info=True)
+
+    def stop_if_idle(self, idle_timeout_s: float) -> bool:
+        """Stop the bridge only if it is provably idle. Returns whether it did.
+
+        Refuses while a lease is held, so a running turn is never interrupted.
+        A non-positive timeout disables reaping entirely.
+        """
+        if idle_timeout_s <= 0:
+            return False
+        idle = self.idle_seconds()
+        if idle is None or idle < idle_timeout_s:
+            return False
+        with self._lock:
+            # Re-check under the lock: a turn may have taken a lease between
+            # the idle_seconds() read and here, and that turn must not die.
+            if self._leases > 0:
+                return False
+            if self._started_at is None:
+                return False  # already stopped; nothing to do
+            self._kill(settings())
+            self._started_at = None
+            self._released_at = None
+        log.info(
+            "chatgpt-web: bridge closed after %.0f s idle; the next complex "
+            "question starts it again.", idle,
+        )
+        return True
 
     # ---- paths -------------------------------------------------------------
 
@@ -329,6 +477,10 @@ class BridgeSupervisor:
             state = self.wait_until_up()
         elif state.status == "starting":
             state = self.wait_until_up()
+        if state.status == "ready":
+            # The watcher only makes sense once there is a running bridge, and
+            # it is a no-op when idle_shutdown_minutes is 0.
+            self.start_reaper()
         return state
 
     def _kill(self, s: BridgeSettings) -> None:

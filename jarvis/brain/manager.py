@@ -116,6 +116,9 @@ from .dispatcher import BrainDispatcher
 from .evidence_gate import live_surface_covers
 from .identity import identity_block
 from .intent_router import RoutingDecision, classify
+from pathlib import Path
+
+from .local_status import StatusSources, local_status_answer
 from .one_shot_reply import one_shot_reply
 from .local_action_gate import (
     HARNESS_NAME,
@@ -10182,6 +10185,30 @@ class BrainManager:
         except Exception:  # noqa: BLE001
             log.debug("Background completion history mirror failed", exc_info=True)
 
+    def _status_sources(self) -> StatusSources:
+        """Where a local status answer reads its facts.
+
+        Only what this object can actually reach. ``status_sources`` lets the
+        runtime that owns the mission coordinator and the agent registry inject
+        those two without this layer importing them (protocols boundary); what
+        nobody wires stays absent, and the answer then says the value cannot be
+        read instead of inventing one.
+        """
+        injected = getattr(self, "status_sources", None)
+        if isinstance(injected, StatusSources):
+            return injected
+        return StatusSources(
+            repo=Path.cwd(),
+            readiness=self._readiness_checks,
+        )
+
+    async def _readiness_checks(self) -> dict[str, bool]:
+        """The readiness facts the brain layer can answer for itself."""
+        active = self._active_name
+        return {
+            "brain": bool(active) and active in self._registry.available(),
+        }
+
     async def _record_response_side_effects(
         self,
         *,
@@ -12420,6 +12447,26 @@ class BrainManager:
                     trace_id=trace_uuid,
                 )
                 return one_shot
+
+            # A status question is a fact this process already holds. Measured
+            # 2026-10-21: "Wie ist der Projektstand?" classified as  # i18n-allow
+            # capable-default and cost a full browser-bridge turn (~7.1 s) plus
+            # a model call on the user's plan to report the checked-out branch.
+            # Sources that are not wired up answer "cannot read that" rather
+            # than falling through to a model, because the user asked for a
+            # local fact and spending a model call on it is what this removes.
+            status = await local_status_answer(
+                user_text, self._resolve_turn_lang(), sources=self._status_sources()
+            )
+            if status is not None:
+                log.info("Status answered from local data, no model: %r", user_text[:40])
+                await self._record_response_side_effects(
+                    user_text=user_text,
+                    response_text=status,
+                    use_history=use_history,
+                    trace_id=trace_uuid,
+                )
+                return status
 
         # 2. Router: which level applies?
         decision = self._picked_level(user_text)

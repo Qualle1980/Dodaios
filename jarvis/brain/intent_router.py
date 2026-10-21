@@ -184,7 +184,22 @@ _DEEP_PATTERNS = [
     r"\bwarum\b", r"\bwieso\b", r"\bweshalb\b",
     r"\boptimier\w*", r"\bverbesser\w*",
     r"\banleitung\b", r"\btutorial\b", r"\bkonzept\b", r"\barchitektur\b",
+    # Explicit requests for an ELABORATE answer. These only ever ADD deep —
+    # the invariant above still holds, no keyword here can demote anything to
+    # fast. They exist because the venue split (a short spoken answer on the
+    # direct seat versus the long written one in the browser chat) needs the
+    # request's own "answer me at length" signal: measured 2026-10-21,
+    # "Erstelle einen vollständigen Entwicklungsplan" and "Untersuche die  # i18n-allow
+    # Ursache eines schwierigen Fehlers" both read as capable-default, so a
+    # deliberate request for depth went to the short-answer seat.
+    r"\bausf[üu]hrlich\w*", r"\bvollst[äa]ndig\w*", r"\bdetailliert\w*",  # i18n-allow
+    r"\bkomplett\b", r"\bumfassend\w*", r"\bgr[üu]ndlich\w*",  # i18n-allow
+    r"\bim detail\b", r"\bschritt f[üu]r schritt\b",  # i18n-allow
+    r"\buntersuch\w*", r"\bursache\b", r"\bermittel\w*",  # i18n-allow
+    r"\berstell\w*\b.*\b\w*plan\b", r"\b\w+plan\b",  # i18n-allow: Entwicklungsplan
     # English
+    r"\bin detail\b", r"\bthorough\w*", r"\bcomprehensiv\w*",
+    r"\bstep by step\b", r"\broot cause\b", r"\binvestigat\w*",
     r"\bresearch\w*", r"\banalyz\w*", r"\banalyse\w*",
     r"\bdesign\w*", r"\bexplain\w*", r"\bcompare\w*", r"\bdifferenc\w*",
     r"\bwrite\b.*\bfor me\b", r"\bdraft\w*",

@@ -141,6 +141,57 @@ def set_brain_primary(name: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     _sync_brain_primary_drift_soll(name)  # i18n-allow
 
 
+def set_latency_jsonl(enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
+    """Turn the per-turn latency JSONL log on or off (``[latency] log_jsonl``).
+
+    This is the diagnostic switch: the ``LatencyTracker`` marks are always on
+    and near-free, but the writer that materialises one row per voice turn to
+    ``state/latency_log.jsonl`` is opt-in, which is why that file does not
+    exist on an install that never enabled it. Off again is the same call with
+    ``False`` — nothing else has to be undone after a measurement session.
+    """
+    _patch_table(path, "latency", "log_jsonl", enabled)
+
+
+def set_brain_light_roles(
+    provider: str, *, path: Path = DEFAULT_CONFIG_FILE
+) -> None:
+    """Point ``[brain] routing_provider`` and ``local_fallback`` at one provider.
+
+    These two roles decide who answers when the active brain is unavailable or
+    when the router needs a cheap opinion. Pointing them at a browser-backed
+    provider makes an ordinary fallback start a browser, so they belong on a
+    direct-transport seat. Written in ONE atomic TOML write so a crash cannot
+    leave the two roles disagreeing, plus the drift-soll layer the guard reads.
+    """
+    _patch_table(path, "brain", "routing_provider", provider,
+                 extra={"local_fallback": provider})
+    for key in ("routing_provider", "local_fallback"):
+        try:
+            _update_config_soll_table_key("brain", key, provider)  # i18n-allow
+        except Exception as exc:  # noqa: BLE001 — best-effort, must not propagate
+            log.warning("Could not sync brain.%s to config-soll.json: %s", key, exc)  # i18n-allow
+
+
+def set_warm_seat_on_boot(enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
+    """Set ``[brain.routing] warm_seat_on_boot`` in TOML and the drift-soll.
+
+    The AUTHORITATIVE writer for the boot warm-up switch. Both layers matter:
+    ``jarvis.toml`` is what the next boot reads, and ``config-soll.json`` is
+    what the drift-guard enforces every five minutes — writing only the TOML
+    gets the value reverted while the app is running. There is no ENV layer for
+    this key, so two layers are the whole set.
+
+    Raises ``FileNotFoundError`` if the TOML config file does not exist; the
+    drift-soll step is best-effort and never breaks the TOML write.
+    """
+    _patch_brain_routing_toml(path, "warm_seat_on_boot", enabled)
+    try:
+        _update_config_soll_table_key("brain.routing", "warm_seat_on_boot", enabled)  # i18n-allow
+    except Exception as exc:  # noqa: BLE001 — best-effort, must not propagate
+        log.warning("Could not sync warm_seat_on_boot to config-soll.json: %s", exc)  # i18n-allow
+
+
 def set_worker_provider(
     name: str, *, path: Path = DEFAULT_CONFIG_FILE, previous_provider: str | None = None
 ) -> str:
@@ -3034,6 +3085,41 @@ def _patch_computer_use_provider_toml(path: Path, name: str) -> None:
         _atomic_write(path, out)
 
 
+def _patch_brain_routing_toml(path: Path, key: str, value: object) -> None:
+    """Set one key under the NESTED ``[brain.routing]`` table.
+
+    Deliberately not :func:`_patch_table`: that one resolves ``"brain.routing"``
+    as a single literal key, so on a config that also carries a quoted
+    ``["brain.routing"]`` table it writes into that inert top-level table and
+    the nested one the loader actually reads keeps its old value. Measured on
+    this config 2026-10-21: ``warm_seat_on_boot`` landed in the quoted table
+    and stayed ``true`` everywhere that mattered.
+    """
+    path = _ensure_writable_config_path(path)
+
+    with _WRITE_LOCK:
+        raw = path.read_text(encoding="utf-8")
+        had_bom = raw.startswith(_BOM)
+        if had_bom:
+            raw = raw[len(_BOM) :]
+        doc: TOMLDocument = tomlkit.parse(raw)
+
+        brain = doc.get("brain")
+        if brain is None:
+            brain = tomlkit.table()
+            doc["brain"] = brain
+        routing = brain.get("routing")
+        if routing is None:
+            routing = tomlkit.table()
+            brain["routing"] = routing
+        routing[key] = value
+
+        out = tomlkit.dumps(doc)
+        if had_bom:
+            out = _BOM + out
+        _atomic_write(path, out)
+
+
 def _patch_worker_key_toml(path: Path, key: str, value: object) -> None:
     """Set one key under the nested ``[brain.worker]`` table.
 
@@ -3615,6 +3701,37 @@ def _update_config_soll_computer_use_provider(name: str) -> None:  # i18n-allow
             return  # already in sync — avoid a needless rewrite
         block["provider"] = name
 
+        out = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        _atomic_write_text(soll_path, out)  # i18n-allow
+
+
+def _update_config_soll_table_key(  # i18n-allow
+    table: str, key: str, value: str | bool | int | float
+) -> None:
+    """Atomically set ``data[table][key] = value`` in config-soll.json.  # i18n-allow
+
+    Same FLAT dotted-key layout and graceful-absent behaviour as
+    :func:`_update_config_soll_worker_key`, but for any pinned table — the  # i18n-allow
+    drift-guard compares every key it finds, so a value written to jarvis.toml
+    alone is reverted within five minutes.
+    """
+    soll_path = _config_soll_path()  # i18n-allow
+    if not soll_path.exists():  # i18n-allow
+        log.debug(
+            "config-soll.json absent (%s) — skipping drift-soll sync",  # i18n-allow
+            soll_path,  # i18n-allow: internal config-soll identifier
+        )
+        return
+
+    with _WRITE_LOCK:
+        data = json.loads(soll_path.read_text(encoding="utf-8"))  # i18n-allow
+        block = data.get(table)
+        if not isinstance(block, dict):
+            block = {}
+            data[table] = block
+        if block.get(key) == value:
+            return  # already in sync — avoid a needless rewrite
+        block[key] = value
         out = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
         _atomic_write_text(soll_path, out)  # i18n-allow
 
