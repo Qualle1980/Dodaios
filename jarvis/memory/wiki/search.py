@@ -211,6 +211,7 @@ class VaultSearch:
         self._external_conns: dict[str, sqlite3.Connection] = {}
         # Sources whose index was not usable on the latest search.
         self._external_not_ready: set[str] = set()
+        self._external_open_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -289,8 +290,19 @@ class VaultSearch:
             log.debug("VaultSearch warm_up skipped: %s", exc)
         # Same background thread: bring external indexes up to date before
         # the first turn needs them (a search never builds one itself).
+        # Then open each reader connection and touch its index, so the first
+        # turn does not pay the opens (~330 ms for seven DBs, live 2026-10-22).
         for source in self._external:
-            refresh_external_index(source)
+            try:
+                refresh_external_index(source)
+                conn = self._external_conn(source)
+                if conn is not None:
+                    conn.execute(
+                        "SELECT rowid FROM wiki_fts WHERE wiki_fts MATCH ? LIMIT 1",
+                        ('"warmup"',),
+                    ).fetchall()
+            except Exception as exc:  # noqa: BLE001 — the turn opens it itself
+                log.debug("VaultSearch warm_up of %r skipped: %s", source.name, exc)
 
     def index_ready(self) -> bool:
         """False when the latest search skipped a source with no usable index."""
@@ -330,6 +342,29 @@ class VaultSearch:
             log.debug("VaultSearch: fts_index not available — schema not ensured")
         return self._conn
 
+    def _external_conn(self, source: ExternalSource) -> sqlite3.Connection | None:
+        """The source's reader connection, opened once; None while no index exists.
+
+        Only opens a connection and reads the metadata row — never builds. The
+        lock makes boot warm-up and a concurrent search share ONE connection
+        per source instead of racing to open two.
+        """
+        with self._external_open_lock:
+            conn = self._external_conns.get(source.name)
+            if conn is not None:
+                return conn
+            import jarvis.memory.wiki.fts_index as _fts
+
+            db_path = index_db_path(source)
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=0.05)
+            if _fts.read_index_metadata(conn) is None:
+                conn.close()
+                return None
+            self._external_conns[source.name] = conn
+            return conn
+
     def _search_external(
         self, source: ExternalSource, match_expr: str, k: int
     ) -> list[SearchHit]:
@@ -346,20 +381,10 @@ class VaultSearch:
         ):
             _schedule_external_refresh(source)
         try:
-            conn = self._external_conns.get(source.name)
+            conn = self._external_conn(source)
             if conn is None:
-                import jarvis.memory.wiki.fts_index as _fts
-
-                db_path = index_db_path(source)
-                if not db_path.exists():
-                    self._external_not_ready.add(source.name)
-                    return []
-                conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=0.05)
-                if _fts.read_index_metadata(conn) is None:
-                    conn.close()
-                    self._external_not_ready.add(source.name)
-                    return []
-                self._external_conns[source.name] = conn
+                self._external_not_ready.add(source.name)
+                return []
             return self._run_query(
                 conn,
                 match_expr,

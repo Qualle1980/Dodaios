@@ -159,6 +159,71 @@ def test_concurrent_search_and_refresh_do_not_conflict(tmp_path: Path) -> None:
         assert refresh_external_index(source) is False
 
 
+def _many_sources(tmp_path: Path, n: int) -> tuple[ExternalSource, ...]:
+    sources = []
+    for i in range(n):
+        root = tmp_path / f"src{i}"
+        root.mkdir()
+        for j in range(40):
+            (root / f"n{j}.md").write_text(f"# N{j}\n\nPlain text {j}.\n", "utf-8")
+        (root / "jarvis.md").write_text("# Jarvis\n\nProvenance telemetry.\n", "utf-8")
+        sources.append(ExternalSource(name=f"src{i}", path=root.resolve()))
+    return tuple(sources)
+
+
+def test_warm_up_opens_readers_so_first_search_is_warm(tmp_path: Path) -> None:
+    sources = _many_sources(tmp_path, 6)
+    vault, conn = _vault(tmp_path)
+    search = VaultSearch(vault, conn=conn, external_sources=sources)
+    search.warm_up()
+    assert set(search._external_conns) == {s.name for s in sources}
+    timings = []
+    for _ in range(4):
+        t0 = time.perf_counter()
+        hits = search.search("Provenance")
+        timings.append((time.perf_counter() - t0) * 1000)
+        assert len(hits) == 5 and search.index_ready()
+    assert timings[0] < 50, f"first search after warm-up took {timings[0]:.1f} ms"
+
+
+def test_concurrent_warm_up_and_search_share_one_reader_per_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = _many_sources(tmp_path, 3)
+    for s in sources:
+        assert refresh_external_index(s)
+    opened: list[str] = []
+    real_connect = sqlite3.connect
+
+    def _counting_connect(path, *a, **k):
+        if str(path).endswith(".db") and k.get("check_same_thread") is False:
+            opened.append(Path(str(path)).stem)
+        return real_connect(path, *a, **k)
+
+    monkeypatch.setattr(search_mod.sqlite3, "connect", _counting_connect)
+    vault, conn = _vault(tmp_path)
+    search = VaultSearch(vault, conn=conn, external_sources=sources)
+    for s in sources:
+        search_mod._external_refreshed_at[s.name] = time.monotonic()
+    workers = [threading.Thread(target=search.warm_up) for _ in range(3)]
+    workers += [threading.Thread(target=search.search, args=("Provenance",)) for _ in range(3)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    assert sorted(opened) == sorted(s.name for s in sources)
+
+
+def test_warm_up_failure_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources = _many_sources(tmp_path, 1)
+    monkeypatch.setattr(
+        search_mod, "index_db_path", lambda s: tmp_path / "blocked" / "x" / f"{s.name}.db"
+    )
+    (tmp_path / "blocked").write_text("a file where a folder must go", "utf-8")
+    vault, conn = _vault(tmp_path)
+    VaultSearch(vault, conn=conn, external_sources=sources).warm_up()
+
+
 async def test_injector_reports_index_not_ready_and_leaves_no_rebuild(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
