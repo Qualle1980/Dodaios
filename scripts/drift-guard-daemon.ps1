@@ -30,7 +30,9 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot        = "C:\Users\Administrator\Desktop\Personal Jarvis",
-    [int]   $IntervalSeconds = 300
+    [int]   $IntervalSeconds = 300,
+    # Warn-only (default): guard runs with -DryRun, logs drift, never writes config/env or restarts.
+    [bool]  $WarnOnly        = $true
 )
 
 $ErrorActionPreference = "Continue"  # Daemon darf nicht crashen wenn ein Lauf failt
@@ -56,13 +58,15 @@ if (Test-Path $lockFile) {
 # Lock setzen
 $PID | Out-File -FilePath $lockFile -Encoding utf8 -Force
 
-"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | DAEMON | start (PID $PID, interval=${IntervalSeconds}s)" |
+"$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | DAEMON | start (PID $PID, interval=${IntervalSeconds}s, warnOnly=$WarnOnly)" |
     Add-Content -Path $logFile -Encoding utf8
 
 try {
     while ($true) {
         try {
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $guardScript 2>&1 | Out-Null
+            $guardArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guardScript)
+            if ($WarnOnly) { $guardArgs += "-DryRun" }
+            & powershell @guardArgs 2>&1 | Out-Null
         } catch {
             "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | DAEMON | guard run failed: $_" |
                 Add-Content -Path $logFile -Encoding utf8
