@@ -51,6 +51,8 @@ def _index_under_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         return tmp_path / "data" / "external_sources" / f"{source.name}.db"
 
     monkeypatch.setattr(search_mod, "index_db_path", _db)
+    # Refresh bookkeeping is process-wide; every test starts cold.
+    monkeypatch.setattr(search_mod, "_external_refreshed_at", {})
 
 
 @pytest.fixture
@@ -74,7 +76,10 @@ def _search(vault: Path, tmp_path: Path, sources=()) -> VaultSearch:
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db))
     fts_index.rebuild_index(vault, conn)
-    return VaultSearch(vault, conn=conn, external_sources=sources)
+    search = VaultSearch(vault, conn=conn, external_sources=sources)
+    # Boot warm-up builds external indexes; a search never builds one itself.
+    search.warm_up()
+    return search
 
 
 def _entity(slug: str, body: str) -> str:

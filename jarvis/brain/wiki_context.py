@@ -352,6 +352,11 @@ class WikiContextInjector:
                     return system_prompt
 
                 miss_reason = "no_hits"
+                # A source whose index is still being built in the background
+                # is not an empty memory; say so instead of "no_hits".
+                index_ready = getattr(self._search, "index_ready", None)
+                if callable(index_ready) and not index_ready():
+                    miss_reason = "index_not_ready"
                 # Gate 2 (post-retrieval): the index matches on ANY query term, so
                 # a page sharing one common word arrives looking just like one
                 # that is on topic. Coverage + a within-call relative floor

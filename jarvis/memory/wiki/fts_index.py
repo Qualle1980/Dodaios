@@ -165,6 +165,32 @@ def rebuild_index(vault_root: Path, conn: sqlite3.Connection) -> int:
     return count
 
 
+def reconcile_index(vault_root: Path, conn: sqlite3.Connection) -> int:
+    """Bring ``wiki_fts`` in line with ``vault_root`` by modification time.
+
+    Re-parses only new or changed pages and drops rows for deleted ones, all
+    in ONE transaction: on any error the caller rolls back and the last
+    committed index keeps serving. Returns the number of rows touched.
+    """
+    ensure_schema(conn)
+    indexed = dict(conn.execute("SELECT path, mtime FROM wiki_fts").fetchall())
+    current = vault_page_mtimes(vault_root)
+    touched = 0
+    for rel, mtime in current.items():
+        # ``_parse_page_data`` stores ``str(os.path.getmtime)`` — same float.
+        if indexed.get(rel) != str(mtime) and _upsert_one(conn, vault_root, vault_root / rel):
+            touched += 1
+    for rel in indexed.keys() - current.keys():
+        conn.execute("DELETE FROM wiki_fts WHERE path = ?", (rel,))
+        touched += 1
+    if touched or read_index_metadata(conn) is None:
+        _record_index_metadata(conn, operation="reconcile")
+    conn.commit()
+    if touched:
+        log.info("fts_index: reconciled %d pages in %s", touched, vault_root)
+    return touched
+
+
 def upsert_page(
     conn: sqlite3.Connection,
     vault_root: Path,
@@ -449,6 +475,7 @@ __all__ = [
     "ensure_schema",
     "index_vault",
     "rebuild_index",
+    "reconcile_index",
     "upsert_page",
     "remove_page",
     "read_index_metadata",

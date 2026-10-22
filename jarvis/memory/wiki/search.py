@@ -35,6 +35,8 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +61,65 @@ _FTS5_SPECIAL_STRIP_RE = re.compile(r'"')
 # The fts_index module resolves this from config; here we just use whatever
 # the schema says: "data/jarvis.db" relative to the project root.
 # VaultSearch accepts an optional `conn` parameter for test injection.
+
+# External-source indexes live on disk and are refreshed OFF the turn: boot
+# warm-up and a stale search start a background reconcile; a search only ever
+# reads the last committed index. Process-wide, because recall tools build a
+# fresh VaultSearch per call.
+_EXTERNAL_REFRESH_INTERVAL_S = 300.0
+_external_registry_lock = threading.Lock()
+_external_locks: dict[str, threading.Lock] = {}
+_external_refreshed_at: dict[str, float] = {}
+
+
+def _external_lock(name: str) -> threading.Lock:
+    with _external_registry_lock:
+        return _external_locks.setdefault(name, threading.Lock())
+
+
+def refresh_external_index(source: ExternalSource) -> bool:
+    """Reconcile one source's on-disk index; False when skipped or failed.
+
+    One refresh per source at a time (a second caller returns at once). WAL
+    lets searches read the last committed index while this writes, and a
+    failure rolls back so that index stays valid.
+    """
+    lock = _external_lock(source.name)
+    if not lock.acquire(blocking=False):
+        return False
+    try:
+        if not source.path.is_dir():
+            return False
+        import jarvis.memory.wiki.fts_index as _fts
+
+        db_path = index_db_path(source)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            _fts.reconcile_index(source.path, conn)
+        except Exception as exc:  # noqa: BLE001 — keep the last committed index
+            conn.rollback()
+            log.warning("VaultSearch: refreshing external %r failed: %s", source.name, exc)
+            return False
+        finally:
+            conn.close()
+        _external_refreshed_at[source.name] = time.monotonic()
+        return True
+    finally:
+        lock.release()
+
+
+def _schedule_external_refresh(source: ExternalSource) -> None:
+    """Start a background refresh unless one is already running."""
+    if _external_lock(source.name).locked():
+        return
+    threading.Thread(
+        target=refresh_external_index,
+        args=(source,),
+        name=f"wiki-external-index-{source.name}",
+        daemon=True,
+    ).start()
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +209,8 @@ class VaultSearch:
         self._db_path: Path | None = db_path
         self._external = tuple(external_sources)
         self._external_conns: dict[str, sqlite3.Connection] = {}
+        # Sources whose index was not usable on the latest search.
+        self._external_not_ready: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -224,6 +287,14 @@ class VaultSearch:
             # Missing table = index not built yet; anything else is the same
             # degraded-but-working state search() already tolerates.
             log.debug("VaultSearch warm_up skipped: %s", exc)
+        # Same background thread: bring external indexes up to date before
+        # the first turn needs them (a search never builds one itself).
+        for source in self._external:
+            refresh_external_index(source)
+
+    def index_ready(self) -> bool:
+        """False when the latest search skipped a source with no usable index."""
+        return not self._external_not_ready
 
     def close(self) -> None:
         """Close the owned DB connection, if any."""
@@ -262,19 +333,32 @@ class VaultSearch:
     def _search_external(
         self, source: ExternalSource, match_expr: str, k: int
     ) -> list[SearchHit]:
-        """Hits from one read-only source; any failure only drops its hits."""
+        """Hits from one read-only source; any failure only drops its hits.
+
+        Reads only an index that is already on disk. A missing one, or one
+        older than the refresh interval, is reconciled in the background —
+        never inside the caller's turn.
+        """
+        self._external_not_ready.discard(source.name)
+        last = _external_refreshed_at.get(source.name)
+        if source.path.is_dir() and (
+            last is None or time.monotonic() - last > _EXTERNAL_REFRESH_INTERVAL_S
+        ):
+            _schedule_external_refresh(source)
         try:
             conn = self._external_conns.get(source.name)
             if conn is None:
                 import jarvis.memory.wiki.fts_index as _fts
 
                 db_path = index_db_path(source)
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db_path), check_same_thread=False)
-                if source.path.is_dir():
-                    _fts.rebuild_index(source.path, conn)
-                else:
-                    _fts.ensure_schema(conn)
+                if not db_path.exists():
+                    self._external_not_ready.add(source.name)
+                    return []
+                conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=0.05)
+                if _fts.read_index_metadata(conn) is None:
+                    conn.close()
+                    self._external_not_ready.add(source.name)
+                    return []
                 self._external_conns[source.name] = conn
             return self._run_query(
                 conn,
@@ -448,6 +532,12 @@ def _matching_excerpt(body: str | None, tokens: list[str], limit: int = _EXCERPT
     absorbed = -1
     for idx, stripped in enumerate(lines):
         if idx == absorbed:
+            continue
+        # Necessary condition for any match: the term's first word occurs as a
+        # substring. Skips the word split on the many lines that cannot match
+        # (it dominated a live search at ~95 % of ~100 ms).
+        lowered = stripped.lower()
+        if not any(term[0] in lowered for term in terms):
             continue
         line_words = _words(stripped)
         matched = sum(1 for term in terms if _line_matches(line_words, list(term)))
