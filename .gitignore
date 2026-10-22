@@ -505,3 +505,9 @@ scripts/figures/cache/
 # Launch-video renders from the /brag skill (thousands of frames).
 brag-output/
 eval-results/
+
+# Local backups and private Jarvis runtime memory (never commit)
+jarvis.toml.bak-*
+wiki/obsidian-vault/society/
+# Third-party Obsidian plugin binaries (installed locally, not a config seed)
+wiki/obsidian-vault/.obsidian/plugins/
