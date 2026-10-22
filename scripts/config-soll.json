@@ -6,10 +6,10 @@
     "single_turn_mode": false
   },
   "tts": {
-    "provider": "grok-voice",
+    "provider": "supertonic-local",
     "fallback": "grok-voice",
-    "voice_de": "Kore",
-    "voice_en": "Kore",
+    "voice_de": "M1",
+    "voice_en": "M1",
     "language_code": "auto",
     "chunk_by_sentence": false,
     "seed": 7,
@@ -33,11 +33,14 @@
     "allow_sapi5_fallback": false
   },
   "brain": {
-    "primary": "openai",
+    "primary": "chatgpt-plan",
     "fallback": "openrouter",
-    "deep_brain": "claude-cli",
-    "routing_provider": "grok",
-    "routing_model": "grok-4.20-0309-non-reasoning"
+    "deep_brain": "chatgpt-web",
+    "routing_provider": "chatgpt-plan",
+    "routing_model": "",
+    "local_fallback": "chatgpt-plan",
+    "local_fallback_model": "",
+    "deep_brain_escalation": "explicit"
   },
   "brain.router": {
     "provider": "grok",
@@ -121,7 +124,7 @@
   "brain.providers.ollama": {
     "tool_model": "gemma4:12b-it-qat",
     "cu_model": "gemma4:12b-it-qat",
-    "model": "deepseek-r1:14b",
+    "model": "qwen3.5:4b",
     "deep_model": "deepseek-r1:14b"
   },
   "brain.providers.grok": {
@@ -164,5 +167,11 @@
   },
   "brain.providers.openai-live": {
     "model": "gpt-live-1"
+  },
+  "brain.providers.chatgpt-web": {
+    "model": "chatgpt-web/instant"
+  },
+  "brain.routing": {
+    "warm_seat_on_boot": false
   }
 }
