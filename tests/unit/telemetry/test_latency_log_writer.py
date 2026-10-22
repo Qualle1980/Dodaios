@@ -34,6 +34,30 @@ def _flush_writer(writer: LatencyLogWriter, expected: int, *, timeout: float = 2
         time.sleep(0.01)
 
 
+async def test_writer_emits_diagnostic_schema_and_invalid_duration(tmp_path: Path) -> None:
+    writer = LatencyLogWriter(tmp_path / "diagnostic.jsonl")
+    event = LatencyTurnComplete(
+        trace_id=uuid4(),
+        anchor_ns=100,
+        stages_ms={
+            "brain_last_token": 20.0,
+            "tts_request_sent": 10.0,
+        },
+        brain_input_tokens=12,
+    )
+    await writer._on_event(event)
+    _flush_writer(writer, expected=1)
+    writer.close()
+    [row] = _read_lines(writer.path)
+    assert row["durations_ms"]["brain_to_tts_request"] is None
+    anomaly = row["diagnostics"]["timing"]["invalid_durations"][0]
+    assert anomaly["label"] == "brain_to_tts_request"
+    assert anomaly["delta_ms"] == -10.0
+    assert row["diagnostics"]["stt"]["availability"] == "unavailable"
+    assert row["diagnostics"]["tokens"]["availability"] == "partial"
+    assert row["diagnostics"]["tokens"]["input"] == 12
+
+
 async def test_row_schema_matches_cli_contract(tmp_path: Path) -> None:
     log_path = tmp_path / "latency.jsonl"
     writer = LatencyLogWriter(log_path)

@@ -128,6 +128,7 @@ class LatencyLogWriter:
         ttfw_ms = stages.get("turn_to_first_audio")
         total_ms = stages.get("tts_stream_done")
         durations_ms = _derive_durations(stages)
+        invalid_durations = _invalid_durations(stages)
         return {
             "turn_id": event.trace_id.hex,
             "iso_timestamp": _iso(event.timestamp_ns),
@@ -151,6 +152,7 @@ class LatencyLogWriter:
                 event.tts_input_chars if event.tts_input_chars >= 0 else None
             ),
             "errors": list(event.errors),
+            "diagnostics": _build_diagnostics(event, invalid_durations),
         }
 
     # ----------------------------------------------------------------------
@@ -258,5 +260,105 @@ def _derive_durations(stages: dict[str, float]) -> dict[str, float | None]:
         if start is None:
             out[label] = None
             continue
-        out[label] = round(end - start, 3)
+        delta = round(end - start, 3)
+        out[label] = delta if delta >= 0 else None
     return out
+
+
+def _invalid_durations(stages: dict[str, float]) -> list[dict[str, object]]:
+    invalid: list[dict[str, object]] = []
+    for label, end_phase, start_phase in _DURATION_PAIRS:
+        if not start_phase:
+            continue
+        end = stages.get(end_phase)
+        start = stages.get(start_phase)
+        if end is None or start is None:
+            continue
+        delta = round(end - start, 3)
+        if delta < 0:
+            invalid.append(
+                {
+                    "label": label,
+                    "start_phase": start_phase,
+                    "end_phase": end_phase,
+                    "delta_ms": delta,
+                    "reason": "end_before_start",
+                }
+            )
+    return invalid
+
+
+def _build_diagnostics(
+    event: LatencyTurnComplete,
+    invalid_durations: list[dict[str, object]],
+) -> dict[str, object]:
+    has_tokens = event.brain_input_tokens >= 0 or event.brain_output_tokens >= 0
+    return {
+        "event": dict(event.diagnostics),
+        "turn": {
+            "event_type": type(event).__name__,
+            "event_timestamp_ns": event.timestamp_ns,
+            "input_event_id": None,
+            "output_event_id": None,
+            "continuation_events": [],
+            "dedup_decision": {
+                "availability": "unavailable",
+                "reason": "not_present_on_latency_event",
+            },
+        },
+        "stt": {
+            "provider": None,
+            "detected_language": None,
+            "final_completed": None,
+            "duration_ms": None,
+            "error": {
+                "availability": "unavailable",
+                "reason": "not_present_on_latency_event",
+            },
+            "availability": "unavailable",
+            "reason": "not_present_on_latency_event",
+        },
+        "routing_bridge": {
+            "intent_category": None,
+            "route": None,
+            "provider": None,
+            "bridge_start_ns": None,
+            "bridge_end_ns": None,
+            "bridge_duration_ms": None,
+            "error": {
+                "availability": "unavailable",
+                "reason": "not_present_on_latency_event",
+            },
+        },
+        "tts": {
+            "provider": None,
+            "language": None,
+            "voice": None,
+            "tts_start_ns": None,
+            "first_audio_ns": None,
+            "playback_handoff_ns": None,
+            "playback_start_ns": None,
+            "playback_end_ns": None,
+            "queue_wait_ms": None,
+            "availability": "unavailable",
+            "reason": "not_present_on_latency_event",
+        },
+        "timing": {
+            "clock": "perf_counter_ns",
+            "anchor_ns": event.anchor_ns,
+            "invalid_durations": invalid_durations,
+        },
+        "tokens": {
+            "input": event.brain_input_tokens if event.brain_input_tokens >= 0 else None,
+            "output": event.brain_output_tokens if event.brain_output_tokens >= 0 else None,
+            "provider": None,
+            "model": None,
+            "source": None,
+            "availability": "partial" if has_tokens else "unavailable",
+            "reason": (
+                "counts_present_but_provider_metadata_not_present"
+                if has_tokens
+                else "token_metadata_not_present_on_event"
+            ),
+        },
+    }

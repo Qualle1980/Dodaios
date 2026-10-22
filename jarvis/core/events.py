@@ -2035,6 +2035,7 @@ class LatencyTurnComplete(Event):
     brain_output_tokens: int = -1
     tts_input_chars: int = -1
     errors: tuple[str, ...] = field(default_factory=tuple)
+    diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
