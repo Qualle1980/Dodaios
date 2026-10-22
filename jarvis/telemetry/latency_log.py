@@ -293,6 +293,13 @@ def _build_diagnostics(
     invalid_durations: list[dict[str, object]],
 ) -> dict[str, object]:
     has_tokens = event.brain_input_tokens >= 0 or event.brain_output_tokens >= 0
+    durations = _derive_durations(dict(event.stages_ms))
+    stt_ms = durations.get("stt_streaming")
+    bridge_ms = durations.get("stt_to_brain_request")
+    tts_provider = event.diagnostics.get("tts_provider")
+    tts_voice = event.diagnostics.get("tts_voice")
+    tts_ttfb = durations.get("tts_ttfb")
+    has_tts = tts_provider is not None or tts_ttfb is not None
     return {
         "event": dict(event.diagnostics),
         "turn": {
@@ -310,13 +317,17 @@ def _build_diagnostics(
             "provider": None,
             "detected_language": None,
             "final_completed": None,
-            "duration_ms": None,
+            "duration_ms": stt_ms,
             "error": {
                 "availability": "unavailable",
                 "reason": "not_present_on_latency_event",
             },
-            "availability": "unavailable",
-            "reason": "not_present_on_latency_event",
+            "availability": "partial" if stt_ms is not None else "unavailable",
+            "reason": (
+                "duration_only_from_stage_timestamps"
+                if stt_ms is not None
+                else "not_present_on_latency_event"
+            ),
         },
         "routing_bridge": {
             "intent_category": None,
@@ -324,24 +335,30 @@ def _build_diagnostics(
             "provider": None,
             "bridge_start_ns": None,
             "bridge_end_ns": None,
-            "bridge_duration_ms": None,
+            "bridge_duration_ms": bridge_ms,
             "error": {
                 "availability": "unavailable",
                 "reason": "not_present_on_latency_event",
             },
         },
         "tts": {
-            "provider": None,
+            "provider": tts_provider,
             "language": None,
-            "voice": None,
+            "voice": tts_voice,
+            "ttfb_ms": tts_ttfb,
+            "tail_ms": durations.get("tts_tail"),
             "tts_start_ns": None,
             "first_audio_ns": None,
             "playback_handoff_ns": None,
             "playback_start_ns": None,
             "playback_end_ns": None,
             "queue_wait_ms": None,
-            "availability": "unavailable",
-            "reason": "not_present_on_latency_event",
+            "availability": "partial" if has_tts else "unavailable",
+            "reason": (
+                "provider_voice_and_durations_only"
+                if has_tts
+                else "not_present_on_latency_event"
+            ),
         },
         "timing": {
             "clock": "perf_counter_ns",

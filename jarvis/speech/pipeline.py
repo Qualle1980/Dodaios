@@ -15550,10 +15550,32 @@ class SpeechPipeline:
                 anchor_ns=tracker.anchor_ns,
                 stages_ms=stages,
                 errors=tracker.errors_snapshot(),
+                diagnostics=self._latency_tts_diagnostics(),
             )
             asyncio.create_task(bus.publish(event))  # noqa: RUF006 — fire-and-forget
         except Exception:  # noqa: BLE001 — telemetry must never break the turn
             log.debug("LatencyTurnComplete emit failed", exc_info=True)
+
+    def _latency_tts_diagnostics(self) -> dict[str, str | None]:
+        """Vendor and voice that actually spoke this turn (no content, never raises)."""
+        tts = getattr(self, "_tts", None)
+        provider: str | None = None
+        voice: str | None = None
+        try:
+            label = getattr(tts, "_provider_label", None)
+            provider = label() if callable(label) else None
+            provider = (
+                provider
+                or getattr(tts, "last_voice_provider", None)
+                or getattr(tts, "name", None)
+            )
+            voice = getattr(tts, "last_voice", None) or getattr(tts, "_preferred_voice", None)
+        except Exception:  # noqa: BLE001 — telemetry must never break the turn
+            log.debug("latency tts diagnostics failed", exc_info=True)
+        return {
+            "tts_provider": provider if isinstance(provider, str) else None,
+            "tts_voice": voice if isinstance(voice, str) else None,
+        }
 
     def _maybe_recombine_continuation(self, text: str) -> tuple[str, bool]:
         """Unit C: if the user kept talking while the brain was thinking/speaking

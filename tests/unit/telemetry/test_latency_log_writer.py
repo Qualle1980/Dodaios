@@ -58,6 +58,33 @@ async def test_writer_emits_diagnostic_schema_and_invalid_duration(tmp_path: Pat
     assert row["diagnostics"]["tokens"]["input"] == 12
 
 
+async def test_writer_reports_tts_provider_voice_and_stage_durations(tmp_path: Path) -> None:
+    writer = LatencyLogWriter(tmp_path / "tts.jsonl")
+    event = LatencyTurnComplete(
+        trace_id=uuid4(),
+        anchor_ns=0,
+        stages_ms={
+            "stt_first_partial": 100.0,
+            "stt_finalize": 300.0,
+            "brain_request_sent": 320.0,
+            "tts_request_sent": 900.0,
+            "tts_first_chunk": 1150.0,
+        },
+        diagnostics={"tts_provider": "supertonic", "tts_voice": "M1"},
+    )
+    await writer._on_event(event)
+    _flush_writer(writer, expected=1)
+    writer.close()
+    [row] = _read_lines(writer.path)
+    diag = row["diagnostics"]
+    assert diag["tts"]["provider"] == "supertonic"
+    assert diag["tts"]["voice"] == "M1"
+    assert diag["tts"]["ttfb_ms"] == pytest.approx(250.0)
+    assert diag["stt"]["duration_ms"] == pytest.approx(200.0)
+    assert diag["routing_bridge"]["bridge_duration_ms"] == pytest.approx(20.0)
+    assert diag["tokens"]["input"] is None
+
+
 async def test_row_schema_matches_cli_contract(tmp_path: Path) -> None:
     log_path = tmp_path / "latency.jsonl"
     writer = LatencyLogWriter(log_path)
