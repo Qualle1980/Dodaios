@@ -13,7 +13,7 @@
     Guard-Skript. Daemon-Lifecycle-Events tragen Praefix "DAEMON".
 
 .PARAMETER RepoRoot
-    Pfad zum Repo-Root. Default: C:\Users\Administrator\Desktop\Personal Jarvis
+    Path to the repo root. Default: parent directory of this script's folder.
 
 .PARAMETER IntervalSeconds
     Wartezeit zwischen Guard-Laeufen. Default: 300 (5 Min).
@@ -29,13 +29,16 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoRoot        = "C:\Users\Administrator\Desktop\Personal Jarvis",
+    [string]$RepoRoot        = "",
     [int]   $IntervalSeconds = 300,
     # Warn-only (default): guard runs with -DryRun, logs drift, never writes config/env or restarts.
     [bool]  $WarnOnly        = $true
 )
 
 $ErrorActionPreference = "Continue"  # Daemon darf nicht crashen wenn ein Lauf failt
+
+# An explicit -RepoRoot wins; otherwise the repo root is the parent of scripts\.
+if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 
 $guardScript = Join-Path $RepoRoot "scripts\jarvis-config-drift-guard.ps1"
 $logFile     = Join-Path $RepoRoot "logs\config-drift-guard.log"
