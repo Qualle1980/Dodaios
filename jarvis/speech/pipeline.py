@@ -18218,6 +18218,15 @@ class SpeechPipeline:
             )
             if owner_task_id is not owner_missing and owner_task_id != id(play_task):
                 last_write = 0
+            if last_write > 0:
+                # Audio of THIS playback was written: a sign of life. The
+                # sentence player resets ``last_write_ns`` to 0 at every
+                # sentence, so without this re-arm a long answer's earlier
+                # sentences counted as "no first frame" silence and the next
+                # sentence was beheaded the instant it started (live
+                # 2026-10-22 17:42:28: 5th sentence aborted 45 ms after its
+                # AudioOutFirst, 20 s after the last brain token).
+                start = max(start, last_write / 1e9)
             if last_write <= 0:
                 # No first frame yet: the synthesize / first-frame window. A slow
                 # TTS provider must NOT be misread as a device wedge — that false

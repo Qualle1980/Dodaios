@@ -1110,6 +1110,15 @@ class AudioPlayer:
                         len(candidates) - len(filtered),
                     )
                 candidates = filtered
+            # A rate this device already accepted (for another source rate)
+            # goes first: the device is proven to take it, so a 44.1 kHz
+            # voice after a 24 kHz one skips the -9997 refusal (live
+            # 2026-10-22: 44100 refused, then 48000 opened, every process).
+            proven = {
+                rate for (dev, _src), rate in self._device_rate_cache.items()
+                if dev == self._device
+            }
+            candidates.sort(key=lambda rate: rate not in proven)
             log.debug(
                 "output rate cache miss (device=%r, source=%d) - walking %s",
                 self._device,
