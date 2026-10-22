@@ -21,11 +21,12 @@ import json
 import logging
 import queue
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from jarvis.core.events import LatencyTurnComplete
+from jarvis.core.events import BrainTurnProvenance, LatencyTurnComplete
 
 if TYPE_CHECKING:
     from jarvis.core.bus import EventBus
@@ -41,6 +42,8 @@ _QUEUE_CAPACITY = 10_000
 
 # Sentinel placed on the queue to ask the flusher thread to exit.
 _STOP = object()
+# Brain provenance waiting for its turn's latency row; oldest drops first.
+_MAX_PENDING_PROVENANCE = 64
 
 
 class LatencyLogWriter:
@@ -74,6 +77,9 @@ class LatencyLogWriter:
         self._lock = threading.Lock()
         self._attached_bus: EventBus | None = None
         self._handler_ref = self._on_event  # keep ref so unsubscribe matches
+        self._provenance_ref = self._on_provenance
+        # turn_id hex -> brain provenance, held until the turn's row is built.
+        self._provenance: OrderedDict[str, dict[str, object]] = OrderedDict()
         self._start_thread()
 
     @property
@@ -102,6 +108,29 @@ class LatencyLogWriter:
             return
         self._attached_bus = bus
         bus.subscribe(LatencyTurnComplete, self._handler_ref)
+        bus.subscribe(BrainTurnProvenance, self._provenance_ref)
+
+    async def _on_provenance(self, event: BrainTurnProvenance) -> None:
+        if not isinstance(event, BrainTurnProvenance):
+            return
+        self._provenance[event.trace_id.hex] = {
+            "provider": event.provider,
+            "requested_model": event.requested_model,
+            "responded_model": event.responded_model,
+            "success": event.success,
+            "error_kind": event.error_kind,
+            "fallback_used": event.fallback_used,
+            "chatgpt_bridge_used": event.chatgpt_bridge_used,
+            "attempts": [
+                {"provider": p, "model": m, "outcome": o} for p, m, o in event.attempts
+            ],
+            "tokens_in": event.tokens_in,
+            "tokens_out": event.tokens_out,
+            "tokens_cached": event.tokens_cached,
+        }
+        # A brain turn with no voice row (chat, agents) must not grow this.
+        while len(self._provenance) > _MAX_PENDING_PROVENANCE:
+            self._provenance.popitem(last=False)
 
     async def _on_event(self, event: LatencyTurnComplete) -> None:
         # Guard wrongly-routed events (defensive — subscribe is narrowed).
@@ -153,6 +182,7 @@ class LatencyLogWriter:
             ),
             "errors": list(event.errors),
             "diagnostics": _build_diagnostics(event, invalid_durations),
+            "brain": self._provenance.pop(event.trace_id.hex, None),
         }
 
     # ----------------------------------------------------------------------

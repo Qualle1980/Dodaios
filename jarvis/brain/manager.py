@@ -66,6 +66,7 @@ from jarvis.core.events import (
     AnnouncementRequested,
     BrainProviderSwitched,
     BrainTurnCompleted,
+    BrainTurnProvenance,
     BrainTurnStarted,
     ResponseGenerated,
     VisionInjected,
@@ -288,6 +289,47 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "antigravity": "Google Antigravity (Gemini)",
     "grok-build": "Grok Build (xAI subscription)",
 }
+
+
+#: The browser bridge that answers through a ChatGPT web session.
+_CHATGPT_BRIDGE_PROVIDER = "chatgpt-web"
+
+
+def _build_turn_provenance(
+    trace_id: UUID,
+    chain: list[tuple[str, str | None]],
+    used_provider: str | None,
+    winner: dict[str, Any] | None,
+    provider_errors: list[tuple[str, str, str, str]],
+) -> BrainTurnProvenance:
+    """Turn the executed fallback chain into a content-free provenance event."""
+    attempts: list[tuple[str, str | None, str]] = [
+        (prov, model or None, kind) for prov, model, kind, _detail in provider_errors
+    ]
+    success = used_provider is not None and winner is not None
+    usage = (winner or {}).get("usage") or {}
+
+    def _tokens(key: str) -> int | None:
+        value = usage.get(key)
+        return int(value) if isinstance(value, (int, float)) else None
+
+    if success:
+        attempts.append((used_provider, winner.get("requested_model"), "ok"))
+    return BrainTurnProvenance(
+        trace_id=trace_id,
+        source_layer="brain.manager",
+        provider=used_provider if success else None,
+        requested_model=winner.get("requested_model") if success else None,
+        responded_model=winner.get("responded_model") if success else None,
+        success=success,
+        error_kind=provider_errors[-1][2] if provider_errors and not success else None,
+        fallback_used=bool(success and chain and winner.get("idx", 0) > 0),
+        chatgpt_bridge_used=success and used_provider == _CHATGPT_BRIDGE_PROVIDER,
+        attempts=tuple(attempts),
+        tokens_in=_tokens("input_tokens"),
+        tokens_out=_tokens("output_tokens"),
+        tokens_cached=_tokens("cache_hit_tokens"),
+    )
 
 
 def _provider_display_name(provider: str) -> str:
@@ -12614,6 +12656,7 @@ class BrainManager:
         last_exc: Exception | None = None
         response_text = ""
         used_provider: str | None = None
+        turn_provenance: dict[str, Any] | None = None
         used_model: str | None = None
         _turn_executed: set[str] = set()  # tools that REALLY ran this turn
         # AI Pointer (deictic push): launch the cursor-element resolution BEFORE
@@ -13205,11 +13248,19 @@ class BrainManager:
                 # recorded as model ``None`` — which prices as $0.00 and hid
                 # 23_691 real input tokens from the cost surface (live
                 # 2026-10-21). Ask the instance that just answered.
-                if not model:
-                    reported = getattr(getattr(disp, "brain", None), "last_model", None)
-                    if isinstance(reported, str) and reported:
-                        model = reported
-                        used_model = reported
+                requested_model = model
+                reported = getattr(getattr(disp, "brain", None), "last_model", None)
+                if not isinstance(reported, str) or not reported:
+                    reported = None
+                if not model and reported:
+                    model = reported
+                    used_model = reported
+                turn_provenance = {
+                    "idx": idx,
+                    "requested_model": requested_model or None,
+                    "responded_model": reported,
+                    "usage": dict(agg.usage) if agg.usage else None,
+                }
 
                 tokens_in_total = int(agg.usage.get("input_tokens", 0)) if agg.usage else 0
                 tokens_out_total = int(agg.usage.get("output_tokens", 0)) if agg.usage else 0
@@ -13399,6 +13450,13 @@ class BrainManager:
         # B5 Agent C: reset per-turn wiki suffix regardless of outcome so
         # stale context cannot leak into the next voice turn.
         self._wiki_context_suffix = ""
+
+        try:
+            await self._bus.publish(_build_turn_provenance(
+                trace_uuid, chain, used_provider, turn_provenance, provider_errors,
+            ))
+        except Exception:  # noqa: BLE001 — diagnostics must never break the turn
+            log.debug("BrainTurnProvenance publish failed", exc_info=True)
 
         if screen_context.has_image and not vision_capable_seen:
             from jarvis.screen_context.intent import (  # noqa: PLC0415

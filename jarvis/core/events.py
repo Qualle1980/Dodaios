@@ -1927,6 +1927,32 @@ class BrainTurnCompleted(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class BrainTurnProvenance(Event):
+    """Which provider/model really answered a brain turn (diagnostics only).
+
+    Published once per ``BrainManager`` turn with the turn's ``trace_id`` so
+    the latency log can attach it to the matching row. Every value comes from
+    the executed fallback chain; ``None`` means the provider did not report it.
+    Carries no prompt, reply or error text.
+    """
+
+    provider: str | None = None
+    requested_model: str | None = None
+    #: Model id the answering instance reported (``brain.last_model``).
+    responded_model: str | None = None
+    success: bool = False
+    #: Error class of the last failed attempt, e.g. ``rate_limit``.
+    error_kind: str | None = None
+    fallback_used: bool = False
+    chatgpt_bridge_used: bool = False
+    #: ``(provider, model, outcome)`` per attempted chain entry, in order.
+    attempts: tuple[tuple[str, str | None, str], ...] = ()
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tokens_cached: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BrainTTFT(Event):
     """Time-To-First-Token vom Brain.
 

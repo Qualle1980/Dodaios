@@ -17309,12 +17309,18 @@ class SpeechPipeline:
                 # ``on_progress`` must still receive the stall-guard heartbeat —
                 # dropping straight to the bare call here loses ``on_progress`` and
                 # the no-first-frame ceiling would behead the working turn (BUG-032).
+                # The turn's latency trace id lets the brain's provenance land
+                # on this turn's row in state/latency_log.jsonl.
+                _turn_trace = getattr(
+                    getattr(self, "_latency_tracker", None), "trace_id", None
+                )
                 try:
                     stream = self._brain.generate_stream(
                         text,
                         on_progress=self._mark_brain_progress,
                         allow_voice_confirm=True,
                         consume_pending_voice_attachments=True,
+                        trace_id=_turn_trace,
                     )
                 except TypeError:
                     try:
