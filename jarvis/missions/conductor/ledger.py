@@ -155,7 +155,7 @@ def parse_progress(raw: str, executors: list[str]) -> ProgressEntry | None:
         return None
     try:
         data = json.loads(match.group(0))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError:  # unusable reply: the caller asks again, bounded
         return None
     if isinstance(data, dict) and len(executors) == 1:
         data["next_executor"] = {
@@ -163,7 +163,7 @@ def parse_progress(raw: str, executors: list[str]) -> ProgressEntry | None:
         }
     try:
         entry = ProgressEntry.model_validate(data)
-    except ValidationError:
+    except ValidationError:  # wrong shape: the caller asks again, bounded
         return None
     if not entry.is_request_satisfied.answer and entry.next_executor.answer not in executors:
         return None

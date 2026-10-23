@@ -158,7 +158,7 @@ class LessonStore:
     def rules(self) -> list[Rule]:
         try:
             data = json.loads(self._rules_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except FileNotFoundError:  # no lesson learned yet: an empty list is the truth
             return []
         except (OSError, ValueError):
             logger.warning("lessons: unreadable rules file, starting empty", exc_info=True)
