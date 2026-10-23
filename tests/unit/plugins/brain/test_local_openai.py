@@ -196,7 +196,8 @@ def test_vision_believes_a_server_that_declares_image_input(monkeypatch) -> None
 
 
 # ── Protocol surface ─────────────────────────────────────────────────────
-def test_capability_flags_and_cost() -> None:
+def test_capability_flags_and_cost(monkeypatch) -> None:
+    _with_base_url("http://localhost:8080", monkeypatch)
     brain = LocalOpenAIBrain(model="x")
     assert brain.supports_tools is True
     assert brain.can_call_tools() is True
@@ -391,3 +392,16 @@ async def test_a_refusal_does_not_claim_a_prompt_larger_than_the_window(served) 
     assert err.value.refused is True
     assert "refused this request as too large" in msg
     assert "--max-model-len 16384" in msg
+
+
+# ── Tool capability needs a server ───────────────────────────────────────
+def test_no_server_url_means_no_tool_capability(monkeypatch) -> None:
+    """Without a URL every call raises, so the brain must not offer itself
+    as a tool lead (live 2026-10-23: it led and failed every action turn)."""
+    _with_base_url(None, monkeypatch)
+    assert LocalOpenAIBrain().can_call_tools() is False
+
+
+def test_a_configured_server_keeps_tool_capability(monkeypatch) -> None:
+    _with_base_url("http://localhost:8080", monkeypatch)
+    assert LocalOpenAIBrain().can_call_tools() is True
