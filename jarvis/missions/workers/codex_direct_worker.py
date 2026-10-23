@@ -989,6 +989,7 @@ class CodexDirectWorker:
             timed_out=timed_out,
             cost_usd=cost_usd,
             num_turns=None,
+            tokens_used=tokens_used,
             session_id=session_id,
             duration_ms=wall_ms,
             result=str(

@@ -126,6 +126,11 @@ class ClaudeResult(_ClaudeBase):
     is_error: bool = False
     cost_usd: float | None = None
     num_turns: int | None = None
+    # Input + output tokens of the whole run, when the backend reports them
+    # (codex `turn.completed.usage`). Without this field the codex worker's
+    # count never left the worker: live 2026-10-23 it logged tokens=109911
+    # and the mission event recorded 0.
+    tokens_used: int | None = None
     session_id: str | None = None
     duration_ms: int | None = None
     result: str | None = None

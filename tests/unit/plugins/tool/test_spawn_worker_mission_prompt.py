@@ -148,10 +148,20 @@ def test_quality_directive_present_on_forcespawn_path() -> None:
     """Force-spawn (action='') passes the raw utterance — it too must carry the
     quality directive, not just the enriched-action path."""
     prompt = _build_mission_prompt(
-        utterance="lies die Datei x und fasse sie zusammen", action=""
+        utterance="erstelle die Datei x mit einer Zusammenfassung", action=""
     )
     low = prompt.lower()
     assert "skeleton" in low or "stub" in low or "placeholder" in low
+    assert "erstelle die Datei x mit einer Zusammenfassung" in prompt
+
+
+def test_read_order_on_forcespawn_path_gets_the_read_only_brief() -> None:
+    """An explicitly read-only order carries the read-only brief (2026-10-23)."""
+    prompt = _build_mission_prompt(
+        utterance="lies die Datei x und fasse sie zusammen, nichts ändern",  # i18n-allow
+        action="",
+    )
+    assert prompt.startswith("READ-ONLY TASK:")
     assert "lies die Datei x und fasse sie zusammen" in prompt
 
 
