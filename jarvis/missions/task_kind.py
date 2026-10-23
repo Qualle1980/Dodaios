@@ -2,10 +2,10 @@
 
 The mission prompt used to carry one standing directive for every order:
 "deliver a complete, polished, production-quality result". For a change that
-is the right floor. For a read order it is wrong: live 2026-10-23, "Lass Codex
-die TODO-Kommentare in jarvis/missions/budget.py auflisten. Nur lesen, nichts
-ändern." produced a dump of the whole file (it has no TODOs), and the critic
-approved it as a "complete deliverable".
+is the right floor. For a read order it is wrong: live 2026-10-23, a German
+order to list the TODO comments in jarvis/missions/budget.py, read only,
+produced a dump of the whole file (it has no TODOs), and the critic approved
+it as a "complete deliverable".
 
 Three kinds, decided from the user's own words only, never from the worker:
 
@@ -14,8 +14,8 @@ Three kinds, decided from the user's own words only, never from the worker:
 * ``change``  - anything that creates, edits, deletes, runs or publishes.
 
 A change verb always wins over a read verb ("find the bug and fix it" is a
-change). An explicit read-only marker ("nur lesen", "nichts ändern", "read
-only", "do not modify") makes the order read/analyze even when a change verb
+change). An explicit read-only marker ("read only", "do not modify" and the
+German equivalents below) makes the order read/analyze even when a change verb
 appears in the negated phrase itself. Anything unrecognised is ``change``, so
 an unclear order keeps the existing quality floor.
 """
