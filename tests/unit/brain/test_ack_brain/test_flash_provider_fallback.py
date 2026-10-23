@@ -22,6 +22,40 @@ def _jcfg(*, brain_primary: str) -> SimpleNamespace:
     return SimpleNamespace(brain=SimpleNamespace(primary=brain_primary))
 
 
+@pytest.fixture(autouse=True)
+def _ollama_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests run as if the local runtime is installed unless they say not."""
+    monkeypatch.setattr(
+        "jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama"
+    )
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+
+
+def test_an_uninstalled_local_runtime_is_not_a_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Ollama binary and a localhost endpoint: canned lines, no runtime."""
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "")
+    monkeypatch.setattr(
+        "jarvis.core.config.get_secret", lambda key, env_fallback=None: "k-test"
+    )
+
+    ack_cfg = make_ack_config(provider="follow_brain")
+    assert _build_flash_provider(_jcfg(brain_primary="chatgpt-plan"), ack_cfg) is None
+
+
+def test_a_remote_runtime_counts_without_a_local_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "")
+    ack_cfg = make_ack_config(provider="follow_brain")
+    ack_cfg.providers.ollama.endpoint = "http://192.168.1.20:11434"
+
+    _build_flash_provider(_jcfg(brain_primary="chatgpt-plan"), ack_cfg)
+
+    assert ack_cfg.provider == "ollama"
+
+
 @pytest.mark.parametrize(
     "key_name", ["openai_api_key", "gemini_api_key", "realtime_gemini_api_key"]
 )
