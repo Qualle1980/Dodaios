@@ -3951,9 +3951,8 @@ class Registry:
                         pass
                     except Exception:  # noqa: BLE001 — a probe that cannot read
                         # the screen must not keep a slot; log, release.
-                        logger.debug(
+                        logger.opt(exception=True).debug(
                             "Agentic IDE: cold-start readiness check failed; releasing the slot",
-                            exc_info=True,
                         )
             finally:
                 gate.release()

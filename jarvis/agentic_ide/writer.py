@@ -179,7 +179,7 @@ def _resolve_writer_uncached(*, cli_timeout_s: float | None) -> tuple[Any | None
         config = _load_config()
         choice = _configured_choice(config)
     except Exception:  # noqa: BLE001 - resolution must never break a turn
-        logger.info("Agentic IDE writer could not be resolved", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE writer could not be resolved")
         return None, ""
 
     if choice == "api":
@@ -268,7 +268,7 @@ def resolve_rescue_writer(
     try:
         config = _load_config()
     except Exception:  # noqa: BLE001 - a rescue never breaks a turn
-        logger.info("Agentic IDE rescue writer could not be resolved", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE rescue writer could not be resolved")
         return None, ""
 
     for rung in _AUTO_ORDER:
@@ -288,7 +288,7 @@ def _try_subscription(config: Any, cli_timeout_s: float | None) -> Any | None:
     try:
         return _subscription(config, cli_timeout_s)
     except Exception:  # noqa: BLE001 - a broken CLI probe must not cost the API path
-        logger.info("Agentic IDE subscription writer unavailable", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE subscription writer unavailable")
         return None
 
 
@@ -297,7 +297,7 @@ def _api_writer(config: Any) -> tuple[Any | None, str]:
     try:
         brain = _quality(config)
     except Exception:  # noqa: BLE001
-        logger.info("Agentic IDE quality writer unavailable", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE quality writer unavailable")
         return None, ""
     return (brain, "api") if brain is not None else (None, "")
 
@@ -319,7 +319,7 @@ def _tool_model_writer(config: Any, *, pinned: bool = True) -> tuple[Any | None,
     try:
         brain = _tool_model(config)
     except Exception:  # noqa: BLE001 - a broken selection costs the brief, not the turn
-        logger.info("Agentic IDE tool-model writer unavailable", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE tool-model writer unavailable")
         return None, ""
     if brain is None:
         if pinned:

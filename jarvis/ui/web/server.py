@@ -599,7 +599,6 @@ class WebServer:
         from .sub_agents_routes import router as sub_agents_router
         from .tasks_routes import router as tasks_router
         from .team_thread_routes import router as team_thread_router
-        from .telephony_routes import router as telephony_router
         from .tool_model_routes import router as tool_model_router
         from .tools_routes import router as tools_router
         from .update_routes import router as update_router
@@ -701,10 +700,29 @@ class WebServer:
         app.state.channel_chat_bridge = None
         # Twilio telephony voice agent (webhook + media WS + REST status/config).
         # Degrades gracefully when the `twilio` extra is not installed (AD-T8).
-        app.include_router(telephony_router)
-        from jarvis.telephony.status import TelephonyManager
+        #
+        # Opt-in, because the whole feature is: ``integrations.twilio.enabled``
+        # already defaults to false, the extra is not part of the base install,
+        # and the routes answer 409 without it. Mounting it regardless cost
+        # every boot the import of the telephony surface -- measured at 254 ms
+        # marginal on this machine, with the shared machinery already warm --
+        # for a feature nobody had switched on. The direct PC-to-phone path
+        # (``jarvis/channels/mobile.py``, ``/api/m/call``, ``/ws/audio``) is
+        # independent of this and is unaffected either way.
+        integrations = getattr(self.cfg, "integrations", None)
+        twilio_integration = getattr(integrations, "twilio", None)
+        if bool(getattr(twilio_integration, "enabled", False)):
+            # Imported here, not with the other routers: the import IS the cost
+            # this switch exists to avoid.
+            from .telephony_routes import router as telephony_router
 
-        app.state.telephony_manager = TelephonyManager()
+            app.include_router(telephony_router)
+            from jarvis.telephony.status import TelephonyManager
+
+            app.state.telephony_manager = TelephonyManager()
+        else:
+            # Named explicitly so a caller sees "off", not "missing".
+            app.state.telephony_manager = None
         # Browser-microphone voice bridge (B2): /ws/audio — the headless/VPS
         # voice path via the browser's own mic/speaker, no sounddevice. Always
         # mounted; checked at connect time: realtime mode always serves it,
@@ -2692,10 +2710,14 @@ class WebServer:
                 from jarvis.brain.seat_warm import warm_chat_seat
 
                 outcome = await warm_chat_seat(self.config, BrainProviderRegistry())
-            except Exception:  # noqa: BLE001 — advisory by contract (AP-30)
+            except Exception as exc:  # noqa: BLE001 — advisory by contract (AP-30)
+                # The cause belongs IN the line: this handler's `exc_info` did
+                # not render under the app's logging setup, so two live
+                # failures were reported with no reason at all and had to be
+                # chased by reproducing them by hand.
                 logger.warning(
-                    "Chat-seat warm failed — the first question pays the cold "
-                    "conversation it pays today.", exc_info=True
+                    "Chat-seat warm failed ({}) — the first question pays the "
+                    "cold conversation it pays today.", repr(exc)
                 )
                 return
             logger.info("Chat-seat warm: %s", outcome)
@@ -2966,7 +2988,7 @@ class WebServer:
 
                 _wiki_health.record_bootstrap(False, error=str(exc))
             except Exception:  # noqa: BLE001 — health recording must never break boot
-                logger.debug("wiki health.record_bootstrap(False) failed", exc_info=True)
+                logger.opt(exception=True).debug("wiki health.record_bootstrap(False) failed")
         _boot_mark("wiki_integration")
 
         # Jarvis' own self-learning loop: two bus subscriptions, nothing else
@@ -3221,7 +3243,7 @@ class WebServer:
                         retention_days,
                     )
             except Exception:  # noqa: BLE001 — cleanup never blocks/breaks boot
-                logger.warning("Screenshot retention boot sweep failed", exc_info=True)
+                logger.opt(exception=True).warning("Screenshot retention boot sweep failed")
             await retention_task(
                 flight_recorder_dir=flight_recorder_dir,
                 retention_days=retention_days,
@@ -3457,7 +3479,7 @@ class WebServer:
 
                 _wiki_health.record_bootstrap(False, error="disabled in config")
             except Exception:  # noqa: BLE001 — health recording must never break boot
-                logger.debug("wiki health.record_bootstrap(disabled) failed", exc_info=True)
+                logger.opt(exception=True).debug("wiki health.record_bootstrap(disabled) failed")
             return
 
         repo = MarkdownPageRepository()
@@ -3506,7 +3528,7 @@ class WebServer:
 
             _wiki_health.record_bootstrap(True)
         except Exception:  # noqa: BLE001 — health recording must never break boot
-            logger.debug("wiki health.record_bootstrap(True) failed", exc_info=True)
+            logger.opt(exception=True).debug("wiki health.record_bootstrap(True) failed")
 
     def _init_wiki_boot_index(self, *, background: bool = False) -> None:
         """Rebuild the derived FTS view against the active vault.
@@ -3570,7 +3592,7 @@ class WebServer:
 
                     _wiki_health.record_chain_failure(f"wiki index reconciliation failed: {exc}")
                 except Exception:  # noqa: BLE001
-                    logger.debug("wiki index health recording failed", exc_info=True)
+                    logger.opt(exception=True).debug("wiki index health recording failed")
             finally:
                 conn.close()
             # Behind the word index, so it never competes with start-up (AP-26).
@@ -3938,7 +3960,9 @@ class WebServer:
                 },
             )
         except Exception:  # noqa: BLE001 — the task already recorded its result; delivery is best effort
-            logger.warning("society: routine result not delivered to {}", agent_id, exc_info=True)
+            logger.opt(exception=True).warning(
+                "society: routine result not delivered to {}", agent_id
+            )
 
     async def _guard_society_routine_action(self, tags: tuple[str, ...]) -> None:
         from jarvis.society.routine_runner import guard_owned_routine

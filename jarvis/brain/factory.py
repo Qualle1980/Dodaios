@@ -1818,11 +1818,14 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
     "follow_brain" meta-value: resolve to whatever ``brain.primary``
     currently points at, so the user does not have to keep two provider
     settings in sync. If the main brain is on a provider the Flash-Brain
-    has no adapter for (openrouter, claude_api), fall back to the first
-    REGISTRY family with a usable credential (AP-22 — a hardcoded literal
-    fallback would brick this tier for every downloader whose only key is
-    e.g. OpenAI). Mutates ``ack_cfg.provider`` to the resolved name so
-    telemetry labels show the concrete provider.
+    has no adapter for (openrouter, claude_api, a plan seat), fall back
+    only to a keyless local runtime, never to another family's API key: the
+    user picked a brain, not a second billed provider for spoken phrasing.
+    With no local runtime this returns ``None`` and every flash consumer
+    degrades honestly to its canned lines. An explicit ``[ack_brain].provider``
+    is the user's own choice and is honoured as set. Mutates
+    ``ack_cfg.provider`` to the resolved name so telemetry labels show the
+    concrete provider.
     """
     from jarvis.brain.ack_brain.providers import REGISTRY
 
@@ -1841,19 +1844,19 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
             )
             provider_name = primary
         else:
-            fallback = _pick_keyed_flash_fallback(ack_cfg, jcfg)
+            fallback = _pick_keyless_flash_fallback(ack_cfg)
             if fallback is None:
-                log.warning(
+                log.info(
                     "Flash-Brain: brain.primary=%r has no Flash adapter "
-                    "(REGISTRY=%s) and no REGISTRY provider has a usable "
-                    "credential; disabling Flash-Brain.",
+                    "(REGISTRY=%s) and no keyless local runtime; using canned "
+                    "lines instead of another family's API key.",
                     primary, sorted(REGISTRY.keys()),
                 )
                 return None
-            log.warning(
-                "Flash-Brain: brain.primary=%r has no Flash adapter "
-                "(REGISTRY=%s); falling back to keyed provider %r.",
-                primary, sorted(REGISTRY.keys()), fallback,
+            log.info(
+                "Flash-Brain: brain.primary=%r has no Flash adapter; using "
+                "keyless local runtime %r.",
+                primary, fallback,
             )
             provider_name = fallback
         ack_cfg.provider = provider_name
@@ -1869,41 +1872,21 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
     return provider_cls(provider_cfg)
 
 
-def _pick_keyed_flash_fallback(ack_cfg: Any, jcfg: Any = None) -> str | None:
-    """First REGISTRY provider family with a usable credential, or ``None``.
+def _pick_keyless_flash_fallback(ack_cfg: Any) -> str | None:
+    """First REGISTRY provider that needs no credential, or ``None``.
 
-    AP-21/AP-22: never hardcode a literal provider name as the fallback — a
-    downloader whose only key is e.g. OpenAI must resolve to "openai", not a
-    keyless "gemini". Iterates ``REGISTRY`` in its declared order (gemini,
-    openai, ollama, ...) as the tie-break so an all-keyed setup keeps the
-    historical default. A provider config with no ``api_key_secret`` field
-    (local Ollama) needs no credential and is always considered usable.
+    A provider config with no ``api_key_secret`` field (a local runtime such
+    as Ollama) bills nothing. Keyed families are never picked here: a flash
+    call the user did not configure must not land on an API key (AGENTS.md
+    "nothing the user did not start may bill a key on its own").
     """
     from jarvis.brain.ack_brain.providers import REGISTRY
-    from jarvis.brain.voice_key import bills_voice_key
-    from jarvis.core.config import get_provider_secret, get_secret
 
-    # A family on the realtime voice key is deferred (mandate 2026-09-29): the
-    # next keyed family in REGISTRY order answers instead. It still comes back
-    # before a keyless local provider, so a single-key install without a local
-    # server keeps a working flash tier (AP-22).
-    deferred: str | None = None
     for name in REGISTRY:
         provider_cfg = getattr(ack_cfg.providers, name, None)
-        if provider_cfg is None:
-            continue
-        secret_name = getattr(provider_cfg, "api_key_secret", None)
-        if secret_name is None:
-            return deferred or name
-        # The family resolver is the second probe so a credential that lives
-        # only in a scoped slot of the same family (e.g. the Realtime card's
-        # key) still marks the provider usable — the adapters resolve their
-        # key through the same two-step lookup.
-        if get_secret(secret_name) or get_provider_secret(name):
-            if not bills_voice_key(jcfg, name):
-                return name
-            deferred = deferred or name
-    return deferred
+        if provider_cfg is not None and getattr(provider_cfg, "api_key_secret", None) is None:
+            return name
+    return None
 
 
 def _build_ack_fallback(ack_cfg: Any, preferences_provider: Any = None) -> Any:
