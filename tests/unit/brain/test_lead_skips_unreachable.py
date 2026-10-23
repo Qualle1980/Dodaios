@@ -25,6 +25,14 @@ from jarvis.core.config import BrainTierConfig, JarvisConfig
 from jarvis.core.protocols import ToolResult
 
 
+@pytest.fixture(autouse=True)
+def _ollama_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These turns assume an installed local runtime (Ollama gates its tool
+    capability on the binary since 2026-10-23)."""
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama")
+
+
+
 class _Tool:
     name = "spawn_worker"
     risk_tier = "safe"
