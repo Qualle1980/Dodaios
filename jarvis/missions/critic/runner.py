@@ -792,6 +792,78 @@ def _verdict_has_grounded_axes(verdict: CriticVerdict) -> bool:
     )
 
 
+#: A fenced block this long in a read order's answer is pasted file content,
+#: not a finding. The read-only brief allows one short line per finding.
+_READ_ANSWER_MAX_FENCED_LINES: Final[int] = 12
+_FENCED_BLOCK_RE: Final[re.Pattern[str]] = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def _pasted_file_content(answer: str) -> bool:
+    """True when the answer carries a fenced block longer than a quoted line."""
+    return any(
+        len(block.strip().splitlines()) > _READ_ANSWER_MAX_FENCED_LINES
+        for block in _FENCED_BLOCK_RE.findall(answer or "")
+    )
+
+
+def _read_task_verdict(
+    mission_prompt: str, worker_diff: str, worker_log: str
+) -> CriticVerdict | None:
+    """Deterministic revise for a read/analysis order, or ``None``.
+
+    Only two shapes are decided here; every other read answer goes to the
+    critic with the read-task rule (``prompts.READ_TASK_RULE``):
+
+    * an in-worktree change during a read-only order (a side effect);
+    * an answer that pastes file contents instead of the findings.
+    """
+    from ..stream_evidence import _has_inworktree_hunk, clean_request_body, extract_stream_evidence
+    from ..task_kind import is_read_task
+
+    if not is_read_task(clean_request_body(mission_prompt)):
+        return None
+    if _has_inworktree_hunk(worker_diff):
+        reason = "files were changed during a read-only order"
+        instruction = (
+            "This is a read-only order. Revert every file change and answer the "
+            "request with findings only."
+        )
+        summary_de = (
+            "Bei einem reinen Leseauftrag wurden Dateien geändert."  # i18n-allow: summary_de
+        )
+        failing = {"side_effects", "correctness"}
+    elif _pasted_file_content(extract_stream_evidence(worker_log).final_answer):
+        reason = "the answer pastes file contents instead of the requested findings"
+        instruction = (
+            "Answer exactly what was asked with concrete findings (path:line). "
+            "Do not paste file contents. If nothing matches, say so explicitly "
+            "with the count, for example: 0 TODOs found in <path>."
+        )
+        summary_de = (
+            "Die Antwort gibt Dateiinhalt aus statt der Ergebnisse."  # i18n-allow: summary_de
+        )
+        failing = {"correctness", "completeness"}
+    else:
+        return None
+    axes = {
+        ax: CriticAxis(
+            status="fail" if ax in failing else "pass",
+            evidence=[reason if ax in failing else "not affected by this check"],
+        )
+        for ax in REQUIRED_AXES
+    }
+    return CriticVerdict(
+        verdict="revise",
+        axes=axes,
+        issues=[],
+        correction_instruction=instruction,
+        summary=f"Read-only order: {reason}.",
+        summary_de=summary_de,
+        confidence=1.0,
+        suggested_next_action="retry",
+    )
+
+
 class CriticRunner:
     """Out-of-process critic backed by the Jarvis-Agent worker harness."""
 
@@ -934,6 +1006,20 @@ class CriticRunner:
                 worker_diff = external_action_diff
 
         _defer_empty_diff_to_llm = bool(_extract_tool_call_evidence(worker_log))
+
+        # A read or analysis order is judged on its ANSWER. Two shapes are
+        # wrong whatever an LLM critic would say, so they are decided here:
+        # a file changed during a read-only order, and an answer that pastes
+        # file contents instead of the findings (live 2026-10-23: a "list the
+        # TODOs in budget.py" order dumped the whole file, it has no TODO, and
+        # the critic approved it at 0.95).
+        read_verdict = _read_task_verdict(mission_prompt, worker_diff, worker_log)
+        if read_verdict is not None:
+            logger.info(
+                "CriticRunner: read-only order -> deterministic revise: %s (iter=%d).",
+                read_verdict.summary, iteration,
+            )
+            return read_verdict
 
         if not worker_diff.strip() and is_informational_request(mission_prompt):
             # Pure informational/advisory requests have no file deliverable.
@@ -2036,29 +2122,21 @@ class CriticRunner:
         if proc.returncode != 0:
             stderr_text = stderr_b.decode("utf-8", errors="replace")[:1000]
             stdout_text = stdout_b.decode("utf-8", errors="replace")
-            # Model-unavailable recovery (live mission 019ec61b, 2026-06-14):
-            # the critic model (FRONTIER_MODEL=claude-fable-5) is approved-
-            # access-only and the Claude Max subscription can't reach it via
-            # the CLI. The CLI default IS accessible — retry once without
-            # --model rather than failing the critic (-> critic_unavailable ->
-            # whole mission FAILED even though the worker delivered).
+            # A rejected critic model is reported, never swapped. This used to
+            # retry without --model, i.e. on whatever the CLI defaults to,
+            # which can be a stronger and more expensive model than the one
+            # chosen (mandate 2026-10-23: no automatic upgrade). The round
+            # returns None like any other critic failure.
             if model and _claude_error_is_model_unavailable(
                 stderr_text + " " + stdout_text
             ):
                 logger.warning(
-                    "CriticRunner: claude critic model %r rejected by the CLI "
-                    "— retrying without --model (accessible CLI default).",
+                    "CriticRunner: claude critic model %r rejected by the CLI; "
+                    "not retrying on the CLI default model (no automatic model "
+                    "switch).",
                     model,
                 )
-                return await self._invoke_via_claude_direct(
-                    prompt=prompt,
-                    worktree=worktree,
-                    env=env,
-                    model="",
-                    iteration=iteration,
-                    adversarial_reframe=adversarial_reframe,
-                    capacity_signals=capacity_signals,
-                )
+                return None
             logger.warning(
                 "CriticRunner: claude-direct returncode=%d wall_ms=%d stderr=%r",
                 proc.returncode, wall_ms, stderr_text,

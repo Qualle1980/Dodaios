@@ -1067,9 +1067,17 @@ _ROUTING_NOUN = (
     r"(?:sub-?edge-?mission(?:en|s)?|sub-?agent(?:en|s)?|subagent(?:en|s)?|"
     r"workers?|mission(?:en|s)?)"
 )
+# A routing noun inside a path is a directory name, not routing language:
+# live 2026-10-23 "Lass Codex die TODO-Kommentare in jarvis/missions/budget.py
+# auflisten" matched "Lass ... missions" and the worker received only
+# "/budget.py auflisten", without the word TODO.
+_NOT_IN_PATH_BEFORE = r"(?<![/\\.\w-])"
+_NOT_IN_PATH_AFTER = r"(?![/\\]|\.\w)"
 _SPAWN_META_RE = re.compile(
-    rf"\b{_SPAWN_VERB}\b[^.?!\n]{{0,40}}?\b{_SPAWN_NOUN}\b"
-    rf"|\b{_SPAWN_NOUN}\b[^.?!\n]{{0,40}}?\b{_SPAWN_VERB}\b"
+    rf"\b{_SPAWN_VERB}\b[^.?!\n]{{0,40}}?{_NOT_IN_PATH_BEFORE}\b{_SPAWN_NOUN}\b"
+    rf"{_NOT_IN_PATH_AFTER}"
+    rf"|{_NOT_IN_PATH_BEFORE}\b{_SPAWN_NOUN}\b{_NOT_IN_PATH_AFTER}"
+    rf"[^.?!\n]{{0,40}}?\b{_SPAWN_VERB}\b"
     # Third alternative: a creation verb governing a routing noun, optionally
     # chained through "(and|und) <spawn-verb>" ("create and spawn a sub-agent").
     # Narrow on purpose — only ``\s`` + fixed tokens between verb and noun, no
@@ -1187,6 +1195,7 @@ def _request_body(prompt: str) -> str:
         "production-quality" in low
         or "never ship one" in low
         or "inhalt folgt" in low
+        or low.startswith("read-only task:")
     ):
         prompt = tail
 

@@ -682,15 +682,11 @@ async def test_claude_direct_recovers_over_long_summary_from_narration(
 
 
 @pytest.mark.asyncio
-async def test_critic_unavailable_model_retries_without_model(
+async def test_critic_unavailable_model_is_not_swapped_for_the_cli_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Live mission 019ec61b (2026-06-14): the critic model FRONTIER_MODEL=
-    claude-fable-5 is approved-access-only; the CLI rejects it. The critic
-    must retry without --model (CLI default) rather than fail the mission.
-
-    Tests ``_invoke_via_claude_direct`` directly so the model arg is forced
-    verbatim (``run()`` resolves it via ``primary_model or model``)."""
+    """A rejected critic model is reported, never retried on the CLI default
+    (which can be a stronger, more expensive model; mandate 2026-10-23)."""
     monkeypatch.setattr(
         "jarvis.missions.workers.claude_direct_worker._resolve_claude_argv_prefix",
         lambda: ["claude"],
@@ -700,9 +696,7 @@ async def test_critic_unavailable_model_retries_without_model(
 
     async def fake(*args: Any, **kwargs: Any) -> _FakeProc:
         spawns.append(list(args))
-        if len(spawns) == 1:
-            return _FakeProc(b"Claude Fable 5 is currently unavailable.", returncode=1)
-        return _FakeProc(_valid_verdict_json("approve").encode("utf-8"), returncode=0)
+        return _FakeProc(b"Claude Fable 5 is currently unavailable.", returncode=1)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
 
@@ -711,10 +705,8 @@ async def test_critic_unavailable_model_retries_without_model(
         model="claude-fable-5", iteration=0, adversarial_reframe=False,
     )
 
-    assert verdict is not None and verdict.verdict == "approve"
-    assert len(spawns) == 2, "must retry exactly once on model-unavailable"
-    assert "--model" in spawns[0] and "claude-fable-5" in spawns[0]
-    assert "--model" not in spawns[1], "retry must omit --model (CLI default)"
+    assert verdict is None
+    assert len(spawns) == 1, "a rejected model must not be retried on another one"
 
 
 # --- conversational / informational task (empty diff, no tools) -------------

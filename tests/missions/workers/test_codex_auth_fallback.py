@@ -844,3 +844,26 @@ async def test_claude_unavailable_model_on_stderr_only_retries(
     assert final.result == "DONE"
     assert len(spawns) == 2, "must retry exactly once on a stderr-only rejection"
     assert "--model" not in spawns[1], "retry must omit --model (use CLI default)"
+
+
+@pytest.mark.asyncio
+async def test_codex_token_usage_reaches_the_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live 2026-10-23: the worker logged tokens=109911 and the mission event
+    recorded 0, because the terminal result had no field to carry it."""
+    stdout = (
+        b'{"type":"item.completed","item":{"type":"agent_message","text":"0 TODOs found."}}\n'
+        b'{"type":"turn.completed","usage":{"input_tokens":107310,'
+        b'"cached_input_tokens":88576,"output_tokens":2601}}\n'
+    )
+
+    async def _fake_exec(*_a: Any, **_k: Any) -> _FakeProc:
+        return _FakeProc(stdout, returncode=0)
+
+    monkeypatch.setattr(cdw.asyncio, "create_subprocess_exec", _fake_exec)
+
+    events = await _drive(CodexDirectWorker(), tmp_path)
+    final = events[-1]
+    assert final.is_error is False
+    assert final.tokens_used == 107310 + 2601
