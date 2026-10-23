@@ -820,7 +820,7 @@ def refresh_soon(term: Any, *, lines: Sequence[str], folder: str = "") -> None:
                 # 2026-08-19 18:10: 22 s prompt while recaps spawned the CLI).
                 return
         except Exception:  # noqa: BLE001 - recap never blocks a composition
-            logger.debug("Agentic IDE recap: compose-busy check failed", exc_info=True)
+            logger.opt(exception=True).debug("Agentic IDE recap: compose-busy check failed")
         _spawn(term, key, rows, folder, title_from)
     except Exception as exc:  # noqa: BLE001 - a recap must never break a state read
         logger.debug("Agentic IDE recap: scheduling failed ({})", exc)
@@ -1046,7 +1046,7 @@ def _resolve_subscription(config: Any) -> Any | None:
 
         return resolve_subscription_brain(config, cli_timeout_s=SUBSCRIPTION_CLI_TIMEOUT_S)
     except Exception:  # noqa: BLE001 - a broken CLI probe must not cost the recap
-        logger.info("Agentic IDE recap: subscription fallback unavailable", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE recap: subscription fallback unavailable")
         return None
 
 
@@ -1310,7 +1310,7 @@ async def _first_answer(
                 logger.info("Agentic IDE recap: standing down, a brief is being written")
                 break
         except Exception:  # noqa: BLE001 - a missed pause never costs the brief
-            logger.debug("Agentic IDE recap: compose-busy check failed", exc_info=True)
+            logger.opt(exception=True).debug("Agentic IDE recap: compose-busy check failed")
         label = _provider_label(brain)
         try:
             answer = await ask(brain)

@@ -1,10 +1,12 @@
-"""Tests for the Flash-Brain's key-aware ``follow_brain`` fallback (AP-22).
+"""Tests for the Flash-Brain's ``follow_brain`` fallback.
 
 When ``brain.primary`` points at a provider the Flash-Brain has no adapter
-for (openrouter, claude_api), ``_build_flash_provider`` used to fall back to
-a hardcoded literal ``"gemini"`` — bricking the tier for any downloader whose
-only configured key is for a different provider. The fallback must instead
-pick the first REGISTRY family with a usable credential.
+for (openrouter, claude_api, a plan seat), ``_build_flash_provider`` used to
+pick the first REGISTRY family with a stored API key. That billed a key the
+user never chose for spoken phrasing (live 2026-10-23: a ``chatgpt-plan``
+install composed every spawn announcement on its Gemini key). The fallback is
+now keyless only; with no local runtime the flash tier returns ``None`` and
+its consumers speak their canned lines.
 """
 from __future__ import annotations
 
@@ -20,72 +22,56 @@ def _jcfg(*, brain_primary: str) -> SimpleNamespace:
     return SimpleNamespace(brain=SimpleNamespace(primary=brain_primary))
 
 
-def test_falls_back_to_openai_when_only_openai_key_present(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "key_name", ["openai_api_key", "gemini_api_key", "realtime_gemini_api_key"]
+)
+def test_a_stored_key_never_becomes_the_flash_fallback(
+    monkeypatch: pytest.MonkeyPatch, key_name: str
 ) -> None:
-    """brain.primary="claude-api" has no Flash adapter; only an OpenAI key is
-    configured — the fallback must resolve to "openai", never "gemini"."""
-
-    def _fake_get_secret(key: str, env_fallback: str | None = None) -> str | None:
-        return "sk-test" if key == "openai_api_key" else None
-
-    monkeypatch.setattr("jarvis.core.config.get_secret", _fake_get_secret)
-
-    ack_cfg = make_ack_config(provider="follow_brain")
-    provider = _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg)
-
-    assert ack_cfg.provider == "openai"
-    assert type(provider).__name__ == "OpenAIMiniAck"
-
-
-def test_falls_back_to_gemini_when_only_gemini_key_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _fake_get_secret(key: str, env_fallback: str | None = None) -> str | None:
-        return "gk-test" if key == "gemini_api_key" else None
-
-    monkeypatch.setattr("jarvis.core.config.get_secret", _fake_get_secret)
-
-    ack_cfg = make_ack_config(provider="follow_brain")
-    provider = _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg)
-
-    assert ack_cfg.provider == "gemini"
-    assert type(provider).__name__ == "GeminiFlashAck"
-
-
-def test_falls_back_to_gemini_when_only_a_realtime_scoped_key_present(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A single-key install whose only credential came from the Realtime card
-    must still resolve the Flash tier to that family (2026-07-21 Mac forensic:
-    the strict slot scoping bricked every non-realtime brain tier)."""
-
-    def _fake_get_secret(key: str, env_fallback: str | None = None) -> str | None:
-        return "rt-test" if key == "realtime_gemini_api_key" else None
-
-    monkeypatch.setattr("jarvis.core.config.get_secret", _fake_get_secret)
-
-    ack_cfg = make_ack_config(provider="follow_brain")
-    provider = _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg)
-
-    assert ack_cfg.provider == "gemini"
-    assert type(provider).__name__ == "GeminiFlashAck"
-
-
-def test_falls_back_to_ollama_when_no_key_present_at_all(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ollama needs no credential (local endpoint) — it is the last-resort
-    keyless fallback when no cloud provider has a usable key."""
+    """A primary without a Flash adapter resolves to the keyless local
+    runtime even though another family has a usable key."""
     monkeypatch.setattr(
-        "jarvis.core.config.get_secret", lambda key, env_fallback=None: None
+        "jarvis.core.config.get_secret",
+        lambda key, env_fallback=None: "k-test" if key == key_name else None,
     )
 
     ack_cfg = make_ack_config(provider="follow_brain")
-    provider = _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg)
+    provider = _build_flash_provider(_jcfg(brain_primary="chatgpt-plan"), ack_cfg)
 
     assert ack_cfg.provider == "ollama"
     assert type(provider).__name__ == "OllamaFlashAck"
+
+
+def test_no_keyless_runtime_means_canned_lines_not_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a keyless REGISTRY family the flash tier is off (``None``),
+    even with every key stored."""
+    from jarvis.brain.ack_brain import providers
+
+    keyed = {k: v for k, v in providers.REGISTRY.items() if k != "ollama"}
+    monkeypatch.setattr(providers, "REGISTRY", keyed)
+    monkeypatch.setattr(
+        "jarvis.core.config.get_secret", lambda key, env_fallback=None: "k-test"
+    )
+
+    ack_cfg = make_ack_config(provider="follow_brain")
+    assert _build_flash_provider(_jcfg(brain_primary="claude-api"), ack_cfg) is None
+    assert ack_cfg.provider == "follow_brain"
+
+
+def test_an_explicit_flash_provider_is_honoured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider the user set in ``[ack_brain].provider`` is their choice."""
+    monkeypatch.setattr(
+        "jarvis.core.config.get_secret", lambda key, env_fallback=None: "gk-test"
+    )
+
+    ack_cfg = make_ack_config(provider="gemini")
+    provider = _build_flash_provider(_jcfg(brain_primary="chatgpt-plan"), ack_cfg)
+
+    assert type(provider).__name__ == "GeminiFlashAck"
 
 
 def test_does_not_change_ack_behavior_when_primary_has_a_flash_adapter(
@@ -121,10 +107,11 @@ def _live_jcfg(*, brain_primary: str) -> SimpleNamespace:
     )
 
 
-def test_primary_on_the_voice_key_hands_flash_work_to_another_family(
+def test_primary_on_the_voice_key_never_moves_flash_work_to_another_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mandate 2026-09-29: the GPT-Live key pays for the voice call only."""
+    """Mandate 2026-09-29: the GPT-Live key pays for the voice call only, and
+    another family's key is not a substitute."""
     keys = {"openai_api_key": "sk-test", "gemini_api_key": "gk-test"}
     monkeypatch.setattr(
         "jarvis.core.config.get_secret", lambda key, env_fallback=None: keys.get(key)
@@ -133,15 +120,15 @@ def test_primary_on_the_voice_key_hands_flash_work_to_another_family(
     ack_cfg = make_ack_config(provider="follow_brain")
     provider = _build_flash_provider(_live_jcfg(brain_primary="openai"), ack_cfg)
 
-    assert ack_cfg.provider == "gemini"
-    assert type(provider).__name__ == "GeminiFlashAck"
+    assert ack_cfg.provider == "ollama"
+    assert type(provider).__name__ == "OllamaFlashAck"
 
 
-def test_single_voice_key_install_still_gets_a_flash_tier(
+def test_single_voice_key_install_does_not_bill_the_voice_key_for_flash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With the voice key as the only credential, flash work stays on it
-    rather than on a local server that may not exist (AP-22)."""
+    """The voice key is not reused for flash work; the keyless runtime is
+    tried and a missing one degrades to canned lines."""
     monkeypatch.setattr(
         "jarvis.core.config.get_secret",
         lambda key, env_fallback=None: "sk-test" if key == "openai_api_key" else None,
@@ -150,7 +137,7 @@ def test_single_voice_key_install_still_gets_a_flash_tier(
     ack_cfg = make_ack_config(provider="follow_brain")
     _build_flash_provider(_live_jcfg(brain_primary="openai"), ack_cfg)
 
-    assert ack_cfg.provider == "openai"
+    assert ack_cfg.provider == "ollama"
 
 
 def test_pipeline_voice_keeps_following_an_openai_primary(
