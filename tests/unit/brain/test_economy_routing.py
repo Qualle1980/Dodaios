@@ -44,6 +44,13 @@ _SUBSTANTIVE = (
     "fuehre die tests aus",  # i18n-allow: simulated German user utterance
 )
 
+@pytest.fixture(autouse=True)
+def _ollama_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These turns assume an installed local runtime (Ollama gates its tool
+    capability on the binary since 2026-10-23)."""
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama")
+
+
 
 class _SpawnTool:
     name = "spawn_worker"

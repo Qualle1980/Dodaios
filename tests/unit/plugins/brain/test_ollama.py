@@ -439,7 +439,8 @@ async def test_complete_refuses_an_image_on_a_pinned_blind_model(
 
 
 # ── Protocol surface ─────────────────────────────────────────────────────
-def test_capability_flags_and_cost(catalog) -> None:
+def test_capability_flags_and_cost(catalog, monkeypatch) -> None:
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama")
     brain = OllamaBrain(model="x")
     assert brain.supports_tools is True
     assert brain.can_call_tools() is True
@@ -892,3 +893,25 @@ async def test_concurrent_calls_do_not_share_their_plan(routed) -> None:
     brain.set_context_window(65_536)
     second = await brain._prepare_call("qwen3.5:9b", _req())
     assert (first.planned, second.planned) == (16_384, 65_536)
+
+
+# ── Tool capability needs an installed runtime ──────────────────────────
+def test_an_uninstalled_local_ollama_offers_no_tools(monkeypatch) -> None:
+    """Live 2026-10-23: an uninstalled Ollama led an action turn and spent
+    13 s on a refused connection before the seat answered."""
+    from jarvis.plugins.brain.ollama import OllamaBrain
+
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "")
+    brain = OllamaBrain(model="qwen3.5:4b")
+    brain._server_root = "http://localhost:11434"
+    assert brain.can_call_tools() is False
+
+
+def test_a_remote_ollama_keeps_tools_without_a_local_binary(monkeypatch) -> None:
+    from jarvis.plugins.brain.ollama import OllamaBrain
+
+    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "")
+    brain = OllamaBrain(model="qwen3.5:4b")
+    brain._server_root = "http://192.168.1.20:11434"
+    assert brain.can_call_tools() is brain.supports_tools

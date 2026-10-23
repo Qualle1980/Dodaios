@@ -253,7 +253,29 @@ class OllamaBrain:
             self.context_window = seen or self._unconfirmed_budget(self._model)
 
     def can_call_tools(self) -> bool:
-        return self.supports_tools
+        if not self.supports_tools:
+            return False
+        return self._runtime_present()
+
+    def _runtime_present(self) -> bool:
+        """Whether a server can exist at all, without a network call.
+
+        A remote root is the user's own server. A local one needs Ollama
+        installed: live 2026-10-23 an uninstalled Ollama still led an action
+        turn and spent 13 s on a refused connection before the seat answered.
+        """
+        from urllib.parse import urlparse
+
+        try:
+            host = (urlparse(self._resolve_root()).hostname or "").lower()
+        except Exception:  # noqa: BLE001 — an unreadable endpoint is "not set up"
+            log.debug("ollama endpoint unreadable", exc_info=True)
+            return False
+        if host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:  # noqa: S104 - a host comparison, not a bind
+            return True
+        from jarvis.brain.ollama_runtime import find_binary
+
+        return bool(find_binary())
 
     def set_context_window(self, tokens: int) -> None:
         """Allocate the gateway's resolved context on this instance only."""
