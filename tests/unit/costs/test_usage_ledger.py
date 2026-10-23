@@ -138,3 +138,28 @@ def test_billing_filter_splits_seat_quotes_from_key_spend() -> None:
     assert billed == ["recorded", "derived"]
     seats = [e.price_source for e in filter_entries(rows, billing="subscription")]
     assert seats == ["subscription"]
+
+
+class _SelfResolvingBrain(FakeBrain):
+    """A plan seat: no model before the call, the resolved one after it."""
+
+    model = ""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_model: str | None = None
+
+    async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
+        self.last_model = "gpt-6.1-sol"
+        async for delta in super().complete(req):
+            yield delta
+
+
+def test_a_model_resolved_during_the_call_is_recorded(ledger_path: Path) -> None:
+    brain = meter_brain(_SelfResolvingBrain(), "chatgpt-plan")
+
+    asyncio.run(_drain(brain.complete(_request())))
+    ledger.flush()
+
+    rows = list(ledger.read_usage(ledger_path, 0, 2**62))
+    assert [row.model for row in rows] == ["gpt-6.1-sol"]
