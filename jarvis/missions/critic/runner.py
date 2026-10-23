@@ -274,6 +274,47 @@ def _message_blocks(record: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     return ()
 
 
+# A path or file name in the user's own words ("jarvis/missions/budget.py",
+# "README.md"): the answer is about files, so it has to come from reading them.
+# A general question ("which city ...") is answered from knowledge and is not
+# held to this.
+_NAMES_A_FILE_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\w.-]+[/\x5c][\w./\x5c-]+"
+    r"|\b[\w-]+\.(?:py|md|txt|json|toml|ya?ml|[jt]sx?|css|html|ps1|sh|rs|go|java|cs|cpp|c|h)\b",
+    re.IGNORECASE,
+)
+
+
+def _names_a_file(request: str) -> bool:
+    return bool(_NAMES_A_FILE_RE.search(request or ""))
+
+
+def _read_evidence_ran(worker_output: str) -> bool:
+    """Whether the worker actually read or searched something.
+
+    Looser than :func:`_extract_tool_call_evidence`, which must not count a
+    failed command as proof of a side effect. For a read order the question
+    is only whether a lookup ran: Codex reports ``status: "failed"`` for every
+    non-zero exit (upstream ``exec_events.rs``), and a search with no match
+    exits 1 (``rg``/``grep``), so that empty output IS the finding. Only
+    ``declined``, or a failure without an exit code, means it never ran.
+    Live 2026-10-23: ``rg -n TODO budget.py`` exited 1 and the critic logged
+    "no tool calls" for a worker that had searched the file.
+    """
+    saw_codex_command = False
+    for record in _json_stream_records(worker_output):
+        if record.get("type") != "item.completed":
+            continue
+        item = record.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        saw_codex_command = True
+        status = str(item.get("status", "")).strip().lower()
+        if status == "completed" or (status == "failed" and item.get("exit_code") is not None):
+            return True
+    return not saw_codex_command and bool(_extract_tool_call_evidence(worker_output))
+
+
 def _extract_tool_call_evidence(worker_output: str) -> tuple[str, ...]:
     """Parse tool-call evidence from worker output in a defensive, format-agnostic way.
 
@@ -841,6 +882,21 @@ def _read_task_verdict(
         )
         summary_de = (
             "Die Antwort gibt Dateiinhalt aus statt der Ergebnisse."  # i18n-allow: summary_de
+        )
+        failing = {"correctness", "completeness"}
+    elif _names_a_file(clean_request_body(mission_prompt)) and not _read_evidence_ran(worker_log):
+        # A finding nobody looked for is a guess: "0 TODOs found" is only an
+        # answer when a search or read actually ran (a no-match search counts,
+        # see _read_evidence_ran). Without one the approval would rest
+        # on the worker's word alone.
+        reason = "the answer was given without reading or searching anything"
+        instruction = (
+            "Before answering, read or search the files the request names with "
+            "a tool, then report the findings (path:line), or the explicit count "
+            "0 when nothing matches."
+        )
+        summary_de = (
+            "Die Antwort wurde ohne Lesen oder Suchen gegeben."  # i18n-allow: summary_de
         )
         failing = {"correctness", "completeness"}
     else:

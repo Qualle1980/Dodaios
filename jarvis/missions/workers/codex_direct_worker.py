@@ -235,6 +235,24 @@ def _normalize_model_for_codex(model: str | None) -> str:
     return model
 
 
+def _sandbox_for(prompt: str) -> str:
+    """``read-only`` for a read order, ``workspace-write`` for everything else.
+
+    Codex enforces ``--sandbox read-only`` itself (upstream
+    ``SandboxModeCliArg::ReadOnly``): commands still run and read, writes are
+    refused. A read order then cannot change a file whatever the model does,
+    instead of relying on the prompt's "do not modify" alone.
+    """
+    from ..stream_evidence import clean_request_body
+    from ..task_kind import is_read_task
+
+    if prompt.lstrip().startswith("READ-ONLY TASK:") or is_read_task(
+        clean_request_body(prompt)
+    ):
+        return "read-only"
+    return "workspace-write"
+
+
 def _build_codex_direct_cmd(
     *,
     worktree: Path,
@@ -582,6 +600,7 @@ class CodexDirectWorker:
         cmd = _build_codex_direct_cmd(
             worktree=worktree,
             model=effective_model,
+            sandbox=_sandbox_for(prompt),
             extra_args=extra_args,
             mcp_servers=broker_servers,
             windows_sandbox=_WINDOWS_SANDBOX_MODE if os.name == "nt" else None,

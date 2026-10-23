@@ -932,6 +932,9 @@ class Kontrollierer:
         self._mission_sem = asyncio.Semaphore(max(1, max_concurrent_missions))
         self._mission_deadline_s = mission_deadline_s
         self._state_locks: dict[str, asyncio.Lock] = {}
+        # Worker tokens summed over every draft of a mission, so the approval
+        # event reports the real total instead of 0.
+        self._mission_tokens: dict[str, int] = {}
         self._safety_enabled = safety_enabled
         self._extra_blocked_globs = tuple(extra_blocked_globs)
         # Per-task per-iteration diff capture. Keyed by `step.task_id`,
@@ -2517,10 +2520,11 @@ class Kontrollierer:
                     # older total_tokens used by some Codex flows). Read whichever
                     # is present so the field doesn't silently stay at 0 and
                     # mislead the budget tracker / Sub-Agents UI.
+                    # num_turns is a turn count, never a token count: an
+                    # absent token figure stays unknown instead of wrong.
                     ev_tokens = (
                         getattr(ev, "tokens_used", None)
                         or getattr(ev, "total_tokens", None)
-                        or getattr(ev, "num_turns", None)
                     )
                     if ev_tokens is not None:
                         tokens = int(ev_tokens)
@@ -4386,7 +4390,7 @@ class Kontrollierer:
             ts_ms=now_ms(),
             payload=MissionApproved(
                 result_uri=result_uri,
-                tokens_used=0,
+                tokens_used=getattr(self, "_mission_tokens", {}).pop(mission_id, 0),
                 cost_usd=self._budget.mission_cost(mission_id),
                 wall_ms=0,
                 summary_de=summary_de,
@@ -4564,6 +4568,8 @@ class Kontrollierer:
         tokens_used: int,
         session_id: str,
     ) -> EventEnvelope:
+        totals = self.__dict__.setdefault("_mission_tokens", {})
+        totals[mission_id] = totals.get(mission_id, 0) + max(int(tokens_used or 0), 0)
         env = EventEnvelope(
             mission_id=mission_id,
             worker_id=worker_id,
