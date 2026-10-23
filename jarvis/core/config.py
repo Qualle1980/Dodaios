@@ -1223,6 +1223,20 @@ class BrainRoutingConfig(BaseModel):
             "komplette analyse",
             "vollstaendige analyse",
             "vollständige analyse",
+            # Naming the vehicle is an explicit request (mandate 2026-07-21):
+            # "lass Codex die TODOs auflisten" addressed Codex and was talked
+            # through instead (live 2026-10-23).
+            "lass codex",  # i18n-allow: DE routing trigger
+            "lasse codex",  # i18n-allow: DE routing trigger
+            "frag codex",  # i18n-allow: DE routing trigger
+            "lass claude code",  # i18n-allow: DE routing trigger
+            "frag claude code",  # i18n-allow: DE routing trigger
+            "let codex",
+            "have codex",
+            "ask codex",
+            "let claude code",
+            "have claude code",
+            "ask claude code",
         ]
     )
 
