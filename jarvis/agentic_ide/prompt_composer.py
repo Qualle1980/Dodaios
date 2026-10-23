@@ -379,7 +379,7 @@ def _emit(sink: ProgressSink | None, notice: ComposeNotice) -> None:
     try:
         (sink or print_notice)(notice)
     except Exception:  # noqa: BLE001 - progress is decoration, the brief is not
-        logger.debug("Agentic IDE composer: a progress sink raised", exc_info=True)
+        logger.opt(exception=True).debug("Agentic IDE composer: a progress sink raised")
 
 
 # How much of the instruction a notice quotes back. Long enough to recognise
@@ -852,7 +852,7 @@ async def _resolved_writer(task: asyncio.Task) -> tuple[object | None, str]:
     try:
         return await task
     except Exception:  # noqa: BLE001 - resolution never breaks a composition
-        logger.info("Agentic IDE writer resolution failed", exc_info=True)
+        logger.opt(exception=True).info("Agentic IDE writer resolution failed")
         return None, ""
 
 

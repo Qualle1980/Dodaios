@@ -2953,7 +2953,7 @@ class WebServer:
 
                 _wiki_health.record_bootstrap(False, error=str(exc))
             except Exception:  # noqa: BLE001 — health recording must never break boot
-                logger.debug("wiki health.record_bootstrap(False) failed", exc_info=True)
+                logger.opt(exception=True).debug("wiki health.record_bootstrap(False) failed")
         _boot_mark("wiki_integration")
 
         # Jarvis' own self-learning loop: two bus subscriptions, nothing else
@@ -3208,7 +3208,7 @@ class WebServer:
                         retention_days,
                     )
             except Exception:  # noqa: BLE001 — cleanup never blocks/breaks boot
-                logger.warning("Screenshot retention boot sweep failed", exc_info=True)
+                logger.opt(exception=True).warning("Screenshot retention boot sweep failed")
             await retention_task(
                 flight_recorder_dir=flight_recorder_dir,
                 retention_days=retention_days,
@@ -3444,7 +3444,7 @@ class WebServer:
 
                 _wiki_health.record_bootstrap(False, error="disabled in config")
             except Exception:  # noqa: BLE001 — health recording must never break boot
-                logger.debug("wiki health.record_bootstrap(disabled) failed", exc_info=True)
+                logger.opt(exception=True).debug("wiki health.record_bootstrap(disabled) failed")
             return
 
         repo = MarkdownPageRepository()
@@ -3493,7 +3493,7 @@ class WebServer:
 
             _wiki_health.record_bootstrap(True)
         except Exception:  # noqa: BLE001 — health recording must never break boot
-            logger.debug("wiki health.record_bootstrap(True) failed", exc_info=True)
+            logger.opt(exception=True).debug("wiki health.record_bootstrap(True) failed")
 
     def _init_wiki_boot_index(self, *, background: bool = False) -> None:
         """Rebuild the derived FTS view against the active vault.
@@ -3557,7 +3557,7 @@ class WebServer:
 
                     _wiki_health.record_chain_failure(f"wiki index reconciliation failed: {exc}")
                 except Exception:  # noqa: BLE001
-                    logger.debug("wiki index health recording failed", exc_info=True)
+                    logger.opt(exception=True).debug("wiki index health recording failed")
             finally:
                 conn.close()
             # Behind the word index, so it never competes with start-up (AP-26).
@@ -3925,7 +3925,9 @@ class WebServer:
                 },
             )
         except Exception:  # noqa: BLE001 — the task already recorded its result; delivery is best effort
-            logger.warning("society: routine result not delivered to {}", agent_id, exc_info=True)
+            logger.opt(exception=True).warning(
+                "society: routine result not delivered to {}", agent_id
+            )
 
     async def _guard_society_routine_action(self, tags: tuple[str, ...]) -> None:
         from jarvis.society.routine_runner import guard_owned_routine
