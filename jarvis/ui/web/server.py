@@ -2708,8 +2708,13 @@ class WebServer:
             try:
                 from jarvis.brain.provider_registry import BrainProviderRegistry
                 from jarvis.brain.seat_warm import warm_chat_seat
+                from jarvis.core.config import load_config
 
-                outcome = await warm_chat_seat(self.config, BrainProviderRegistry())
+                # WebServer keeps no config attribute: read the live one off
+                # the loop (live 2026-10-23, every boot failed with
+                # "'WebServer' object has no attribute 'config'").
+                config = await asyncio.to_thread(load_config)
+                outcome = await warm_chat_seat(config, BrainProviderRegistry())
             except Exception as exc:  # noqa: BLE001 — advisory by contract (AP-30)
                 # The cause belongs IN the line: this handler's `exc_info` did
                 # not render under the app's logging setup, so two live
@@ -2720,7 +2725,7 @@ class WebServer:
                     "cold conversation it pays today.", repr(exc)
                 )
                 return
-            logger.info("Chat-seat warm: %s", outcome)
+            logger.info("Chat-seat warm: {}", outcome)
 
         self._chat_seat_warm_task = loop.create_task(
             _warm_seat(), name=CHAT_SEAT_WARM_TASK_NAME

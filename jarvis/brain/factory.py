@@ -1884,9 +1884,30 @@ def _pick_keyless_flash_fallback(ack_cfg: Any) -> str | None:
 
     for name in REGISTRY:
         provider_cfg = getattr(ack_cfg.providers, name, None)
-        if provider_cfg is not None and getattr(provider_cfg, "api_key_secret", None) is None:
+        if provider_cfg is None or getattr(provider_cfg, "api_key_secret", None) is not None:
+            continue
+        if _keyless_runtime_present(provider_cfg):
             return name
     return None
+
+
+def _keyless_runtime_present(provider_cfg: Any) -> bool:
+    """Whether a keyless runtime can answer at all, without a network call.
+
+    A remote endpoint is the user's own server and counts as present. A
+    local one needs the runtime installed on this machine: an absent binary
+    would make every flash call a refused connection before the canned line.
+    """
+    from urllib.parse import urlparse
+
+    resolve = getattr(provider_cfg, "resolved_endpoint", None)
+    endpoint = str(resolve() if callable(resolve) else "")
+    host = (urlparse(endpoint).hostname or "").lower()
+    if host and host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:  # noqa: S104 - a host comparison, not a bind
+        return True
+    from jarvis.brain.ollama_runtime import find_binary
+
+    return bool(find_binary())
 
 
 def _build_ack_fallback(ack_cfg: Any, preferences_provider: Any = None) -> Any:
