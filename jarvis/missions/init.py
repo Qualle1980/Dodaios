@@ -1235,6 +1235,19 @@ async def bootstrap_missions(
     # Auto-track WorkerDraftReady events
     budget.bind_to_event_bus(manager.bus)
 
+    # Every non-approving verdict and every failed mission is written down
+    # (ADR-0043), so a recurring failure can become a lesson.
+    from jarvis.missions.conductor.incidents import bind_incident_recorder
+    from jarvis.missions.conductor.lessons import LessonStore
+
+    async def _mission_prompt(mission_id: str) -> str | None:
+        view = await manager.store.get_mission_view(mission_id)
+        return view[0] if view else None
+
+    bind_incident_recorder(
+        manager.bus, LessonStore(db_path.parent / "conductor"), _mission_prompt
+    )
+
     # 4. WorktreeManager
     if repo_root is None:
         repo_root = Path.cwd()
