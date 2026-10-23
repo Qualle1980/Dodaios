@@ -126,6 +126,13 @@ class MeteredBrain:
                 yield delta
         finally:
             if seen:
+                # A plugin that resolves its default model during the call
+                # publishes it as ``last_model``; the pre-call name is empty
+                # then (live 2026-10-23: a chatgpt-plan turn on gpt-6.1-sol
+                # was recorded with no model).
+                resolved = getattr(self._inner, "last_model", None)
+                if isinstance(resolved, str) and resolved:
+                    model = resolved
                 record_usage(
                     provider=self._provider_name,
                     model=model,

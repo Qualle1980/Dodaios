@@ -98,7 +98,19 @@ class LocalOpenAIBrain:
             self.context_window = seen
 
     def can_call_tools(self) -> bool:
-        return self.supports_tools
+        # Without a server URL every call raises before it reaches a model,
+        # so this brain cannot call tools — or answer — on this install.
+        # Reporting it as tool-capable made it lead every action turn and
+        # fail there (live 2026-10-23: ~1.3 s per turn before the seat
+        # answered). Config read only, no network.
+        if not self.supports_tools:
+            return False
+        try:
+            ep = cfg.resolve_provider_endpoint("local-openai", vendor_default_base_url=None)
+        except Exception:  # noqa: BLE001 — an unreadable config is "not set up", not a crash
+            log.debug("local-openai endpoint unreadable", exc_info=True)
+            return False
+        return bool(ep.base_url)
 
     def _resolve_root(self) -> str:
         if self._server_root is None:
