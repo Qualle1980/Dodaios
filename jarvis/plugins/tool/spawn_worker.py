@@ -49,6 +49,7 @@ from jarvis.missions.stream_evidence import (
     UNDERLYING_REQUEST_LEAD,
     strip_spawn_meta,
 )
+from jarvis.missions.task_kind import is_read_task
 from jarvis.voice.action_phrases import action_phrase, resolve_ambient_language
 
 log = logging.getLogger(__name__)
@@ -177,6 +178,27 @@ _BLEED_STOPWORDS: frozenset[str] = frozenset({
 })
 
 
+# A read or analysis order gets this instead of ``_QUALITY_DIRECTIVE``. The
+# quality floor tells the worker to deliver a "complete, polished" artefact,
+# which for a question means padding: live 2026-10-23 a "list the TODOs in
+# budget.py, read only" order produced a dump of the whole file (it holds no
+# TODO) and the critic approved it. The leading "READ-ONLY TASK:" is the
+# marker ``stream_evidence._request_body`` strips again.
+_READ_ONLY_DIRECTIVE: Final[str] = (
+    "READ-ONLY TASK: answer the request below; do not create, modify or delete "
+    "any file. Answer exactly what was asked with concrete findings, each with "
+    "its location (path:line). If nothing matches, say so explicitly with the "
+    "count, for example: 0 TODOs found in jarvis/missions/budget.py. Never "
+    "paste whole files or long code excerpts; quote at most one short line per "
+    "finding. End with a one-sentence summary a person could hear spoken."
+)
+
+
+def _directive_for(request: str) -> str:
+    """The standing directive that fits what the order asks for."""
+    return _READ_ONLY_DIRECTIVE if is_read_task(request) else _QUALITY_DIRECTIVE
+
+
 def _typed_order() -> tuple[str, str]:
     """The typed message a spawn came from and the person's own words for it.
 
@@ -287,6 +309,10 @@ def _build_mission_prompt(
     target = (target or "").strip()
     hints = _bounded_context_hints(context_hints)
     no_interpretation = not action or action == _GENERIC_ACTION_FALLBACK
+    # The words that decide the order's kind: the user's words and the brain's
+    # reading of them, or the stripped task on the force-spawn path. Never the
+    # context hints appended below.
+    order_text = f"{action} {utterance}"
     if no_interpretation:
         # Force-spawn / no interpretation — the verbatim utterance is all we
         # have. Strip any spawn/routing meta-clause ("spawn a sub-agent that …",
@@ -321,7 +347,13 @@ def _build_mission_prompt(
             # Both halves come from stream_evidence, which is also what strips
             # them back off for report titles, filenames and the agent board's
             # task column. Inlining the wording here is what let the two drift.
-            body = f"{FORCE_SPAWN_DIRECTIVE}\n\n{UNDERLYING_REQUEST_LEAD}{task}"
+            # A read order skips it: "a complete default deliverable" is the
+            # padding the read-only brief exists to prevent (2026-10-23).
+            order_text = task
+            if is_read_task(task):
+                body = task
+            else:
+                body = f"{FORCE_SPAWN_DIRECTIVE}\n\n{UNDERLYING_REQUEST_LEAD}{task}"
         else:
             body = utterance
     else:
@@ -344,8 +376,10 @@ def _build_mission_prompt(
         # Nothing to dispatch — keep the empty-in/empty-out contract so the
         # caller's empty-utterance guard still short-circuits cleanly.
         return ""
-    # Prepend the standing quality directive so a lazy/minimal brief from the
-    # router tier cannot downgrade the deliverable to a stub (2026-05-31 fix).
+    # Prepend the standing directive: the quality floor for a change, so a
+    # lazy/minimal brief from the router tier cannot downgrade the deliverable
+    # to a stub (2026-05-31 fix); the read-only brief for a read-only order
+    # (``task_kind.is_read_task``).
     #
     # The whole brief is redacted on the way out, not just the hints: a key
     # the person typed is an ordinary sentence to every layer above, and this
@@ -353,7 +387,8 @@ def _build_mission_prompt(
     # event. Measured 2026-10-20: an `sk-...` in the recent conversation
     # reached the mission prompt verbatim. Redacting is a safety net, not the
     # guarantee - credentials belong in `get_secret` and never in a prompt.
-    return scrub_secrets(f"{_QUALITY_DIRECTIVE}\n\n{body}")
+    directive = _directive_for(order_text)
+    return scrub_secrets(f"{directive}\n\n{body}")
 
 
 class SpawnWorkerTool:

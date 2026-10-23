@@ -427,7 +427,10 @@ SOURCE_LINK_PLACEHOLDER: dict[str, str] = {
 # Markdown
 MARKDOWN_BOLD_RE = re.compile(r"\*\*")
 MARKDOWN_HEADER_RE = re.compile(r"^\s*#{1,6}\s+", re.MULTILINE)
-CODE_FENCE_RE = re.compile(r"```[^`]*```", re.DOTALL)
+# A fence runs to its closing ``` or, when a summary was cut mid-block, to the
+# end of the text. Live 2026-10-23: a truncated mission summary left its fence
+# open, the old ``[^`]*`` form matched nothing, and TTS was handed raw Python.
+CODE_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 LIST_BULLET_RE = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
 

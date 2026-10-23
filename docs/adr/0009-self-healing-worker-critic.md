@@ -11,7 +11,7 @@ audience: developer
 
 # ADR-0009 — Self-Healing Worker-Critic-Loop with Action/Observation Invariant
 
-**Status:** Amended 2026-07-19
+**Status:** Amended 2026-10-23
 **Phase:** 6 — Self-Healing Multi-Agent Orchestrator
 
 ## Context
@@ -68,6 +68,21 @@ Worker.execute() -> diff
 `MAX_CRITIC_LOOPS = 3` is **hardcoded**, not a config parameter. Reflexion (NeurIPS 2023) defaults to 5; we reduce it to 3 because Aider/Cline production data show that 3 iterations are enough and cost is 2x lower. **Parameterizing it would invite drift** (someone sets 10, a mission costs $50). Whoever wants to change it changes the constant and writes a new ADR.
 
 The Critic must cite `evidence_ref` with `file:line`, `log_line:N` or `test:name` — bare prose verdicts are rejected orchestrator-side as an abstention and retried once with adversarial framing.
+
+> **Amendment 2026-10-23: no automatic Critic model upgrade.** The
+> `iteration == 2` upgrade above (and the security-tag and low-confidence
+> upgrades in `missions/critic/escalation.py`) are removed: every critic round
+> runs on one tier (`CRITIC_MODEL = "sonnet"`), and a model the CLI rejects is
+> reported instead of retried on the CLI default. The maintainer ruled out any
+> automatic switch to a more capable or more expensive model. Low confidence
+> and security findings still escalate the MISSION to the user through the
+> verdict; they no longer change the model.
+>
+> **Read-only orders.** An order the user marks read-only, or one that only
+> lists, finds or shows (`missions/task_kind.py`), is judged on the worker's
+> answer: an empty diff is expected and is not evidence. A file change during
+> such an order, or an answer that pastes file contents instead of findings,
+> is revised deterministically before the LLM critic runs.
 
 ### 3. Worktree-per-task + Windows Job Object
 

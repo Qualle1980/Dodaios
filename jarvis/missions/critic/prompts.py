@@ -222,6 +222,28 @@ believed the log and approved with confidence=0.9):
 # → a good mission is wrongly failed as critic_unavailable. The reframe keeps
 # its skeptical, default-FAIL stance but now demands brevity + JSON-only so the
 # retry actually fits and parses.
+#
+# Appended when the user's own request is a read or analysis order
+# (``jarvis.missions.task_kind``). Live 2026-10-23: for "list the TODOs in
+# budget.py, read only" the worker dumped the whole file (it has no TODO) and
+# the critic approved at 0.95 because the diff was empty and "nothing broke".
+READ_TASK_RULE: Final[str] = """
+
+READ-TASK RULE — non-negotiable (the user's request is a read/analysis order):
+USER'S OWN REQUEST: <<<{user_request}>>>
+- The deliverable is the worker's ANSWER TEXT (final reply in the log), not a
+  diff. An empty diff is expected and is NOT evidence of quality; never cite it
+  as correctness or completeness evidence.
+- correctness=PASS only if the answer states the specific findings the request
+  asked for (with path:line) and you verified them yourself by reading or
+  searching the code. If nothing matches, the answer must say so explicitly
+  with the count (for example "0 TODOs found in <path>"); verify that zero.
+- An answer that pastes file contents, restates the task, or describes the file
+  instead of answering is correctness=FAIL, verdict=revise.
+- confidence >= 0.8 is allowed only when you verified every stated finding (or
+  the stated zero) against the code. Otherwise keep it below 0.6.
+"""
+
 ADVERSARIAL_REFRAME_PREFIX: Final[str] = """\
 PREVIOUS RESPONSE WAS REJECTED BECAUSE: it returned an approval without
 specific evidence references, or its output could not be parsed as one valid
@@ -268,6 +290,12 @@ def render_critic_prompt(
             CODEX_FLAT_OUTPUT_CONTRACT if codex_flat else FULL_CRITIC_OUTPUT_CONTRACT
         ),
     )
+    from jarvis.missions.stream_evidence import clean_request_body
+    from jarvis.missions.task_kind import is_read_task
+
+    user_request = clean_request_body(mission_prompt)
+    if is_read_task(user_request):
+        base += READ_TASK_RULE.format(user_request=user_request)
     if adversarial_reframe:
         return ADVERSARIAL_REFRAME_PREFIX + base
     return base
@@ -278,5 +306,6 @@ __all__ = [
     "CODEX_FLAT_OUTPUT_CONTRACT",
     "CRITIC_SYSTEM_PROMPT",
     "FULL_CRITIC_OUTPUT_CONTRACT",
+    "READ_TASK_RULE",
     "render_critic_prompt",
 ]
