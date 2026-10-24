@@ -165,3 +165,75 @@ async def test_failures_are_written_down_without_a_model(tmp_path: Path) -> None
     assert [x["lane"] for x in lines] == ["lookup", "lookup"]
     assert "file dump" in lines[0]["cause"]
     assert lines[1]["executor"] == "codex"
+
+
+async def test_a_failed_mission_teaches_one_rule_with_one_seat_call(tmp_path: Path) -> None:
+    import asyncio
+
+    from jarvis.missions.conductor.incidents import bind_incident_recorder
+    from jarvis.missions.events import CriticVerdictReady, EventEnvelope, MissionFailed
+
+    handlers: list = []
+    asked: list[str] = []
+
+    class _Bus:
+        def subscribe_all(self, handler) -> None:  # type: ignore[no-untyped-def]
+            handlers.append(handler)
+
+    async def _prompt(_mid: str) -> str:
+        return "List the TODOs in jarvis/missions/budget.py"
+
+    async def _seat(prompt: str) -> str:
+        asked.append(prompt)
+        return "ADD 1: Answer a read order with the matching lines, never the whole file."
+
+    store = LessonStore(tmp_path)
+    bind_incident_recorder(_Bus(), store, _prompt, learn=_seat)
+
+    def _env(mid: str, payload) -> EventEnvelope:  # type: ignore[no-untyped-def]
+        return EventEnvelope(mission_id=mid, source_actor="critic", ts_ms=1, payload=payload)
+
+    revise = CriticVerdictReady(worker_id="w", verdict="revise", summary="file dump",
+                                confidence=1.0, axes={}, iteration=0)
+    await handlers[0](_env("m1", revise))
+    await handlers[0](_env("m1", revise))
+    await handlers[0](_env("m1", MissionFailed(reason="critic_loop_exhausted",
+                                               last_state="RUNNING")))
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if store.rules():
+            break
+
+    assert len(asked) == 1  # a revise loop and its failure cost ONE seat call
+    assert "file dump" in asked[0]
+    assert [r.lane for r in store.rules()] == ["lookup"]
+    assert "never the whole file" in store.render("lookup")
+
+
+async def test_no_subscription_leaves_the_rules_alone(tmp_path: Path) -> None:
+    import asyncio
+
+    from jarvis.missions.conductor.incidents import bind_incident_recorder
+    from jarvis.missions.events import EventEnvelope, MissionFailed
+
+    handlers: list = []
+
+    class _Bus:
+        def subscribe_all(self, handler) -> None:  # type: ignore[no-untyped-def]
+            handlers.append(handler)
+
+    async def _prompt(_mid: str) -> str:
+        return "Fix the typo in README.md"
+
+    async def _no_seat(_prompt: str) -> None:
+        return None
+
+    store = LessonStore(tmp_path)
+    bind_incident_recorder(_Bus(), store, _prompt, learn=_no_seat)
+    await handlers[0](EventEnvelope(mission_id="m2", source_actor="kontrollierer", ts_ms=1,
+                                    payload=MissionFailed(reason="x", last_state="RUNNING")))
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert store.rules() == []
+    assert (tmp_path / "incidents.jsonl").exists()  # the incident still waits on disk

@@ -1134,6 +1134,37 @@ def _resolve_codex_dead_login_worker(
     return ClaudeDirectWorker(capability_inventory=inventory)
 
 
+#: Upper bound for one rule-update reply (a few one-line operations).
+_LESSON_MAX_TOKENS = 400
+
+
+async def _lesson_on_subscription(prompt: str) -> str | None:
+    """One rule update on a connected subscription, or None (ADR-0043).
+
+    Background work started by a failure, not by the user, so it never runs on
+    a per-token key (``background_policy``): without a subscription that can
+    answer, the incident stays on disk and no rule changes.
+    """
+    from jarvis.brain.resolver import resolve_subscription_brain
+    from jarvis.core.config import load_config
+    from jarvis.core.protocols import BrainMessage, BrainRequest
+
+    brain = await asyncio.to_thread(lambda: resolve_subscription_brain(load_config()))
+    if brain is None:
+        return None
+    request = BrainRequest(
+        messages=(BrainMessage(role="user", content=prompt),),
+        temperature=0.2,
+        max_tokens=_LESSON_MAX_TOKENS,
+        stream=True,
+    )
+    chunks: list[str] = []
+    async for delta in brain.complete(request):
+        if delta.content:
+            chunks.append(delta.content)
+    return "".join(chunks)
+
+
 async def bootstrap_missions(
     *,
     db_path: Path,
@@ -1245,7 +1276,8 @@ async def bootstrap_missions(
         return view[0] if view else None
 
     bind_incident_recorder(
-        manager.bus, LessonStore(db_path.parent / "conductor"), _mission_prompt
+        manager.bus, LessonStore(db_path.parent / "conductor"), _mission_prompt,
+        learn=_lesson_on_subscription,
     )
 
     # 4. WorktreeManager
