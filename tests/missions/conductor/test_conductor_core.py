@@ -257,3 +257,14 @@ async def test_no_subscription_leaves_the_rules_alone(tmp_path: Path) -> None:
 
     assert store.rules() == []
     assert (tmp_path / "incidents.jsonl").exists()  # the incident still waits on disk
+
+
+def test_how_many_questions_are_lookups_and_still_lose_to_a_change_verb() -> None:
+    """Live 2026-10-24: "How many lines does X have?" matched no rule and fell to
+    the "change" default, so a count ran with write access."""
+    from jarvis.missions.task_kind import is_read_task
+
+    assert is_read_task("How many lines does jarvis/missions/conductor/loop.py have?")
+    assert first_lane("How many lines does jarvis/missions/conductor/loop.py have?") == "lookup"
+    assert is_read_task("How much space does the repository take?")
+    assert not is_read_task("How many tests fail? Fix them.")

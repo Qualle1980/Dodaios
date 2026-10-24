@@ -124,3 +124,17 @@ def test_a_conversation_reaches_the_seat_as_one_prompt_with_the_ask_last() -> No
     assert prompt.index("facts?") < prompt.index("a.py exists") < prompt.index("Devise a plan")
     assert prompt.rstrip().endswith("Devise a plan")
     assert "Answer ONLY this now" in prompt
+
+
+async def test_a_halted_step_ends_the_loop_without_another_seat_call() -> None:
+    from jarvis.missions.conductor.loop import OrderHalted
+
+    seat = _Seat([_ledger()] * 5)
+
+    async def _halt(executor: str, instruction: str) -> str:
+        raise OrderHalted("waiting_capacity", "outcome: waiting_capacity")
+
+    out = await Conductor(seat, TEAM).run("t", _halt)
+    assert out.status == "halted" and out.answer == ""
+    assert seat.calls == ["facts", "plan", "ledger"]  # no final answer, no second ledger
+    assert out.steps[0].result == "outcome: waiting_capacity"
