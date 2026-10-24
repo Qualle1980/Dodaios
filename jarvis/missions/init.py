@@ -1269,16 +1269,18 @@ async def bootstrap_missions(
     # Every non-approving verdict and every failed mission is written down
     # (ADR-0043), so a recurring failure can become a lesson.
     from jarvis.missions.conductor.incidents import bind_incident_recorder
-    from jarvis.missions.conductor.lessons import LessonStore
+    from jarvis.missions.conductor.lessons import LessonStore, set_active_store
 
     async def _mission_prompt(mission_id: str) -> str | None:
         view = await manager.store.get_mission_view(mission_id)
         return view[0] if view else None
 
+    lesson_store = LessonStore(db_path.parent / "conductor")
     bind_incident_recorder(
-        manager.bus, LessonStore(db_path.parent / "conductor"), _mission_prompt,
-        learn=_lesson_on_subscription,
+        manager.bus, lesson_store, _mission_prompt, learn=_lesson_on_subscription,
     )
+    # ...and every worker prompt reads the rules back (ExpeL: rules before the task).
+    set_active_store(lesson_store)
 
     # 4. WorktreeManager
     if repo_root is None:

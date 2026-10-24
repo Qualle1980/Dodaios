@@ -61,6 +61,7 @@ from ..capacity import (
     worker_family,
     write_checkpoint,
 )
+from ..conductor.lessons import lessons_block
 from ..corrections import Correction, CorrectionInbox, with_corrections
 from ..corrections import render as render_corrections
 from ..critic.escalation import FRONTIER_MODEL
@@ -1685,6 +1686,10 @@ class Kontrollierer:
             # language (the German-request -> German-code leak). This is the one
             # chokepoint every worker prompt passes through — all decomposition
             # paths, all worker CLIs, every critic iteration.
+            # Rules learned from earlier failures of this kind of order go
+            # ahead of this attempt's own feedback (ADR-0043 lessons).
+            learned = await asyncio.to_thread(lessons_block, step.prompt)
+            prior_block = "\n\n".join(b for b in (learned, prior_block) if b)
             worker_prompt = compose_worker_prompt(prior_block, step.prompt)
 
             # State-Machine drive-thru:
