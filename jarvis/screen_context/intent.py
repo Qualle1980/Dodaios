@@ -33,6 +33,16 @@ log = logging.getLogger(__name__)
 #: Cap on recorded evidence fragments — a log line, not a transcript.
 _MAX_EVIDENCE = 3
 
+# A turn that NAMES a file — a path, or a name with an extension — is about
+# that file: "list every 'def ' in that file" after "jarvis/x/shadow.py" points
+# back at the path, not at the screen. Live 2026-10-24 that sentence got
+# "Should I take a look at your screen?" instead of any work.
+_NAMED_FILE_RE: re.Pattern[str] = re.compile(
+    r"[\w.-]+[/\x5c][\w./\x5c-]+"
+    r"|\b[\w-]+\.(?:py|md|txt|json|toml|ya?ml|[jt]sx?|css|html|ps1|sh|rs|go|java|cs|cpp|c|h|log|csv)\b",
+    re.IGNORECASE,
+)
+
 
 # Questions *about* Screen Context are not consent to use it.  This guard is
 # deliberately evaluated before the positive matcher: all of these sentences
@@ -716,6 +726,11 @@ def classify(text: str, *, locale: str = "") -> IntentVerdict:
         )
 
     ambiguous_hits = _evidence(_AMBIGUOUS_RE, normalized)
+    # A weak reference next to a named file refers to that file: nothing to
+    # look at, and asking would stall the work (an explicit screen request
+    # above still wins).
+    if _NAMED_FILE_RE.search(text or ""):
+        return IntentVerdict(intent=VisualIntent.NONE, locale=locale)
     # A window reference with no look verb is weak, not absent: "is this tab
     # right?" plausibly wants a look. Ask.
     if window_hits or ambiguous_hits:
