@@ -235,8 +235,12 @@ export function AgentTimeline({
       // The society reporting back on a task Jarvis handed out: the
       // agent's name as the headline, its summary underneath. Muted and
       // centred like a stamp — it is not Jarvis speaking.
-      const headline =
-        item.kind === "society_result"
+      // A mission this chat ordered reports back under its own headline.
+      const missionResult =
+        item.kind === "coding_result" && String(item.data.assignment_id ?? "").startsWith("mission:");
+      const headline = missionResult
+        ? t(item.status === "done" ? "society.chat.mission_done" : "society.chat.mission_failed")
+        : item.kind === "society_result"
           ? t(item.status === "done" ? "society.chat.result_done" : "society.chat.result_blocked").replace(
               "{0}",
               item.agentName || t("society.chat.result_agent"),
@@ -246,9 +250,18 @@ export function AgentTimeline({
         <div
           key={item.id}
           data-message-id={item.id}
+          data-testid={missionResult ? "mission-result" : undefined}
           className="mx-auto flex max-w-[85%] flex-col gap-0.5 rounded-lg bg-card px-4 py-3 text-body"
         >
-          {headline ? <span className="font-medium text-foreground">{headline}</span> : null}
+          {headline ? (
+            <span
+              className={
+                missionResult && item.status !== "done" ? "font-medium text-destructive" : "font-medium text-foreground"
+              }
+            >
+              {headline}
+            </span>
+          ) : null}
           {item.text ? <ChatMarkdown text={item.text} className="text-muted-foreground" /> : null}
         </div>
       );
