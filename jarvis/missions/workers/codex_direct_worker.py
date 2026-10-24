@@ -242,15 +242,24 @@ def _sandbox_for(prompt: str) -> str:
     ``SandboxModeCliArg::ReadOnly``): commands still run and read, writes are
     refused. A read order then cannot change a file whatever the model does,
     instead of relying on the prompt's "do not modify" alone.
+
+    A prompt from :func:`compose_worker_prompt` is decided by its marker alone:
+    that function classified the user's request before wrapping it, and its
+    framing directives say "never change live configuration", which reads as
+    a read-only marker. Classifying the wrapped text made EVERY order
+    read-only (live 2026-10-24: "create docs/tmp_probe.md" was refused by the
+    sandbox three times and the mission failed).
     """
+    from ..kontrollierer.worker_prompt import ARTIFACT_LANGUAGE_DIRECTIVE, READ_ONLY_MARKER
     from ..stream_evidence import clean_request_body
     from ..task_kind import is_read_task
 
-    if prompt.lstrip().startswith("READ-ONLY TASK:") or is_read_task(
-        clean_request_body(prompt)
-    ):
+    text = prompt.lstrip()
+    if text.startswith(READ_ONLY_MARKER):
         return "read-only"
-    return "workspace-write"
+    if text.startswith(ARTIFACT_LANGUAGE_DIRECTIVE):
+        return "workspace-write"
+    return "read-only" if is_read_task(clean_request_body(prompt)) else "workspace-write"
 
 
 def _build_codex_direct_cmd(
