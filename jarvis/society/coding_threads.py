@@ -330,7 +330,9 @@ class CodingThreadTool:
         "op ls|read|glob|grep with path / pattern). Opening or sending returns at once: the "
         "thread works on its own and this chat is woken when it finishes, asks or waits. "
         "Then check the result against the task, answer or follow up, and report to the "
-        "person. Ask the person for the folder when it is unclear. Approvals of the coding "
+        "person. Pick the folder from action=projects (it includes this app's own source "
+        "when it runs from a checkout); ask the person only when no listed project fits. "
+        "Approvals of the coding "
         "agent's own commands stay with the person."
     )
     schema: dict[str, Any] = {
@@ -746,14 +748,36 @@ async def _installed_clis() -> dict[str, bool]:
         return {}
 
 
+def _own_source() -> dict[str, str] | None:
+    """This app's own source tree as a project, when it runs from a git checkout.
+
+    Live 2026-10-24: with no project registered, a chat asked to "start Codex
+    in the background" on a file of this repo listed zero projects and asked
+    the person for a path instead of working. An installed app (no ``.git``
+    next to the package) adds nothing.
+    """
+    from jarvis.core.paths import repo_root
+
+    root = repo_root()
+    if not (root / ".git").exists():
+        return None
+    return {"name": f"{root.name} (this app's source)", "folder": str(root)}
+
+
 def _projects() -> list[dict[str, str]]:
     from jarvis.agentic_ide import library
 
-    return [
+    listed = [
         {"name": project.name, "folder": project.path}
         for project in library.list_projects()
         if not project.scratch
-    ][:60]
+    ]
+    own = _own_source()
+    if own is not None and not any(
+        Path(p["folder"]).resolve() == Path(own["folder"]).resolve() for p in listed
+    ):
+        listed.append(own)
+    return listed[:60]
 
 
 def resolve_folder(raw: str) -> str:

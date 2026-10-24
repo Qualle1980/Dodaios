@@ -540,3 +540,28 @@ async def test_each_person_message_keeps_its_own_answer(society: Society, tmp_pa
     await approve(rt, thread, "a1")
     await finish(rt, thread, "Done with the traces.")
     assert len(owner_prompts(rt)) == 5
+
+
+def test_the_apps_own_source_is_a_project_on_a_source_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live 2026-10-24: zero registered projects made a chat ask for a path
+    instead of handing the repo work on; a source checkout now lists itself."""
+    from jarvis.agentic_ide import library
+    from jarvis.core import paths
+
+    repo = tmp_path / "Dodaios"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setattr(paths, "repo_root", lambda: repo)
+    monkeypatch.setattr(library, "list_projects", lambda: [])
+
+    assert [p["folder"] for p in coding_threads._projects()] == [str(repo)]
+    assert coding_threads.resolve_folder("dodaios") == str(repo.resolve())
+
+    registered = SimpleNamespace(name="Dodaios", path=str(repo), scratch=False)
+    monkeypatch.setattr(library, "list_projects", lambda: [registered])
+    assert len(coding_threads._projects()) == 1  # never listed twice
+
+    (repo / ".git").rmdir()  # an installed app: nothing extra
+    monkeypatch.setattr(library, "list_projects", lambda: [])
+    assert coding_threads._projects() == []
