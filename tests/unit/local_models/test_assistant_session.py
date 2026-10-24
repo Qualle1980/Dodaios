@@ -147,3 +147,31 @@ def test_the_tool_model_comes_first_and_the_agents_chain_is_the_fallback() -> No
     assert (tier.provider, tier.model) == ("openai", "gpt-x")
     cfg.brain.tool_model = BrainTierConfig(provider="auto")
     assert policy._chain(cfg)[0] == ("openai", "gpt-x")
+
+
+def test_a_subscription_only_install_runs_agents_on_the_signed_in_chat_seat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 2026-10-24: worker openai-codex (CLI login, no key) and the chat on
+    the ChatGPT plan -> the society agent refused with NOT_READY although a
+    tool-capable subscription was signed in."""
+    from jarvis.brain import resolver
+
+    cfg = _cfg("openai-codex", "")
+    cfg.brain.primary = "chatgpt-plan"
+    monkeypatch.setattr(resolver, "_subscription_candidates", lambda _c: ["chatgpt-plan"])
+    monkeypatch.setattr(resolver, "_subscription_connected", lambda p: p == "chatgpt-plan")
+    tier = policy.agents_tier(cfg, tool_capable=lambda _p: True)
+    assert (tier.provider, tier.ready) == ("chatgpt-plan", True)
+
+    from jarvis.brain import app_control
+    from jarvis.core import config as config_module
+
+    monkeypatch.setattr(resolver, "_subscription_connected", lambda _p: False)
+    monkeypatch.setattr(app_control, "is_credential_present", lambda _spec: False)
+    monkeypatch.setattr(config_module, "get_jarvis_agent_secret", lambda _p: None)
+    assert policy.agents_tier(cfg, tool_capable=lambda _p: True).ready is False  # signed out
+
+    keyed = _cfg("openai-codex", "")
+    keyed.brain.primary = "claude-api"  # a keyed chat is never borrowed for agents
+    assert [p for p, _ in policy._chain(keyed)] == ["openai-codex"]
