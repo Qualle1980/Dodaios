@@ -4519,6 +4519,14 @@ class MissionsConfig(BaseModel):
 
     paid_api_fallback: bool = False
 
+    # Subscription conductor (ADR-0043). "shadow": every top-level order is
+    # also planned by the conductor on the chat seat, its first choice is
+    # written to data/conductor/shadow.jsonl next to the worker that really
+    # ran; nothing it says steers the order. "off": not even planned.
+    # Runs on a connected subscription only, never a key. Read per order in
+    # jarvis/missions/conductor/shadow.py.
+    conductor: Literal["off", "shadow"] = "shadow"
+
 
 class GlmCodingPlanConfig(BaseModel):
     """Where a GLM pane sends its traffic, and which model ids it asks for.

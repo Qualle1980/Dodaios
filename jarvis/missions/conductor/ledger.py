@@ -119,6 +119,23 @@ answer to the user, phrased as if speaking to them. Say plainly what was not
 achieved, if anything.
 """
 
+LEDGER_PROMPT: Final[str] = """We are working to address the following user request:
+
+{task}
+
+To answer this request we have these executors:
+
+{team}
+
+Here is an initial fact sheet to consider:
+
+{facts}
+
+Here is the plan to follow as best as possible:
+
+{plan}
+"""
+
 
 class _BoolAnswer(BaseModel):
     reason: str
@@ -206,6 +223,6 @@ class StallCounter:
 
 __all__ = [
     "DEFAULT_MAX_REPLANS", "DEFAULT_MAX_STALLS", "FACTS_PROMPT", "FACTS_UPDATE_PROMPT",
-    "FINAL_ANSWER_PROMPT", "PLAN_PROMPT", "PLAN_UPDATE_PROMPT", "PROGRESS_PROMPT",
+    "FINAL_ANSWER_PROMPT", "LEDGER_PROMPT", "PLAN_PROMPT", "PLAN_UPDATE_PROMPT", "PROGRESS_PROMPT",
     "ProgressEntry", "StallCounter", "parse_progress",
 ]

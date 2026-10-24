@@ -113,6 +113,29 @@ def test_a_preferred_provider_that_is_not_signed_in_still_falls_through(
     assert resolver.resolve_subscription_brain(_cfg()) == "brain:antigravity"
 
 
+def test_the_users_chat_seat_is_asked_first_and_still_gated(monkeypatch) -> None:
+    """The conductor passes ``brain.primary``: the chat the user picked plans,
+    but only while it is a connected subscription."""
+    registry = _FakeRegistry(
+        available=["chatgpt-plan", "claude-cli"],
+        accepts_structured=("chatgpt-plan", "claude-cli"),
+        native_system=("claude-cli",),
+    )
+    monkeypatch.setattr(resolver, "_get_registry", lambda: registry)
+    monkeypatch.setattr(resolver, "_subscription_candidates",
+                        lambda config: ["chatgpt-plan", "claude-cli"])
+    monkeypatch.setattr(resolver, "_subscription_connected", lambda name: True)
+    assert resolver.resolve_subscription_brain(_cfg(), prefer="chatgpt-plan") == (
+        "brain:chatgpt-plan"
+    )
+    assert resolver.resolve_subscription_brain(_cfg(), prefer="openai") == "brain:claude-cli"
+
+    monkeypatch.setattr(resolver, "_subscription_connected", lambda name: name != "chatgpt-plan")
+    assert resolver.resolve_subscription_brain(_cfg(), prefer="chatgpt-plan") == (
+        "brain:claude-cli"
+    )
+
+
 def test_disconnected_subscriptions_are_not_offered(monkeypatch) -> None:
     """A CLI that is installed but not logged in must not be chosen."""
     registry = _FakeRegistry(available=["codex"], accepts_structured=("codex",))
