@@ -58,7 +58,20 @@ Ask = Callable[[Sequence[Message]], Awaitable[str]]
 #: Run one step: ``(executor, instruction)`` in, the executor's result as text out.
 Execute = Callable[[str, str], Awaitable[str]]
 
-Status = Literal["done", "stopped", "max_rounds", "no_ledger"]
+Status = Literal["done", "stopped", "max_rounds", "no_ledger", "halted"]
+
+
+class OrderHalted(Exception):  # noqa: N818 - a control signal, not an error
+    """Raised by ``execute`` when no further step may run (capacity, budget).
+
+    The loop ends at once with status ``halted`` and no further seat call:
+    the caller parks or fails the order itself.
+    """
+
+    def __init__(self, reason: str, result: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.result = result
 
 
 def as_single_prompt(messages: Sequence[Message]) -> str:
@@ -220,7 +233,12 @@ class Conductor:
             executor = entry.next_executor.answer
             instruction = entry.instruction.answer
             thread.append(("assistant", f"[conductor -> {executor}] {instruction}"))
-            result = await execute(executor, instruction)
+            try:
+                result = await execute(executor, instruction)
+            except OrderHalted as halt:
+                steps.append(Step(executor=executor, instruction=instruction, result=halt.result))
+                logger.info("conductor: order halted (%s), no further seat call", halt.reason)
+                return _outcome("halted", "", rounds)
             steps.append(Step(executor=executor, instruction=instruction, result=result))
             thread.append(("user", f"[{executor}] {result}"))
         logger.info("conductor: round bound %d reached", self._max_rounds)
@@ -228,7 +246,7 @@ class Conductor:
 
 
 __all__ = [
-    "DEFAULT_MAX_JSON_RETRIES", "DEFAULT_MAX_ROUNDS", "Ask", "Conductor", "Execute",
+    "DEFAULT_MAX_JSON_RETRIES", "DEFAULT_MAX_ROUNDS", "Ask", "Conductor", "Execute", "OrderHalted",
     "as_single_prompt",
     "Message", "Outcome", "Preview", "Step",
 ]

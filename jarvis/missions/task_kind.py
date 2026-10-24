@@ -66,7 +66,7 @@ _ANALYZE_RE: Final[re.Pattern[str]] = re.compile(
 
 _READ_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:"
-    r"list|find|show|count|search|locate|grep|which|where|what|"
+    r"list|find|show|count|search|locate|grep|which|where|what|how\s+many|how\s+much|"
     r"auflisten|liste|listen|finde?|zeige?|zähle?|zaehle?|suche?|"  # i18n-allow
     r"welche[rsnm]?|wo|was"  # i18n-allow
     r")\b",
