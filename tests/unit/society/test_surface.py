@@ -765,3 +765,25 @@ async def test_an_agent_is_shown_the_tools_its_focus_names(rt: SocietyRuntime):
     assert direct is not None and "gmail" in direct
     assert society_direct_tools(generalist) is None
     assert society_direct_tools(SimpleNamespace(session_id="jarvis-chat")) is None
+
+
+async def test_the_machine_shell_is_offered_but_every_call_asks(rt: SocietyRuntime, tmp_path: Path):
+    """Maintainer decision 2026-10-24: agents may use the machine-wide shell
+    once the person approves. It is no longer withheld, and no mode or
+    standing rule turns a call into an unasked one."""
+    rt._get_tools = lambda: {**TOOLS, "run_shell": _tool("run_shell", "Run a command.")}  # noqa: SLF001
+    await rt.roster.create(name="Builder", title="Builder", description="Builds things.")
+    cfg = SimpleNamespace(wiki=SimpleNamespace(vault_root=str(tmp_path / "vault")))
+    session = SimpleNamespace(session_id="society:builder")
+    await society_system_extra(cfg, None, session)
+    picked = society_tool_filter(session)({**rt._get_tools()})  # type: ignore[misc]  # noqa: SLF001
+    assert "run_shell" in picked and "wiki-ingest" not in picked
+    assert picked["run_shell"].risk_tier_for_args({"command": "dir"}) == "ask"
+
+    await rt.roster.update("builder", {
+        "approval_mode": "bypass",
+        "approval_rules": {"require_approval": [], "always_allow": ["core:run-shell"]},
+    })
+    await society_system_extra(cfg, None, session)
+    relaxed = society_tool_filter(session)({**rt._get_tools()})  # type: ignore[misc]  # noqa: SLF001
+    assert relaxed["run_shell"].risk_tier_for_args({"command": "dir"}) == "ask"
