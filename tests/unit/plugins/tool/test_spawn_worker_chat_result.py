@@ -61,13 +61,13 @@ def _approved(**summaries: str) -> MissionApproved:
 async def test_an_approved_mission_posts_its_answer_in_the_dispatch_language(
     manager: MissionManager,
 ) -> None:
-    seen = await _run(manager, _approved(de="Fertig.", en="Done: 234 lines."), chat="s1")
+    seen = await _run(manager, _approved(de="Fertig.", en="Done: 234 lines."), chat="s1")  # i18n-allow: a German readback
     assert len(seen) == 1
     assert (seen[0].session_id, seen[0].status, seen[0].text) == ("s1", "done", "Done: 234 lines.")
     assert seen[0].request_id.startswith("mission:")
 
-    seen = await _run(manager, _approved(de="Fertig.", en="Done."), chat="s1", language="de")
-    assert seen[0].text == "Fertig."
+    seen = await _run(manager, _approved(de="Fertig.", en="Done."), chat="s1", language="de")  # i18n-allow
+    assert seen[0].text == "Fertig."  # i18n-allow
 
 
 async def test_a_failed_mission_posts_reason_and_detail(manager: MissionManager) -> None:
