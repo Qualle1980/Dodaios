@@ -1145,24 +1145,58 @@ async def _lesson_on_subscription(prompt: str) -> str | None:
     a per-token key (``background_policy``): without a subscription that can
     answer, the incident stays on disk and no rule changes.
     """
+    ask = await _conductor_seat(max_tokens=_LESSON_MAX_TOKENS)
+    return None if ask is None else await ask([("user", prompt)])
+
+
+#: Upper bound for one conductor reply (a fact sheet, a plan or a ledger).
+_CONDUCTOR_MAX_TOKENS = 1500
+
+
+async def _conductor_seat(max_tokens: int = _CONDUCTOR_MAX_TOKENS) -> Any | None:
+    """The conductor seat as an ``Ask`` callable, or None (ADR-0043).
+
+    A connected subscription only, never a per-token key (background policy);
+    the chat the user picked (``brain.primary``) is tried first.
+    """
     from jarvis.brain.resolver import resolve_subscription_brain
     from jarvis.core.config import load_config
     from jarvis.core.protocols import BrainMessage, BrainRequest
 
-    brain = await asyncio.to_thread(lambda: resolve_subscription_brain(load_config()))
+    def _resolve() -> Any:
+        config = load_config()
+        return resolve_subscription_brain(config, prefer=config.brain.primary)
+
+    brain = await asyncio.to_thread(_resolve)
     if brain is None:
         return None
-    request = BrainRequest(
-        messages=(BrainMessage(role="user", content=prompt),),
-        temperature=0.2,
-        max_tokens=_LESSON_MAX_TOKENS,
-        stream=True,
-    )
-    chunks: list[str] = []
-    async for delta in brain.complete(request):
-        if delta.content:
-            chunks.append(delta.content)
-    return "".join(chunks)
+
+    async def _ask(messages: Any) -> str:
+        request = BrainRequest(
+            messages=tuple(BrainMessage(role=role, content=text) for role, text in messages),
+            temperature=0.2,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        chunks: list[str] = []
+        async for delta in brain.complete(request):
+            if delta.content:
+                chunks.append(delta.content)
+        return "".join(chunks)
+
+    return _ask
+
+
+def _conductor_mode() -> str:
+    """``missions.conductor`` read fresh per order, so a Settings change applies at once."""
+    from jarvis.core.config import load_config
+
+    try:
+        return str(load_config().missions.conductor)
+    except Exception:  # noqa: BLE001 - an unreadable config means no shadow, not a dead order
+        logger.warning("conductor: could not read missions.conductor, treating as off",
+                       exc_info=True)
+        return "off"
 
 
 async def bootstrap_missions(
@@ -1281,6 +1315,13 @@ async def bootstrap_missions(
     )
     # ...and every worker prompt reads the rules back (ExpeL: rules before the task).
     set_active_store(lesson_store)
+    # Shadow conductor: plans every order next to today's path (missions.conductor).
+    from jarvis.missions.conductor.shadow import ShadowLog, bind_conductor_shadow
+
+    bind_conductor_shadow(
+        manager.bus, ShadowLog(db_path.parent / "conductor"), lesson_store,
+        _conductor_mode, _conductor_seat,
+    )
 
     # 4. WorktreeManager
     if repo_root is None:
