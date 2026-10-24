@@ -374,3 +374,21 @@ def test_clarifying_question_accepts_a_full_bcp47_tag() -> None:
     assert clarifying_question("de-DE") == clarifying_question("de")
     assert clarifying_question("es_ES") == clarifying_question("es")
     assert clarifying_question("pt-PT") == clarifying_question("pt") != clarifying_question("en")
+
+
+def test_a_weak_reference_next_to_a_named_file_is_about_the_file() -> None:
+    """Live 2026-10-24: "... jarvis/missions/conductor/shadow.py ... every line
+    with 'def ' in that file" was answered "Should I take a look at your
+    screen?" instead of any work."""
+    from jarvis.screen_context.intent import classify
+    from jarvis.screen_context.models import VisualIntent
+
+    named = ("How many lines does jarvis/missions/conductor/shadow.py have? "
+             "Then list every line with 'def ' in that file.")
+    assert classify(named).intent is VisualIntent.NONE
+    assert classify("Open README.md and tell me what that document says").intent is (
+        VisualIntent.NONE)
+    # Without a named file the weak reference still asks, and a screen request still looks.
+    assert classify("what is in that file?").intent is VisualIntent.AMBIGUOUS
+    assert classify("is this tab right?").intent is VisualIntent.AMBIGUOUS
+    assert classify("what is on my screen in README.md?").intent is VisualIntent.SCREEN
