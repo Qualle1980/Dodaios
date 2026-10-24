@@ -1667,7 +1667,8 @@ class _ScriptedSeat:
 
     async def __call__(self, messages) -> str:  # type: ignore[no-untyped-def]
         prompt = messages[-1][1]
-        self.prompts.append(prompt)
+        # The whole conversation: a step's result lives in the thread before it.
+        self.prompts.append("\n".join(text for _, text in messages))
         if "Recall the request" in prompt:
             return self.ledgers.pop(0)
         if "We worked on this request" in prompt:
@@ -1706,6 +1707,12 @@ async def test_conductor_on_steers_one_worker_step_and_its_answer_is_the_result(
     events = await manager.store.events_for_mission(mid)
     approved = [e.payload for e in events if e.payload.event_type == "MissionApproved"]
     assert approved and approved[0].summary_en == "Done: the palindrome helper exists."
+    # The conductor judged the step on evidence, not on a bare "approved"
+    # (live 2026-10-24: without it an approved write was redone twice).
+    second_ledger = [p for p in seat.prompts if "Recall the request" in p][1]
+    assert "outcome: approved" in second_ledger
+    assert "independent reviewer: ok" in second_ledger
+    assert k._step_reports == {} and k._conducted == set()  # nothing kept after the order
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,7 @@ from ..safety import (
 )
 from ..state_machine import IllegalStateTransition, MissionState
 from ..stream_evidence import (
+    extract_stream_evidence,
     extract_verified_commands,
     extract_verified_desktop_actions,
     extract_write_targets,
@@ -1010,6 +1011,10 @@ class Kontrollierer:
         # Unset (tests, headless callers): every mission takes the decomposer.
         self._conductor_mode: Callable[[], str] | None = None
         self._conductor_seat: Callable[[], Awaitable[Any]] | None = None
+        # Per approved step: worker report, diff and review, read by the
+        # conductor (popped there; only conducted missions consume them).
+        self._step_reports: dict[str, dict[str, str]] = {}
+        self._conducted: set[str] = set()
 
     def set_conductor(
         self, mode_of: Callable[[], str], seat_of: Callable[[], Awaitable[Any]]
@@ -1316,11 +1321,21 @@ class Kontrollierer:
             answers = self._task_answers.get(mission_id, [])[answers_before:]
             feedback = "" if outcome == TaskOutcome.APPROVED else (
                 reflections.render_for_worker_prompt(n=1) or "")
+            # Hand the conductor the work itself, like Magentic-One puts the
+            # agent's full response into the thread: the worker's own report,
+            # the diff (bounded) and the reviewer's reason.
+            report = self._step_reports.pop(step.task_id, {})
             parts = [f"outcome: {outcome}"]
             if answers:
                 parts.append("answer:\n" + "\n".join(answers))
-            elif outcome == TaskOutcome.APPROVED:
-                parts.append("the reviewer approved the change")
+            if report.get("report"):
+                parts.append("worker report:\n" + report["report"][:2000])
+            if report.get("diff", "").strip():
+                diff = report["diff"]
+                cut = f"\n... ({len(diff) - 3000} more characters)" if len(diff) > 3000 else ""
+                parts.append("verified diff in the workspace:\n" + diff[:3000] + cut)
+            if report.get("review"):
+                parts.append("independent reviewer: " + report["review"][:800])
             if feedback:
                 parts.append("reviewer feedback:\n" + feedback[:1500])
             return "\n".join(parts)
@@ -1332,6 +1347,7 @@ class Kontrollierer:
             ledger.grant_manual()
         self._ledgers[mission_id] = ledger
         self._run_paid[mission_id] = {}
+        self._conducted.add(mission_id)
         try:
             async with self._mission_sem:
                 async with asyncio.timeout(self._mission_deadline_s):
@@ -1345,6 +1361,9 @@ class Kontrollierer:
             await self._fail_mission(mission_id, f"conductor_failed: {type(exc).__name__}")
             return MissionState.FAILED
         finally:
+            self._conducted.discard(mission_id)
+            for done in ran:
+                self._step_reports.pop(done.task_id, None)
             await self._record_paid_usage(mission_id)
             self._ledgers.pop(mission_id, None)
             self._run_paid.pop(mission_id, None)
@@ -2478,6 +2497,15 @@ class Kontrollierer:
                 answer = readonly_answer(diff_text, log_text, prompt=mission_prompt)
                 if answer:
                     self._task_answers.setdefault(mission_id, []).append(answer)
+                # What the conductor reads back about this step: the work
+                # itself, not just "approved" (live 2026-10-24 the conductor
+                # re-ran an approved file write twice because it saw no proof).
+                if mission_id in self._conducted:
+                    self._step_reports[step.task_id] = {
+                        "report": extract_stream_evidence(log_text).final_answer.strip(),
+                        "diff": diff_text,
+                        "review": str(getattr(verdict, "summary", "") or ""),
+                    }
                 return TaskOutcome.APPROVED
 
             if verdict.verdict == "reject":
