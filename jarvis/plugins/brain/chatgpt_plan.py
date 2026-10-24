@@ -147,8 +147,14 @@ class ChatGPTPlanBrain:
     context_window: int = 128_000
     supports_tools: bool = False
     supports_vision: bool = False
+    #: The caller's system prompt goes in ``instructions``, a real channel.
+    native_system_prompt: bool = True
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, structured_prompts: bool = True) -> None:
+        # ``structured_prompts`` is accepted for resolve_subscription_brain: an
+        # API brain has no conversational wrapper, so every request already
+        # carries the caller's contract and full history verbatim.
+        del structured_prompts
         model = (model or "").strip()
         self._model = model.removeprefix("chatgpt-plan/")
         #: The slug the LAST turn actually ran on. The chain may hand this
