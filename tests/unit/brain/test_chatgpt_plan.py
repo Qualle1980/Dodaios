@@ -493,11 +493,58 @@ def _completed() -> httpx.Response:
 def test_body_is_minimal_and_stateless() -> None:
     assert chatgpt_plan.build_body(_req(), "gpt-a") == {
         "model": "gpt-a",
-        "input": [{"role": "user", "content": "Antworte exakt: DODAIOS-SIWC-OK"}],
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "Antworte exakt: DODAIOS-SIWC-OK"},  # i18n-allow
+        ]}],
         "store": False,
         "stream": True,
         "instructions": "Be brief.\n\nExtra rule.",
     }
+
+
+def test_tools_images_and_a_tool_round_trip_reach_the_plan_route() -> None:
+    """Probed live 2026-10-24 on the plan token: function tools and input_image
+    are accepted. The body is the OpenAI brain's own Responses shape."""
+    from jarvis.core.protocols import ImageBlock
+
+    req = BrainRequest(
+        messages=[
+            BrainMessage(role="user", content="What is on the screen?",
+                         images=(ImageBlock(mime="image/png", data_b64="AAAA"),)),
+            BrainMessage(role="assistant", content=[
+                {"type": "tool_use", "id": "c1", "name": "read_file", "input": {"path": "a.md"}},
+            ]),
+            BrainMessage(role="tool", tool_call_id="c1", content="hello"),
+        ],
+        tools=({"name": "read_file", "description": "Read a file.",
+                "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},),
+    )
+    body = chatgpt_plan.build_body(req, "gpt-a")
+    user, call, result = body["input"]
+    assert {"type": "input_image", "image_url": "data:image/png;base64,AAAA"} in user["content"]
+    assert call == {"type": "function_call", "call_id": "c1", "name": "read_file",
+                    "arguments": '{"path":"a.md"}'}
+    assert result == {"type": "function_call_output", "call_id": "c1", "output": "hello"}
+    assert body["tools"] == [{
+        "type": "function", "name": "read_file", "description": "Read a file.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}},
+    }]
+    assert chatgpt_plan.ChatGPTPlanBrain().can_call_tools() is True
+
+
+def test_a_function_call_streams_as_a_tool_call_before_the_finish(brain_env) -> None:
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.output_item.done", "item": {
+            "type": "function_call", "call_id": "c9", "name": "spawn_worker",
+            "arguments": '{"task": "count lines"}'}},
+        {"type": "response.completed", "response": {}},
+    ))])
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    assert [d.tool_call for d in deltas if d.tool_call] == [
+        {"id": "c9", "name": "spawn_worker", "input": {"task": "count lines"}}
+    ]
+    assert [d.finish_reason for d in deltas if d.finish_reason] == ["tool_calls"]
 
 
 def test_streaming_turn_completes(brain_env) -> None:
