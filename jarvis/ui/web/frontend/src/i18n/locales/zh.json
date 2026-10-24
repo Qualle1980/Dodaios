@@ -6571,6 +6571,8 @@
       "result_done": "{0} 已完成",
       "result_blocked": "{0} 卡住了",
       "result_agent": "一个智能体",
+      "mission_done": "任务已完成",
+      "mission_failed": "任务失败",
       "delegate_line": "用 delegate-to-agent 把这件事交给智能体“{0}”（id {1}），完成后回到这里汇报。",
       "proposal_title": "{0} 提议一项更改",
       "proposal_reason": "原因",
