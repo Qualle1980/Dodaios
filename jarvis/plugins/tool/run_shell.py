@@ -95,13 +95,18 @@ def _powershell_argv(command: str) -> list[str]:
       text. Letting them reach PowerShell's own error stream would serialize
       them as CLIXML noise on stderr, which the brain cannot read.
       ``$ProgressPreference`` suppresses progress records for the same reason.
+    - ``| Out-String -Stream`` formats every object BEFORE the script exits.
+      Left to PowerShell's default formatter, output waits for the end of the
+      pipeline and the explicit ``exit`` discards it: live 2026-10-24
+      ``Get-Location; Test-Path 'x'`` returned one empty line, and the chat
+      model asked the person for a path it had just looked up.
     """
     script = (
         "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\n"
         "$ProgressPreference = 'SilentlyContinue'\n"
         "$ErrorActionPreference = 'Stop'\n"
         "try {\n"
-        "  & { " + command + " }\n"
+        "  & { " + command + " } | Out-String -Stream -Width 4096\n"
         "} catch {\n"
         "  [Console]::Error.WriteLine($_.ToString())\n"
         "  exit 1\n"

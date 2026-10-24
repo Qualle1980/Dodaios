@@ -69,6 +69,21 @@ async def test_powershell_cmdlet_works(tmp_path) -> None:
 
 @windows_only
 @pytest.mark.asyncio
+async def test_mixed_objects_are_all_printed(tmp_path) -> None:
+    """Live 2026-10-24: ``Get-Location; Test-Path 'x'`` printed ONE empty line —
+    the default formatter's buffered table died with the wrapper's ``exit``,
+    and the chat model asked the person for a path it had just looked up."""
+    (tmp_path / "here.md").write_text("x", encoding="utf-8")
+    result = await RunShellTool().execute(
+        {"command": "Get-Location; Test-Path 'here.md'", "cwd": str(tmp_path)}, None,
+    )
+    assert result.success is True
+    assert tmp_path.name in result.output["stdout"]
+    assert "True" in result.output["stdout"]
+
+
+@windows_only
+@pytest.mark.asyncio
 async def test_pipes_work_on_windows() -> None:
     result = await RunShellTool().execute(
         {"command": 'Write-Output alpha beta | Select-Object -First 1'},
