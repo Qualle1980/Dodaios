@@ -6,7 +6,10 @@ with the plan's access token from ``chatgpt_plan_auth``. Contract per turn:
 * ``store: false`` and ``stream: true``; ``input`` carries the full history
   (no ``previous_response_id``); the system prompt goes in ``instructions``,
   never a ``role: "system"`` item;
-* no sampling, metadata or hosted-tool fields: the plan route rejects them;
+* no sampling or metadata fields; function tools and image input ride the
+  same route (probed live 2026-10-24 on the plan token: a ``function_call``
+  came back, an ``input_image`` was described), built by the OpenAI brain's
+  own Chat -> Responses converters so both providers send one shape;
 * only ``response.completed`` is success; a stream that ends without it fails;
 * nothing is ever re-sent: once the request may have left, an unclear outcome
   is ``submission_ambiguous`` and the user decides;
@@ -28,6 +31,13 @@ import httpx
 
 from jarvis.core.protocols import BrainDelta, BrainMessage, BrainRequest
 
+from ._openai_base import (
+    _chat_messages_to_responses_input,
+    _openai_tool_name_map,
+    _to_openai_messages,
+    _tools_openai_format,
+    _tools_responses_format,
+)
 from .chatgpt_plan_auth import RESOURCE, USAGE_URL, ChatGPTPlanError, auth
 
 log = logging.getLogger(__name__)
@@ -77,27 +87,31 @@ def _text_of(msg: BrainMessage) -> str:
     )
 
 
+def tool_name_map(req: BrainRequest) -> dict[str, str]:
+    """Jarvis tool name -> the OpenAI-safe name sent on the wire."""
+    return _openai_tool_name_map(tuple(req.tools or ()))
+
+
 def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
-    """The Responses request: full history, instructions, nothing optional."""
-    items: list[dict[str, Any]] = []
-    extra_system: list[str] = []
-    for msg in req.messages:
-        text = _text_of(msg)
-        if not text:
-            continue
-        if msg.role == "system":
-            extra_system.append(text)
-        elif msg.role == "tool":
-            # Text-only route: a stale tool result is context for the model.
-            items.append({"role": "user", "content": f"[tool result]\n{text}"})
-        else:
-            items.append(
-                {"role": "assistant" if msg.role == "assistant" else "user", "content": text}
-            )
+    """The Responses request: full history, instructions, tools, nothing optional.
+
+    History, images, tool calls and tool results go through the OpenAI brain's
+    Chat -> Responses converters (one shape for both providers); the
+    instructions keep this route's own order: the request's system prompt,
+    then system messages.
+    """
+    names = tool_name_map(req)
+    chat = _to_openai_messages(
+        tuple(req.messages), None, supports_vision=True, tool_name_map=names,
+    )
+    _, items = _chat_messages_to_responses_input(chat)
     body: dict[str, Any] = {"model": model, "input": items, "store": False, "stream": True}
+    extra_system = [_text_of(m) for m in req.messages if m.role == "system"]
     instructions = "\n\n".join(p for p in (req.system or "", *extra_system) if p)
     if instructions:
         body["instructions"] = instructions
+    if req.tools:
+        body["tools"] = _tools_responses_format(_tools_openai_format(tuple(req.tools), names))
     return body
 
 
@@ -143,8 +157,8 @@ def error_from(status: int, payload: Any, request_id: str | None) -> ChatGPTPlan
 class ChatGPTPlanBrain:
     name: str = "chatgpt-plan"
     context_window: int = 128_000
-    supports_tools: bool = False
-    supports_vision: bool = False
+    supports_tools: bool = True
+    supports_vision: bool = True
     #: The caller's system prompt goes in ``instructions``, a real channel.
     native_system_prompt: bool = True
 
@@ -165,7 +179,7 @@ class ChatGPTPlanBrain:
             return False
 
     def can_call_tools(self) -> bool:
-        return False
+        return True
 
     def estimate_cost(self, req: BrainRequest) -> float:
         return 0.0
@@ -194,6 +208,7 @@ class ChatGPTPlanBrain:
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
         token, model = await asyncio.to_thread(self._prepare)
         body = build_body(req, model)
+        reverse_names = {safe: name for name, safe in tool_name_map(req).items()}
         headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream"}
         for attempt, delay in enumerate((0.0, *_RETRY_DELAYS)):
             if delay:
@@ -226,7 +241,7 @@ class ChatGPTPlanBrain:
                                 continue
                             raise exc
                         admitted = True
-                        async for delta in _events(resp):
+                        async for delta in _events(resp, reverse_names):
                             if delta.finish_reason:
                                 finished = True
                             yield delta
@@ -256,7 +271,28 @@ class ChatGPTPlanBrain:
             return
 
 
-async def _events(resp: httpx.Response) -> AsyncIterator[BrainDelta]:
+def _tool_call(item: dict[str, Any], reverse_names: dict[str, str], index: int) -> dict[str, Any]:
+    """A finished ``function_call`` item as the tool call the tool loop runs."""
+    name = str(item.get("name") or "")
+    try:
+        arguments = json.loads(item.get("arguments") or "{}")
+    except ValueError:
+        log.warning("chatgpt-plan: tool call %r had unparsable arguments; running it empty", name)
+        arguments = {}
+    return {
+        "id": str(item.get("call_id") or item.get("id") or f"call_{index}"),
+        "name": reverse_names.get(name, name),
+        "input": arguments if isinstance(arguments, dict) else {},
+    }
+
+
+async def _events(
+    resp: httpx.Response, reverse_names: dict[str, str] | None = None
+) -> AsyncIterator[BrainDelta]:
+    """Stream deltas; tool calls are collected and handed out before the finish,
+    like the OpenAI brain's Responses path, so the tool loop sees one shape."""
+    reverse_names = reverse_names or {}
+    calls: list[dict[str, Any]] = []
     event = ""
     async for line in resp.aiter_lines():
         if line.startswith("event:"):
@@ -277,8 +313,14 @@ async def _events(resp: httpx.Response) -> AsyncIterator[BrainDelta]:
             text = payload.get("delta")
             if isinstance(text, str) and text:
                 yield BrainDelta(content=text)
+        elif kind == "response.output_item.done":
+            item = payload.get("item") or {}
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                calls.append(_tool_call(item, reverse_names, len(calls)))
         elif kind == "response.completed":
-            yield BrainDelta(finish_reason="stop")
+            for call in calls:
+                yield BrainDelta(tool_call=call)
+            yield BrainDelta(finish_reason="tool_calls" if calls else "stop")
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
