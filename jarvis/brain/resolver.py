@@ -491,8 +491,13 @@ def resolve_subscription_brain(
     *,
     bus: EventBus | None = None,
     cli_timeout_s: float | None = None,
+    prefer: str | None = None,
 ) -> Brain | None:
     """A Brain billed against a connected subscription, or None.
+
+    ``prefer`` (a provider id the USER configured, e.g. ``brain.primary``) is
+    tried first when it is a connected subscription; the mission conductor
+    passes the chat seat so it plans on the chat the user picked.
 
     For callers whose output IS the product and who are already waiting seconds
     — the Agentic IDE's prompt composer and work splitter. It exists so those
@@ -531,6 +536,9 @@ def resolve_subscription_brain(
     # is stable, so card order still decides among equals, and a preferred
     # provider that is not signed in falls through exactly as before.
     candidates.sort(key=lambda provider: not _native_system_channel(provider))
+    if prefer and prefer in candidates:
+        candidates.remove(prefer)
+        candidates.insert(0, prefer)
 
     for provider in candidates:
         if not _subscription_connected(provider):
