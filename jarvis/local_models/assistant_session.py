@@ -89,8 +89,20 @@ def _tool_capable(provider: str) -> bool:
 
 def _default_usable(provider: str) -> bool:
     """A credential exists: the provider's own key (the Tool Model bills
-    through it) or the Agents-tier secret for the fallback chain."""
-    from jarvis.core.config import get_jarvis_agent_secret
+    through it), the Agents-tier secret for the fallback chain, or a connected
+    subscription login. Without the last one a subscription-only install had
+    no agent chat at all (live 2026-10-24: "Pick a Tool Model with an API key
+    first" for the society agent, while the ChatGPT plan was signed in)."""
+    from jarvis.brain.resolver import _subscription_candidates, _subscription_connected
+    from jarvis.core.config import get_jarvis_agent_secret, load_config
+
+    try:
+        if provider in _subscription_candidates(load_config()) and _subscription_connected(
+            provider
+        ):
+            return True
+    except Exception:  # noqa: BLE001 — an unreadable login is "not connected", logged
+        log.debug("agents tier: subscription probe for %s failed", provider, exc_info=True)
 
     try:
         if get_jarvis_agent_secret(provider):
@@ -135,19 +147,34 @@ def _chain(cfg: Any) -> list[tuple[str, str]]:
         out.append(pinned)
     brain = getattr(cfg, "brain", None)
     worker = getattr(brain, "worker", None)
-    if worker is None:
-        return out
     pairs = [
         ("provider", "model"),
         ("fallback_provider", "fallback_model"),
         ("fallback_provider_2", "fallback_model_2"),
-    ]
+    ] if worker is not None else []
     for p_key, m_key in pairs:
         provider = str(getattr(worker, p_key, "") or "").strip()
         model = str(getattr(worker, m_key, "") or "").strip()
         if provider and (provider, model) not in out:
             out.append((provider, model))
+    # Last: the chat the user talks to, when it is a SUBSCRIPTION seat. Still
+    # gated like every other pair (known, tool-capable, signed in). A keyed
+    # primary is never added: the agent chain bills a key only where the user
+    # pointed the Tool Model or the Agents tier at it.
+    primary = str(getattr(brain, "primary", "") or "").strip()
+    if primary and all(p != primary for p, _ in out) and _is_subscription(cfg, primary):
+        out.append((primary, ""))
     return out
+
+
+def _is_subscription(cfg: Any, provider: str) -> bool:
+    from jarvis.brain.resolver import _subscription_candidates
+
+    try:
+        return provider in _subscription_candidates(cfg)
+    except Exception:  # noqa: BLE001 — unknown billing counts as "not a subscription", logged
+        log.debug("agents tier: billing lookup for %s failed", provider, exc_info=True)
+        return False
 
 
 def chain_candidates(
