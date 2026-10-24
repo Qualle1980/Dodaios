@@ -1640,3 +1640,118 @@ async def test_worker_prompt_carries_artifact_language_directive(
     assert ARTIFACT_LANGUAGE_DIRECTIVE in prompt
     # The step instruction survives — the directive is prepended, not a replacement.
     assert "test.html" in prompt
+
+
+# --- missions.conductor = "on" (ADR-0043) ---
+
+
+def _conductor_ledger(*, done: bool, nxt: str = "codex", instruction: str = "") -> str:
+    import json
+
+    return json.dumps({
+        "is_request_satisfied": {"reason": "r", "answer": done},
+        "is_in_loop": {"reason": "r", "answer": False},
+        "is_progress_being_made": {"reason": "r", "answer": True},
+        "next_executor": {"reason": "r", "answer": nxt},
+        "instruction": {"reason": "r", "answer": instruction},
+    })
+
+
+class _ScriptedSeat:
+    """The conductor seat: fact/plan prompts get text, ledgers come in order."""
+
+    def __init__(self, *ledgers: str, final: str = "Done: the palindrome helper exists.") -> None:
+        self.ledgers = list(ledgers)
+        self.final = final
+        self.prompts: list[str] = []
+
+    async def __call__(self, messages) -> str:  # type: ignore[no-untyped-def]
+        prompt = messages[-1][1]
+        self.prompts.append(prompt)
+        if "Recall the request" in prompt:
+            return self.ledgers.pop(0)
+        if "We worked on this request" in prompt:
+            return self.final
+        if "Answer this directly" in prompt:
+            return "Rebase rewrites history; merge keeps it."
+        return "- codex: write the helper"
+
+
+def _conduct(k: Kontrollierer, seat) -> None:  # type: ignore[no-untyped-def]
+    async def _seat():  # type: ignore[no-untyped-def]
+        return seat
+
+    k.set_conductor(lambda: "on", _seat)
+
+
+@pytest.mark.asyncio
+async def test_conductor_on_steers_one_worker_step_and_its_answer_is_the_result(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    worker = FakeWorker()
+    critic = FakeCriticRunner(_make_approve_verdict())
+    k = _make_kontrollierer(manager=manager, tmp_path=tmp_path, critic=critic,
+                            worker_factory_fn=lambda step: worker)
+    seat = _ScriptedSeat(
+        _conductor_ledger(done=False, instruction="Write is_palindrome in pal.py"),
+        _conductor_ledger(done=True),
+    )
+    _conduct(k, seat)
+    mid = await manager.dispatch(prompt="build palindrome function")
+
+    assert await k.run_mission(mid) == MissionState.APPROVED
+    assert len(worker.spawn_calls) == 1
+    assert worker.spawn_calls[0]["prompt"].rstrip().endswith("Write is_palindrome in pal.py")
+    assert len(critic.calls) == 1  # the step went through the ordinary review
+    events = await manager.store.events_for_mission(mid)
+    approved = [e.payload for e in events if e.payload.event_type == "MissionApproved"]
+    assert approved and approved[0].summary_en == "Done: the palindrome helper exists."
+
+
+@pytest.mark.asyncio
+async def test_conductor_on_answers_a_question_without_any_worker(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    worker = FakeWorker()
+    critic = FakeCriticRunner()
+    k = _make_kontrollierer(manager=manager, tmp_path=tmp_path, critic=critic,
+                            worker_factory_fn=lambda step: worker)
+    seat = _ScriptedSeat(
+        _conductor_ledger(done=False, nxt="conductor", instruction="Explain rebase vs merge"),
+        _conductor_ledger(done=True),
+        final="Rebase rewrites history; merge keeps it.",
+    )
+    _conduct(k, seat)
+    mid = await manager.dispatch(prompt="What is the difference between rebase and merge?")
+
+    assert await k.run_mission(mid) == MissionState.APPROVED
+    assert worker.spawn_calls == [] and critic.calls == []
+
+
+@pytest.mark.asyncio
+async def test_conductor_on_never_claims_a_step_the_reviewer_failed(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    critic = FakeCriticRunner(*[_make_revise_verdict("still wrong")] * 3)
+    k = _make_kontrollierer(manager=manager, tmp_path=tmp_path, critic=critic)
+    seat = _ScriptedSeat(
+        _conductor_ledger(done=False, instruction="Fix it"),
+        _conductor_ledger(done=True),  # the model claims success anyway
+    )
+    _conduct(k, seat)
+    mid = await manager.dispatch(prompt="fix the parser")
+
+    assert await k.run_mission(mid) == MissionState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_conductor_on_without_a_seat_takes_the_decomposer(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    critic = FakeCriticRunner(_make_approve_verdict())
+    k = _make_kontrollierer(manager=manager, tmp_path=tmp_path, critic=critic)
+    _conduct(k, None)
+    mid = await manager.dispatch(prompt="build palindrome function")
+
+    assert await k.run_mission(mid) == MissionState.APPROVED
+    assert len(critic.calls) == 1

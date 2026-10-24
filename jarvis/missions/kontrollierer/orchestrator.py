@@ -30,7 +30,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -1006,6 +1006,17 @@ class Kontrollierer:
         # In-flight run_mission tasks by mission_id — lets an external
         # cancel (UI hold-to-abort) abort a running mission mid-flight.
         self._running_missions: dict[str, asyncio.Task[Any]] = {}
+        # Subscription conductor (ADR-0043), installed by bootstrap_missions.
+        # Unset (tests, headless callers): every mission takes the decomposer.
+        self._conductor_mode: Callable[[], str] | None = None
+        self._conductor_seat: Callable[[], Awaitable[Any]] | None = None
+
+    def set_conductor(
+        self, mode_of: Callable[[], str], seat_of: Callable[[], Awaitable[Any]]
+    ) -> None:
+        """Let ``missions.conductor = "on"`` plan and steer missions."""
+        self._conductor_mode = mode_of
+        self._conductor_seat = seat_of
 
     async def run_mission(self, mission_id: str) -> MissionState:
         """Runs a mission end-to-end and returns the final state.
@@ -1211,6 +1222,12 @@ class Kontrollierer:
         except Exception as hb_exc:  # noqa: BLE001 - ownership stamp is advisory; freshness guard still applies
             logger.debug("Initial mission heartbeat failed (non-fatal): %s", hb_exc)
 
+        # missions.conductor = "on": the conductor plans and steers instead of
+        # the one-shot decomposer; no seat means the decomposer, as before.
+        conducted = await self._maybe_conduct(mission_id, view.prompt)
+        if conducted is not None:
+            return conducted
+
         # Decomposer: determine the plan.
         try:
             plan = await self._decomposer.decompose(view.prompt)
@@ -1231,6 +1248,141 @@ class Kontrollierer:
             plan.expected_output,
         )
         return await self._execute_plan(mission_id, view.prompt, plan)
+
+    async def _maybe_conduct(self, mission_id: str, prompt: str) -> MissionState | None:
+        """Run the mission under the conductor, or None to take the decomposer."""
+        if self._conductor_mode is None or self._conductor_seat is None:
+            return None
+        if self._conductor_mode() != "on":
+            return None
+        try:
+            ask = await self._conductor_seat()
+        except Exception:  # noqa: BLE001 - no seat is the decomposer path, logged
+            logger.warning("conductor: seat unavailable for %s", mission_id, exc_info=True)
+            ask = None
+        if ask is None:
+            logger.info("conductor: no subscription seat, %s takes the decomposer", mission_id)
+            return None
+        return await self._conduct_mission(mission_id, prompt, ask)
+
+    async def _conduct_mission(self, mission_id: str, prompt: str, ask: Any) -> MissionState:
+        """One mission steered by the conductor (ADR-0043).
+
+        The conductor plans, picks an executor per step and judges progress.
+        ``conductor`` answers on the seat itself (no worker, no worktree); a
+        worker executor runs ONE step through the ordinary worker + critic
+        loop, so isolation, budgets, reviews and events stay what they are.
+        """
+        from ..conductor.lanes import first_lane
+        from ..conductor.lessons import _active as active_lessons
+        from ..conductor.loop import Conductor, as_single_prompt
+        from ..conductor.shadow import TEAM
+
+        executor_cli: dict[str, Literal["claude", "codex"]] = {
+            "codex": "codex", "claude-code": "claude",
+        }
+        mission_dir = self._isolation_root / f"mission_{mission_id[:13]}"
+        mission_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 - one setup mkdir
+        reflections = ReflectionMemory(mission_dir)
+        sem = asyncio.Semaphore(1)
+        ran: list[Step] = []
+        outcomes: list[str] = []
+        stop: list[str] = []
+
+        async def _execute(executor: str, instruction: str) -> str:
+            if stop:
+                return f"Not run: the order already stopped ({stop[0]})."
+            if executor == "conductor":
+                return await ask([("user", as_single_prompt([
+                    ("user", f"The user's request:\n{prompt}"),
+                    ("user", f"Answer this directly and concisely:\n{instruction}"),
+                ]))])
+            step = Step(
+                slug=f"conductor-step-{len(ran) + 1}",
+                prompt=instruction,
+                worker_cli=executor_cli[executor],
+                preferred_cli=executor_cli[executor],
+            )
+            ran.append(step)
+            answers_before = len(self._task_answers.get(mission_id, []))
+            outcome = await self._run_task_with_critic_loop(
+                mission_id=mission_id, mission_prompt=prompt, step=step,
+                mission_dir=mission_dir, reflections=reflections, sem=sem,
+            )
+            outcomes.append(outcome)
+            if outcome in (TaskOutcome.BUDGET_EXCEEDED, TaskOutcome.WAITING_CAPACITY,
+                           TaskOutcome.SETUP_FAILED):
+                stop.append(outcome)
+            answers = self._task_answers.get(mission_id, [])[answers_before:]
+            feedback = "" if outcome == TaskOutcome.APPROVED else (
+                reflections.render_for_worker_prompt(n=1) or "")
+            parts = [f"outcome: {outcome}"]
+            if answers:
+                parts.append("answer:\n" + "\n".join(answers))
+            elif outcome == TaskOutcome.APPROVED:
+                parts.append("the reviewer approved the change")
+            if feedback:
+                parts.append("reviewer feedback:\n" + feedback[:1500])
+            return "\n".join(parts)
+
+        lessons = active_lessons.render(first_lane(prompt)) if active_lessons else "(none)"
+        conductor = Conductor(ask, TEAM, lessons=lessons)
+        ledger = MissionPaidLedger(await self._mission_paid_spent(mission_id))
+        if mission_id in self._paid_approval:
+            ledger.grant_manual()
+        self._ledgers[mission_id] = ledger
+        self._run_paid[mission_id] = {}
+        try:
+            async with self._mission_sem:
+                async with asyncio.timeout(self._mission_deadline_s):
+                    result = await conductor.run(prompt, _execute)
+        except TimeoutError:
+            logger.warning("conductor: %s exceeded the mission deadline", mission_id)
+            await self._fail_mission(mission_id, "attempts_timed_out")
+            return MissionState.FAILED
+        except Exception as exc:  # noqa: BLE001 - a seat failure fails the order honestly
+            logger.exception("conductor: %s failed", mission_id)
+            await self._fail_mission(mission_id, f"conductor_failed: {type(exc).__name__}")
+            return MissionState.FAILED
+        finally:
+            await self._record_paid_usage(mission_id)
+            self._ledgers.pop(mission_id, None)
+            self._run_paid.pop(mission_id, None)
+            self._wait_family.pop(mission_id, None)
+
+        logger.info("conductor: %s ended %s after %d round(s), %d worker step(s), %d replan(s)",
+                    mission_id, result.status, result.rounds, len(ran), result.replans)
+        plan = MissionPlan(
+            steps=ran or [Step(slug="conductor-answer", prompt=prompt)],
+            n_workers=1,
+        )
+        if stop and stop[0] == TaskOutcome.WAITING_CAPACITY:
+            return await self._park_mission(
+                mission_id, plan, prompt=prompt,
+                step_outcomes={s.task_id: o for s, o in zip(ran, outcomes, strict=False)},
+                partial_artifacts=self._collect_partial_artifacts(mission_id, plan),
+            )
+        if stop:
+            await self._fail_mission(mission_id, stop[0],
+                                     partial_artifacts=self._collect_partial_artifacts(
+                                         mission_id, plan))
+            return MissionState.FAILED
+        # Done counts only when the last worker step (if any) was approved: the
+        # conductor may route around a failed step, never claim one.
+        if result.status == "done" and (not outcomes or outcomes[-1] == TaskOutcome.APPROVED):
+            # The conductor's final answer is what the user hears and reads.
+            self._task_answers[mission_id] = [result.answer] if result.answer.strip() else []
+            await self._approve_mission(mission_id, plan, prompt=prompt)
+            return MissionState.APPROVED
+        self._mission_failure_context[mission_id] = {
+            "error_class": f"conductor_{result.status}",
+            "error_detail": result.answer[:2000] or None,
+            "failed_provider": None,
+        }
+        await self._fail_mission(mission_id, f"conductor_{result.status}",
+                                 partial_artifacts=self._collect_partial_artifacts(
+                                     mission_id, plan))
+        return MissionState.FAILED
 
     async def _execute_plan(
         self,
