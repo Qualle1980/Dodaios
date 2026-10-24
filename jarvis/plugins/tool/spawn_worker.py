@@ -39,7 +39,11 @@ from typing import Any, Final
 
 from jarvis.brain.ack_brain.spawn_announcement import SpawnAnnouncementComposer
 from jarvis.core.bus import EventBus
-from jarvis.core.events import JarvisAgentAnnouncement, JarvisAgentBackgroundCompleted
+from jarvis.core.events import (
+    DelegationResultReady,
+    JarvisAgentAnnouncement,
+    JarvisAgentBackgroundCompleted,
+)
 from jarvis.core.protocols import ExecutionContext, ToolResult
 from jarvis.core.secret_scrub import scrub_secrets
 from jarvis.missions.events import coerce_mission_language
@@ -211,6 +215,42 @@ def _typed_order() -> tuple[str, str]:
     if turn is None or not turn.direct_user:
         return "", ""
     return f"chat:{turn.session_id}:{turn.turn_id}", turn.user_text
+
+
+def _typed_chat_session() -> str:
+    """The chat session a typed order came from, ``""`` for a spoken one."""
+    from jarvis.core.protocols import current_chat_turn
+
+    turn = current_chat_turn.get()
+    if turn is None or not turn.direct_user:
+        return ""
+    return str(turn.session_id or "")
+
+
+async def _mission_outcome(manager: MissionManager, mission_id: str) -> tuple[str, str]:
+    """``(status, text)`` of a finished mission for its chat: the summary the
+    readback speaks, or the failure reason with its detail."""
+    events = await manager.store.events_for_mission(mission_id)
+    language = ""
+    for env in events:
+        payload = env.payload
+        if payload.event_type == "MissionDispatched":
+            language = str(getattr(payload, "language", "") or "")
+    for env in reversed(events):
+        payload = env.payload
+        if payload.event_type == "MissionApproved":
+            text = (
+                (payload.summary_local if language not in ("de", "en") else "")
+                or (payload.summary_de if language == "de" else payload.summary_en)
+                or payload.summary_en or payload.summary_de
+            )
+            return "done", str(text or "")
+        if payload.event_type == "MissionFailed":
+            detail = str(getattr(payload, "error_detail", "") or "")
+            return "failed", f"{payload.reason}: {detail}" if detail else str(payload.reason)
+        if payload.event_type == "MissionWaitingCapacity":
+            return "waiting", ""
+    return "", ""
 
 
 def _fold_order(utterance: str) -> str:
@@ -873,6 +913,9 @@ class SpawnWorkerTool:
                 self._background_dispatch(
                     mission_prompt, utterance, manager, kontrollierer,
                     mission_language=mission_language,
+                    # Captured now: the chat turn's context is gone once this
+                    # turn returns, and the result belongs in THAT chat.
+                    chat_session=_typed_chat_session(),
                     # Full turn language (not the coerced mission_language):
                     # a failure readback the background task renders itself
                     # must be in the same language the pipeline will wrap it
@@ -921,8 +964,12 @@ class SpawnWorkerTool:
         *,
         mission_language: str = "de",
         readback_language: str | None = None,
+        chat_session: str = "",
     ) -> None:
-        """Laeuft im Background. Dispatched + executes eine Mission.
+        """Runs in the background: dispatches and executes one mission.
+
+        ``chat_session`` is the typed chat the order came from; its outcome is
+        written into that chat when the mission ends (a voice order has none).
 
         ``prompt`` is the enriched worker task instruction (interpreted action
         + verbatim utterance, built by :func:`_build_mission_prompt`);
@@ -954,10 +1001,9 @@ class SpawnWorkerTool:
         so the voice layer says it out loud instead of a log line
         nobody reads.
 
-        Exceptions werden geloggt und als ``success=False`` publisht — nichts
-        propagiert nach aussen, weil der Task fire-and-forget ist und ein
-        unbehandelter Exception sonst im Event-Loop als unhandled-exception
-        enden wuerde.
+        Exceptions are logged and published as ``success=False``; nothing
+        propagates, because the task is fire-and-forget and an unhandled
+        exception would otherwise end up as an unhandled event-loop error.
         """
         try:
             mission_id = await manager.dispatch(
@@ -985,6 +1031,8 @@ class SpawnWorkerTool:
             # Run the mission. This blocks until APPROVED / FAILED;
             # the Voice-Listener will then publish JarvisAgentBackgroundCompleted.
             await kontrollierer.run_mission(mission_id)
+            if chat_session:
+                await self._post_result_to_chat(manager, mission_id, chat_session)
         except asyncio.CancelledError:
             log.info("Jarvis-Agent background dispatch cancelled (app shutdown)")
             raise  # Propagieren, damit Loop sauber aufraeumt.
@@ -1000,6 +1048,28 @@ class SpawnWorkerTool:
             # is not falsely suppressed as "already running" (#3). Floor at 0
             # defends against any unpaired decrement.
             self._active_dispatches = max(0, self._active_dispatches - 1)
+
+    async def _post_result_to_chat(
+        self, manager: MissionManager, mission_id: str, session_id: str
+    ) -> None:
+        """Write a finished mission's answer into the chat that ordered it.
+
+        Rides ``DelegationResultReady``, the event a coding result for a Jarvis
+        conversation already uses: stored as a notice, no new model turn. A
+        parked mission says nothing yet; its later resume is not tied to this
+        task. Never raises: the voice readback is unaffected either way.
+        """
+        try:
+            status, text = await _mission_outcome(manager, mission_id)
+            if status not in ("done", "failed"):
+                return
+            await self._bus.publish(DelegationResultReady(
+                session_id=session_id, request_id=f"mission:{mission_id}",
+                status=status, text=scrub_secrets(text),
+            ))
+        except Exception:  # noqa: BLE001 - the chat line is a courtesy, logged
+            log.warning("spawn_worker: mission %s result not posted to chat %s",
+                        mission_id, session_id, exc_info=True)
 
     async def _publish_dispatch_failure(self, utterance: str, error: str) -> None:
         """Tell the user a promised background task will not deliver.

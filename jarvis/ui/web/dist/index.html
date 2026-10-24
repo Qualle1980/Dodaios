@@ -123,19 +123,24 @@
         color: var(--jbs-accent);
         cursor: default; -webkit-user-select: none; -moz-user-select: none; user-select: none;
       }
+      #jarvis-boot-splash .jbs-group > :not(.jbs-mark) {
+        position: relative; z-index: 1;
+        text-shadow: 0 1px 8px rgba(0, 0, 0, 0.9);
+      }
       #jarvis-boot-splash .jbs-group {
         display: flex; flex-direction: column; align-items: center;
         /* Optical centre: a touch above the geometric middle. */
         margin-top: -4vh;
       }
+      /* The intro clip fills the whole window; name and progress sit on top. */
       #jarvis-boot-splash .jbs-mark {
-        width: 96px; height: 96px; border-radius: 24%;
-        box-shadow: var(--jbs-shadow), 0 0 0 1px var(--jbs-rim);
+        position: fixed; inset: 0; z-index: 0; overflow: hidden;
+        background: #000;
         animation: jbs-mark-in .9s var(--jbs-ease) both;
         animation-delay: var(--jbs-shift, 0s);
       }
-      #jarvis-boot-splash .jbs-mark img {
-        display: block; width: 100%; height: 100%;
+      #jarvis-boot-splash .jbs-mark video {
+        display: block; width: 100%; height: 100%; -o-object-fit: cover; object-fit: cover;
         -webkit-user-drag: none;
       }
       #jarvis-boot-splash .name {
@@ -219,19 +224,18 @@
         #jarvis-boot-splash.jbs-exit { animation: jbs-fade-out .2s ease forwards; }
       }
       @media (max-height: 420px) {
-        #jarvis-boot-splash .jbs-mark { width: 64px; height: 64px; }
         #jarvis-boot-splash .name { margin-top: 16px; }
       }
     </style>
-    <script type="module" crossorigin src="/assets/index-CNEScuow.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-FTCQJ0rI.css">
+    <script type="module" crossorigin src="/assets/index-CYoRoDRT.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CuwzK8PH.css">
   </head>
   <body>
     <div id="root">
       <div id="jarvis-boot-splash">
         <div class="jbs-group">
           <div class="jbs-mark" aria-hidden="true">
-            <img src="/jarvis-gigi-256.png?v=hood" alt="" width="256" height="256" />
+            <video src="/jarvis-live.mp4" autoplay loop muted playsinline></video>
           </div>
           <!-- Painted synchronously by the inline script below from the cached
                assistant name (the user's chosen wake word, e.g. "Nico"). Left
@@ -448,7 +452,7 @@
           var mark = document.createElement("div");
           mark.className = "jbs-mark";
           mark.setAttribute("aria-hidden", "true");
-          mark.innerHTML = '<img src="/jarvis-gigi-256.png?v=hood" alt="" width="256" height="256">';
+          mark.innerHTML = '<video src="/jarvis-live.mp4" autoplay loop muted playsinline></video>';
           var progress = document.createElement("div");
           progress.className = "jbs-progress";
           progress.setAttribute("aria-hidden", "true");

@@ -6571,6 +6571,8 @@
       "result_done": "{0} ist fertig",
       "result_blocked": "{0} kam nicht weiter",
       "result_agent": "Ein Agent",
+      "mission_done": "Auftrag erledigt",
+      "mission_failed": "Auftrag gescheitert",
       "delegate_line": "Hand this to the agent '{0}' (id {1}) with delegate-to-agent and report back here when it is done.",
       "proposal_title": "{0} schlägt eine Änderung vor",
       "proposal_reason": "Warum",

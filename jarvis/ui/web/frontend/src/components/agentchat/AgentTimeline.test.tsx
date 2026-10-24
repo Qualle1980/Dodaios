@@ -107,3 +107,17 @@ it("says who still works on a request whose turn made room for the next message"
   ]);
   expect(screen.getByTestId("turn-background").textContent).toContain("Agent T2");
 });
+
+it("shows a mission this chat ordered as a result card with its outcome", () => {
+  draw([
+    ev("notice", { kind: "coding_result", assignment_id: "mission:m1", status: "done",
+      text: "`loop.py` has **234** lines." }),
+    ev("notice", { kind: "coding_result", assignment_id: "mission:m2", status: "failed",
+      text: "conductor_stopped: the file could not be written" }, 2000),
+  ]);
+  const [done, failed] = screen.getAllByTestId("mission-result");
+  expect(done.textContent).toContain("Task finished");
+  expect(done.textContent).toContain("234");
+  expect(failed.textContent).toContain("Task failed");
+  expect(failed.textContent).toContain("could not be written");
+});
