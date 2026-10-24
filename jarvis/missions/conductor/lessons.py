@@ -217,6 +217,34 @@ class LessonStore:
         return "\n".join(f"- {r.text}" for r in relevant[:limit]) or "(none)"
 
 
+#: Placed before the task in every worker prompt, like ExpeL's ``RULE_TEMPLATE``
+#: ahead of the task prompt (``agent/expel.py``, ``insert_before_task_prompt``).
+RULE_BLOCK: Final[str] = (
+    "The following are lessons learned from earlier orders of this kind that "
+    "failed. Use them as references to help you perform this task:\n{rules}"
+)
+
+_active: LessonStore | None = None
+
+
+def set_active_store(store: LessonStore | None) -> None:
+    """The store the running app learns into; :func:`lessons_block` reads it."""
+    global _active
+    _active = store
+
+
+def lessons_block(task: str, limit: int = 5) -> str:
+    """The rule block for a worker on ``task``, or "" when nothing was learned."""
+    store = _active
+    if store is None or not task.strip():
+        return ""
+    from .lanes import first_lane
+
+    rules = store.render(first_lane(task), limit=limit)
+    return "" if rules == "(none)" else RULE_BLOCK.format(rules=rules)
+
+
 __all__ = [
-    "LESSON_PROMPT", "MAX_OPS", "MAX_RULES", "Incident", "LessonStore", "Rule", "parse_ops",
+    "LESSON_PROMPT", "MAX_OPS", "MAX_RULES", "RULE_BLOCK", "Incident", "LessonStore", "Rule",
+    "lessons_block", "parse_ops", "set_active_store",
 ]
