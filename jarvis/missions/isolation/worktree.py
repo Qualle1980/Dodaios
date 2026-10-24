@@ -228,7 +228,7 @@ class WorktreeManager:
         *,
         mission_slug: str,
         task_id: str,
-        base_branch: str = "main",
+        base_branch: str = "HEAD",
         needs_repo: bool = True,
     ) -> Path:
         """Create a new workspace and return the `workspace/` path.
@@ -236,7 +236,12 @@ class WorktreeManager:
         Inputs:
             mission_slug: short mission identifier (will be slugified).
             task_id: task identifier (will be slugified, typically `01__refactor-router`).
-            base_branch: branch from which the worktree branch is forked.
+            base_branch: ref the worktree branch is forked from. Defaults to
+                ``HEAD``: the commit the repo is on, i.e. the code the app
+                runs. A literal ``main`` once handed every worker a local
+                ``main`` dozens of merges behind (it moves only by
+                ``pull --ff-only``), so a read order for a file added since
+                was answered "the file does not exist" and approved.
             needs_repo: when True (default) the workspace is a full `git
                 worktree add` checkout of the repo at ``base_branch`` — the
                 isolated, registered worktree every repo task has always
