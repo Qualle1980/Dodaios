@@ -68,3 +68,18 @@ def test_a_read_order_runs_in_the_read_only_sandbox() -> None:
     assert _sandbox_for(_build_mission_prompt("Fix the typo in README.md", action="")) == (
         "workspace-write"
     )
+
+
+def test_the_sandbox_follows_the_request_inside_the_real_worker_prompt() -> None:
+    """Live 2026-10-24: the framing directives read as read-only, so the
+    composed prompt put EVERY order in the read-only sandbox and a plain
+    "create docs/tmp_probe.md" failed three times."""
+    from jarvis.missions.kontrollierer.worker_prompt import compose_worker_prompt
+
+    feedback = "Do not modify unrelated files. The earlier attempt wrote nothing."
+    change = "Create the file docs/tmp_probe.md containing exactly the line 'probe'."
+    for prior in ("", feedback):
+        assert _sandbox_for(compose_worker_prompt(prior, change)) == "workspace-write"
+        assert _sandbox_for(compose_worker_prompt(prior, _READ_PROMPT)) == "read-only"
+        assert _sandbox_for(compose_worker_prompt(
+            prior, "List the TODOs in jarvis/missions/budget.py")) == "read-only"

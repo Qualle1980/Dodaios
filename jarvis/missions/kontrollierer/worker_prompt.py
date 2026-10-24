@@ -32,6 +32,10 @@ from typing import Final
 
 from jarvis.core.secret_scrub import scrub_secrets
 
+#: First line of a worker prompt whose request is a read order. The codex
+#: worker turns it into ``--sandbox read-only``; the model reads it as the order.
+READ_ONLY_MARKER: Final[str] = "READ-ONLY TASK:"
+
 # Prepended to every worker prompt. Kept provider-agnostic and language-neutral:
 # it must hold no matter what language the request arrived in (the leak was
 # "German request -> German code"), so it can never be a de/en toggle.
@@ -116,10 +120,19 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
     task instruction for this step (verbatim user utterance or a decomposed
     sub-task).
     """
+    from ..stream_evidence import clean_request_body
+    from ..task_kind import is_read_task
+
     head = (
         f"{ARTIFACT_LANGUAGE_DIRECTIVE}\n\n{OUTPUT_SHAPE_DIRECTIVE}\n\n"
         f"{SUPERVISOR_BOUNDARY_DIRECTIVE}\n\n{FINAL_REPORT_DIRECTIVE}"
     )
+    # Classified HERE, on the request alone: the directives above would read
+    # as a read-only order themselves (see ``codex_direct_worker._sandbox_for``).
+    if step_prompt.lstrip().startswith(READ_ONLY_MARKER) or is_read_task(
+        clean_request_body(step_prompt)
+    ):
+        head = f"{READ_ONLY_MARKER} do not create, modify or delete any file.\n\n{head}"
     body = (
         f"{head}\n\n{prior_block}\n\n{step_prompt}"
         if prior_block and prior_block.strip()
@@ -135,6 +148,7 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
 
 __all__ = [
     "ARTIFACT_LANGUAGE_DIRECTIVE",
+    "READ_ONLY_MARKER",
     "OUTPUT_SHAPE_DIRECTIVE",
     "FINAL_REPORT_DIRECTIVE",
     "SUPERVISOR_BOUNDARY_DIRECTIVE",
