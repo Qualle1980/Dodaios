@@ -1778,6 +1778,8 @@ async def bootstrap_missions(
         extra_blocked_globs=extra_blocked_globs,
         paid_option=ApiKeyPaidOption(),
     )
+    # missions.conductor = "on": the subscription conductor steers (ADR-0043).
+    kontrollierer.set_conductor(_conductor_mode, _conductor_seat)
 
     # 8. VoiceListener / Announcer — mutually exclusive (2026-05-27 finding
     # #6): exactly one readback path runs, else every completion is spoken
