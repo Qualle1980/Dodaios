@@ -89,6 +89,24 @@ def test_create_workspace_has_git_files(manager: WorktreeManager) -> None:
     assert (workspace / ".git").exists()  # file (link), not a directory
 
 
+def test_create_forks_from_the_checked_out_commit_not_a_stale_main(
+    manager: WorktreeManager, tmp_git_repo: Path
+) -> None:
+    """Live 2026-10-24: local main sat dozens of merges behind the app's branch;
+    the worker never saw a file the app already ran and the order was approved
+    as "file does not exist"."""
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_git_repo, check=True, capture_output=True)
+
+    git("switch", "-c", "feature")
+    (tmp_git_repo / "new_module.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "new_module.py")
+    git("commit", "-m", "add module")
+
+    ws = manager.create(mission_slug="m", task_id="01__read")
+    assert (ws / "new_module.py").is_file()
+
+
 def test_create_two_tasks_get_different_paths(manager: WorktreeManager) -> None:
     a = manager.create(mission_slug="m", task_id="01-foo")
     b = manager.create(mission_slug="m", task_id="02-bar")
