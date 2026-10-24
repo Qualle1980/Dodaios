@@ -1155,6 +1155,17 @@ def set_missions_paid_api_fallback(enabled: bool, *, path: Path = DEFAULT_CONFIG
     _patch_table(path, "missions", "paid_api_fallback", enabled)
 
 
+def set_missions_conductor(mode: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
+    """Persist ``[missions] conductor`` (``off`` | ``shadow`` | ``on``, ADR-0043).
+
+    Read fresh per order by ``jarvis.missions.init._conductor_mode``, so the
+    next mission follows the new mode without a restart.
+    """
+    if mode not in ("off", "shadow", "on"):
+        raise ValueError(f"missions.conductor must be off, shadow or on, not {mode!r}")
+    _patch_table(path, "missions", "conductor", mode)
+
+
 def set_wiki_semantic_search(
     enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE
 ) -> None:

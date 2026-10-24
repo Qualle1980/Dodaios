@@ -934,3 +934,16 @@ def test_no_waits_are_lost_in_the_vocabulary() -> None:
 
     assert set(get_args(CapacityWaitReason)) == set(CAPACITY_WAIT_REASONS)
     assert {"paid_daily_cap_reached", "paid_consent_revoked"} <= set(CAPACITY_WAIT_REASONS)
+
+
+def test_the_conductor_mode_is_written_safely_and_read_fresh(temp_config: Path) -> None:
+    from jarvis.core.config import load_config
+    from jarvis.core.config_writer import set_missions_conductor
+    from jarvis.missions.init import _conductor_mode
+
+    assert _conductor_mode() == "shadow"  # the default
+    set_missions_conductor("on")
+    assert load_config().missions.conductor == "on" and _conductor_mode() == "on"
+    assert 'theme = "dark"' in _config_text(temp_config)  # the rest is untouched
+    with pytest.raises(ValueError):
+        set_missions_conductor("always")

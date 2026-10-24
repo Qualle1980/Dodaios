@@ -4522,10 +4522,12 @@ class MissionsConfig(BaseModel):
     # Subscription conductor (ADR-0043). "shadow": every top-level order is
     # also planned by the conductor on the chat seat, its first choice is
     # written to data/conductor/shadow.jsonl next to the worker that really
-    # ran; nothing it says steers the order. "off": not even planned.
-    # Runs on a connected subscription only, never a key. Read per order in
-    # jarvis/missions/conductor/shadow.py.
-    conductor: Literal["off", "shadow"] = "shadow"
+    # ran; nothing it says steers the order. "on": the conductor plans and
+    # steers the mission (Kontrollierer._conduct_mission), each worker step
+    # still runs through the worker + critic loop. "off": not even planned.
+    # Runs on a connected subscription only, never a key; without one the
+    # decomposer path runs. Read per order (shadow.py, orchestrator.py).
+    conductor: Literal["off", "shadow", "on"] = "shadow"
 
 
 class GlmCodingPlanConfig(BaseModel):
