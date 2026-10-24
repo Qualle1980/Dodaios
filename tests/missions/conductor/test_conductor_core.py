@@ -121,6 +121,26 @@ def test_a_failure_is_recorded_and_becomes_a_rule_for_its_lane(tmp_path: Path) -
     assert store.render("change") == "(none)"
 
 
+def test_learned_rules_lead_the_next_worker_prompt_of_that_lane(tmp_path: Path) -> None:
+    from jarvis.missions.conductor.lessons import lessons_block, set_active_store
+    from jarvis.missions.kontrollierer.worker_prompt import compose_worker_prompt
+
+    store = LessonStore(tmp_path)
+    try:
+        set_active_store(store)
+        assert lessons_block("Create the file docs/a.md with one line") == ""  # nothing learned
+        store.apply("ADD 1: Verify every step of a create-then-remove sequence.", "change")
+
+        block = lessons_block("Create the file docs/a.md with one line")
+        assert "lessons learned" in block and "create-then-remove" in block
+        assert lessons_block("List the TODOs in jarvis/missions/budget.py") == ""  # other lane
+        prompt = compose_worker_prompt(block, "Create the file docs/a.md with one line")
+        assert prompt.index("create-then-remove") < prompt.index("Create the file docs/a.md")
+    finally:
+        set_active_store(None)
+    assert lessons_block("Create the file docs/a.md with one line") == ""  # no app, no block
+
+
 def test_agree_strengthens_and_remove_drops_at_zero(tmp_path: Path) -> None:
     store = LessonStore(tmp_path)
     store.apply("ADD 1: Rule one is kept.\nADD 2: Rule two goes.", "*")
