@@ -61,6 +61,23 @@ Execute = Callable[[str, str], Awaitable[str]]
 Status = Literal["done", "stopped", "max_rounds", "no_ledger"]
 
 
+def as_single_prompt(messages: Sequence[Message]) -> str:
+    """The conversation as ONE prompt: the transcript first, the current ask last.
+
+    Every seat answers this the same way, whatever roles its transport keeps.
+    """
+    if not messages:
+        return ""
+    *earlier, (_, current) = messages
+    if not earlier:
+        return current
+    transcript = "\n\n".join(f"[{role}]\n{text}" for role, text in earlier)
+    return (
+        "Conversation so far (context only, already answered):\n\n"
+        f"{transcript}\n\n---\nAnswer ONLY this now:\n\n{current}"
+    )
+
+
 @dataclass
 class Step:
     """One handed-out step and what came back."""
@@ -212,5 +229,6 @@ class Conductor:
 
 __all__ = [
     "DEFAULT_MAX_JSON_RETRIES", "DEFAULT_MAX_ROUNDS", "Ask", "Conductor", "Execute",
+    "as_single_prompt",
     "Message", "Outcome", "Preview", "Step",
 ]

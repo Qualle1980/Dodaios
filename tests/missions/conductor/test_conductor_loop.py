@@ -113,3 +113,14 @@ async def test_preview_plans_without_executing() -> None:
     assert preview.first is not None and preview.first.next_executor.answer == "claude-code"
     assert preview.plan.startswith("- codex")
     assert seat.calls == ["facts", "plan", "ledger"]
+
+
+def test_a_conversation_reaches_the_seat_as_one_prompt_with_the_ask_last() -> None:
+    from jarvis.missions.conductor.loop import as_single_prompt
+
+    assert as_single_prompt([("user", "only ask")]) == "only ask"
+    prompt = as_single_prompt([("user", "facts?"), ("assistant", "a.py exists"),
+                               ("user", "Devise a plan")])
+    assert prompt.index("facts?") < prompt.index("a.py exists") < prompt.index("Devise a plan")
+    assert prompt.rstrip().endswith("Devise a plan")
+    assert "Answer ONLY this now" in prompt

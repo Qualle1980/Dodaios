@@ -1171,9 +1171,14 @@ async def _conductor_seat(max_tokens: int = _CONDUCTOR_MAX_TOKENS) -> Any | None
     if brain is None:
         return None
 
+    from jarvis.missions.conductor.loop import as_single_prompt
+
     async def _ask(messages: Any) -> str:
         request = BrainRequest(
-            messages=tuple(BrainMessage(role=role, content=text) for role, text in messages),
+            # One message: a CLI seat keeps only some roles of a multi-turn
+            # history (live 2026-10-24 the plan call was answered as the facts
+            # call), so the transcript rides inside the prompt for every seat.
+            messages=(BrainMessage(role="user", content=as_single_prompt(messages)),),
             temperature=0.2,
             max_tokens=max_tokens,
             stream=True,
