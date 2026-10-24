@@ -642,3 +642,11 @@ def test_missing_plan_scope_blocks_turn(brain_env, plan) -> None:
         asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain()))
     assert exc.value.code == "plan_scope_missing"
     assert not server.requests
+
+
+def test_the_plan_brain_qualifies_as_a_structured_subscription_seat() -> None:
+    """resolve_subscription_brain probes ``structured_prompts``; live 2026-10-24
+    the probe's TypeError skipped the user's own chat seat for the conductor."""
+    brain = chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a", structured_prompts=True)
+    assert brain._model == "gpt-a"
+    assert chatgpt_plan.ChatGPTPlanBrain.native_system_prompt is True
