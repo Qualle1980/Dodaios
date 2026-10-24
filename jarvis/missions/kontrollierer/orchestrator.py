@@ -107,6 +107,7 @@ from ..safety import (
 )
 from ..state_machine import IllegalStateTransition, MissionState
 from ..stream_evidence import (
+    clean_request_body,
     extract_stream_evidence,
     extract_verified_commands,
     extract_verified_desktop_actions,
@@ -114,6 +115,7 @@ from ..stream_evidence import (
     readonly_answer,
     summarize_answers,
 )
+from ..task_kind import is_read_task
 from ..worker_runtime.workspace import materialize_worker_contract
 from ..workers.base import WorkerProtocol
 from .decomposer import MissionDecomposer, MissionPlan, Step
@@ -125,7 +127,7 @@ from .deliverable import (
     materialize_answer_document,
 )
 from .deliverable_paths import find_generator_scripts, is_deliverable_path
-from .worker_prompt import compose_worker_prompt
+from .worker_prompt import READ_ONLY_MARKER, compose_worker_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -1280,7 +1282,7 @@ class Kontrollierer:
         """
         from ..conductor.lanes import first_lane
         from ..conductor.lessons import _active as active_lessons
-        from ..conductor.loop import Conductor, as_single_prompt
+        from ..conductor.loop import Conductor, OrderHalted, as_single_prompt
         from ..conductor.shadow import TEAM
 
         executor_cli: dict[str, Literal["claude", "codex"]] = {
@@ -1293,6 +1295,10 @@ class Kontrollierer:
         ran: list[Step] = []
         outcomes: list[str] = []
         stop: list[str] = []
+        # The USER's words decide whether files may change, never the
+        # conductor's instruction: live 2026-10-24 a read order ran with write
+        # access because the conductor phrased its step as "Run `wc -l` ...".
+        read_order = is_read_task(clean_request_body(prompt))
 
         async def _execute(executor: str, instruction: str) -> str:
             if stop:
@@ -1302,6 +1308,11 @@ class Kontrollierer:
                     ("user", f"The user's request:\n{prompt}"),
                     ("user", f"Answer this directly and concisely:\n{instruction}"),
                 ]))])
+            if read_order and not instruction.lstrip().startswith(READ_ONLY_MARKER):
+                instruction = (
+                    f"{READ_ONLY_MARKER} do not create, modify or delete any file.\n\n"
+                    f"{instruction}"
+                )
             step = Step(
                 slug=f"conductor-step-{len(ran) + 1}",
                 prompt=instruction,
@@ -1317,7 +1328,10 @@ class Kontrollierer:
             outcomes.append(outcome)
             if outcome in (TaskOutcome.BUDGET_EXCEEDED, TaskOutcome.WAITING_CAPACITY,
                            TaskOutcome.SETUP_FAILED):
+                # No later step can run either: end the loop now, without
+                # spending further seat calls on rounds that cannot act.
                 stop.append(outcome)
+                raise OrderHalted(outcome, f"outcome: {outcome}")
             answers = self._task_answers.get(mission_id, [])[answers_before:]
             feedback = "" if outcome == TaskOutcome.APPROVED else (
                 reflections.render_for_worker_prompt(n=1) or "")
