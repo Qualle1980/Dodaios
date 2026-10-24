@@ -88,13 +88,11 @@ _PREFIX: Final[str] = "society:"
 #: Tools every society session keeps regardless of grants — its own hands.
 _OWN_PREFIX: Final[str] = "society_"
 #: Tools a society session never gets even in ``all`` mode: the agent writes
-#: the wiki only through its namespaced note tool and runs commands only
-#: through its own contained shell (never the free-cwd shell tools).
+#: the wiki only through its namespaced note tool, and ``RunCommand`` is
+#: replaced by its own contained shell.
 _SOCIETY_DENIED: Final[frozenset[str]] = frozenset(
     {
         "wiki-ingest",
-        "run-shell",
-        "run_shell",
         "RunCommand",
         "remember",
         "update_profile",
@@ -102,6 +100,10 @@ _SOCIETY_DENIED: Final[frozenset[str]] = frozenset(
         "update-profile",
     }
 )
+#: The machine-wide shell: granted like any hand, but EVERY call waits for the
+#: person's yes on the chat card, whatever the agent's mode or standing rules
+#: (maintainer decision 2026-10-24: agents may use it once the user approves).
+_SOCIETY_ALWAYS_ASK: Final[frozenset[str]] = frozenset({"run-shell", "run_shell"})
 
 #: ``{lead}`` is the name the lead is shown under (``display_name``), filled per briefing.
 _ECOSYSTEM_CARD: Final[str] = """\
@@ -545,6 +547,12 @@ class _GatedTool:
         return base
 
     def risk_tier_for_args(self, args: dict[str, Any]) -> str | None:
+        tier = self._decided_tier(args)
+        if self.name in _SOCIETY_ALWAYS_ASK and tier != "block":
+            return "ask"
+        return tier
+
+    def _decided_tier(self, args: dict[str, Any]) -> str | None:
         from .approvals import Verdict, decide
 
         base = self._base_tier_for_args(args)
