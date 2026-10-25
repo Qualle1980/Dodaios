@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import logging
+
+log = logging.getLogger(__name__)
 
 from jarvis.core.protocols import ExecutionContext, ToolResult
 
@@ -34,7 +37,8 @@ class ScopedVoiceReadTool:
         try:
             candidate = (self._root / raw).resolve()
             candidate.relative_to(self._root)
-        except (ValueError, OSError, RuntimeError):
+        except (ValueError, OSError, RuntimeError) as exc:
+            log.debug("Voice project file access denied or unresolved: %s", exc)
             return ToolResult(
                 success=False, output=None,
                 error="Path is outside the selected project.",
