@@ -724,3 +724,141 @@ def test_prune_and_sweep_leaked_handles_missing_outputs_root(
     )
     report = fresh_mgr.prune_and_sweep_leaked(max_age_hours=6.0)
     assert report["swept_run_dirs"] == 0
+
+
+# --- bounded git worktree add regression tests --------------------------------
+
+
+def test_worktree_add_timeout_reaps_process_tree(monkeypatch: pytest.MonkeyPatch, manager: WorktreeManager) -> None:
+    """A wedged git checkout must not leave a running git child or report success."""
+    import jarvis.core.process_tree as process_tree
+    import jarvis.missions.isolation.worktree as worktree_module
+
+    events: list[str] = []
+
+    class FakeTree:
+        def assign(self, pid: int) -> None:
+            assert pid == 31415
+            events.append("assign")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakeProcess:
+        pid = 31415
+        returncode = None
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            assert kwargs["cwd"] == manager._repo_root
+            assert kwargs["start_new_session"] is (worktree_module.os.name != "nt")
+            events.append("spawn")
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            if timeout == manager._WORKTREE_ADD_TIMEOUT_S:
+                events.append("timeout")
+                raise subprocess.TimeoutExpired("git", timeout)
+            events.append("reaped")
+            return "", ""
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            events.append("kill")
+            self.returncode = -9
+
+    monkeypatch.setattr(process_tree, "make_process_tree", lambda name: FakeTree())
+    monkeypatch.setattr(worktree_module.subprocess, "Popen", FakeProcess)
+
+    with pytest.raises(TimeoutError, match="git worktree add timed out"):
+        manager._run_worktree_add(
+            ["git", "worktree", "add", "-b", "agent/test", "dummy", "HEAD"],
+            manager._outputs_root / "dummy",
+        )
+    assert events[:3] == ["spawn", "assign", "timeout"]
+    assert "close" in events and "kill" in events and "reaped" in events
+
+
+def test_worktree_add_success_keeps_result(monkeypatch: pytest.MonkeyPatch, manager: WorktreeManager) -> None:
+    """Fast successful Git checkout returns normal stdout without killing it."""
+    import jarvis.core.process_tree as process_tree
+    import jarvis.missions.isolation.worktree as worktree_module
+
+    events: list[str] = []
+
+    class FakeTree:
+        def assign(self, pid: int) -> None:
+            events.append("assign")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakeProcess:
+        pid = 91
+        returncode = 0
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            events.append("spawn")
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            return "checked out", ""
+
+        def poll(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            raise AssertionError("Successful checkout must not be killed")
+
+    monkeypatch.setattr(process_tree, "make_process_tree", lambda name: FakeTree())
+    monkeypatch.setattr(worktree_module.subprocess, "Popen", FakeProcess)
+    result = manager._run_worktree_add(
+        ["git", "worktree", "add", "-b", "agent/test", "dummy", "HEAD"],
+        manager._outputs_root / "dummy",
+    )
+    assert result.returncode == 0
+    assert result.stdout == "checked out"
+    assert events == ["spawn", "assign", "close"]
+
+
+def test_worktree_add_failure_preserves_partial_checkout(
+    monkeypatch: pytest.MonkeyPatch, manager: WorktreeManager, tmp_path: Path
+) -> None:
+    """Never remove an unknown partial checkout automatically."""
+    import jarvis.core.process_tree as process_tree
+    import jarvis.missions.isolation.worktree as worktree_module
+
+    workspace = tmp_path / "partial"
+    workspace.mkdir()
+    (workspace / "important.txt").write_text("keep", encoding="utf-8")
+
+    class FakeTree:
+        def assign(self, pid: int) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        pid = 44
+        returncode = None
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("git", timeout)
+            return "", ""
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr(process_tree, "make_process_tree", lambda name: FakeTree())
+    monkeypatch.setattr(worktree_module.subprocess, "Popen", FakeProcess)
+
+    with pytest.raises(TimeoutError, match="Partial workspace"):
+        manager._run_worktree_add(["git", "worktree", "add", str(workspace)], workspace)
+    assert (workspace / "important.txt").read_text(encoding="utf-8") == "keep"
