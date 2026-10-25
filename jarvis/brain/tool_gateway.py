@@ -11,6 +11,7 @@ import copy
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
+from pathlib import Path
 from uuid import UUID
 
 from jarvis.core.protocols import (
@@ -54,12 +55,14 @@ class BrainSupervisorToolGateway:
         session_tools: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
         | None = None,
         workspace_tool: Tool | None = None,
+        voice_project_root: Path | None = None,
     ) -> None:
         self._manager = manager
         self._session_tool = session_tool
         self._browser_tool = browser_tool
         self._session_tools = session_tools
         self._workspace_tool = workspace_tool
+        self._voice_project_root = voice_project_root.resolve() if voice_project_root else None
         self._lock = threading.Lock()
         self._fingerprint: tuple[tuple[str, int], ...] = ()
         self._catalog_version = 0
@@ -177,6 +180,16 @@ class BrainSupervisorToolGateway:
             from jarvis.society.runtime import current_runtime
 
             tools[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
+        # Voice may read ONLY a project explicitly selected by the app. Never
+        # fall back to the process cwd or an unscoped drive-wide search.
+        if self._voice_project_root is not None and self._voice_project_root.is_dir():
+            from jarvis.agent_chat.folder_tools import folder_tools
+            from jarvis.brain.voice_folder_tools import scoped_voice_read_tools
+
+            tools.update(scoped_voice_read_tools(
+                folder_tools(self._voice_project_root, stance="plan"),
+                self._voice_project_root,
+            ))
         if self._workspace_tool is not None:
             # Live delegates coding to one addressed service. The old prompt
             # tools silently choose an ambient pane and cannot safely coexist.
