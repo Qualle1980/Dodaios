@@ -68,6 +68,8 @@ _READ_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:"
     r"list|find|show|count|search|locate|grep|which|where|what|how\s+many|how\s+much|"
     r"auflisten|liste|listen|finde?|zeige?|zähle?|zaehle?|suche?|"  # i18n-allow
+    r"nachsehen|nachschauen|nachgucken|schau\s+(?:bitte\s+)?nach|"  # i18n-allow
+    r"wie\s+viele?|zeilenanzahl|"  # i18n-allow
     r"welche[rsnm]?|wo|was"  # i18n-allow
     r")\b",
     re.IGNORECASE,
