@@ -511,3 +511,4 @@ jarvis.toml.bak-*
 wiki/obsidian-vault/society/
 # Third-party Obsidian plugin binaries (installed locally, not a config seed)
 wiki/obsidian-vault/.obsidian/plugins/
+jarvis/ui/web/dist/
