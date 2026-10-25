@@ -56,6 +56,7 @@ class BrainSupervisorToolGateway:
         | None = None,
         workspace_tool: Tool | None = None,
         voice_project_root: Path | None = None,
+        voice_project_resolver: Callable[[], Path | None] | None = None,
     ) -> None:
         self._manager = manager
         self._session_tool = session_tool
@@ -63,6 +64,7 @@ class BrainSupervisorToolGateway:
         self._session_tools = session_tools
         self._workspace_tool = workspace_tool
         self._voice_project_root = voice_project_root.resolve() if voice_project_root else None
+        self._voice_project_resolver = voice_project_resolver
         self._lock = threading.Lock()
         self._fingerprint: tuple[tuple[str, int], ...] = ()
         self._catalog_version = 0
@@ -182,13 +184,14 @@ class BrainSupervisorToolGateway:
             tools[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
         # Voice may read ONLY a project explicitly selected by the app. Never
         # fall back to the process cwd or an unscoped drive-wide search.
-        if self._voice_project_root is not None and self._voice_project_root.is_dir():
+        root = self._voice_project_resolver() if self._voice_project_resolver else self._voice_project_root
+        if root is not None and root.is_dir():
             from jarvis.agent_chat.folder_tools import folder_tools
             from jarvis.brain.voice_folder_tools import scoped_voice_read_tools
 
             tools.update(scoped_voice_read_tools(
-                folder_tools(self._voice_project_root, stance="plan"),
-                self._voice_project_root,
+                folder_tools(root, stance="plan"),
+                root,
             ))
         if self._workspace_tool is not None:
             # Live delegates coding to one addressed service. The old prompt
