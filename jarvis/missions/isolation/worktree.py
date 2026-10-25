@@ -317,7 +317,7 @@ class WorktreeManager:
             base_branch,
         ]
         logger.info("WorktreeManager.create: %s", " ".join(cmd))
-        self._run_git(cmd)
+        self._run_worktree_add(cmd, workspace)
 
         # Record the base commit (the forked-from HEAD) so the Kontrollierer can
         # diff against it and capture files the worker later ``git commit``s.
@@ -788,6 +788,83 @@ class WorktreeManager:
                 (exc.stdout or "").strip(),
             )
             raise
+
+    _WORKTREE_ADD_TIMEOUT_S = 120.0
+    _WORKTREE_REAP_TIMEOUT_S = 5.0
+
+    def _run_worktree_add(
+        self, cmd: list[str], workspace: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Bound checkout time without changing other Git command semantics.
+
+        A timeout is a failure, never an empty or successful workspace. Leave
+        partially checked-out files in place for manual inspection rather than
+        risk deleting work that another process might have touched.
+        """
+        from jarvis.core.process_tree import make_process_tree
+
+        patched = ["git", "-c", "core.longpaths=true", *cmd[1:]]
+        tree = make_process_tree("git-worktree-add")
+        process: subprocess.Popen[str] | None = None
+        started = time.monotonic()
+        try:
+            process = subprocess.Popen(  # noqa: S603 — fixed Git argv, no shell
+                patched,
+                cwd=self._repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=NO_WINDOW_CREATIONFLAGS,
+                start_new_session=os.name != "nt",
+            )
+            tree.assign(process.pid)
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=self._WORKTREE_ADD_TIMEOUT_S
+                )
+            except subprocess.TimeoutExpired as exc:
+                # Closing the Job Object kills Windows descendants. POSIX uses
+                # a dedicated process group because we spawned a new session.
+                tree.close()
+                if process.poll() is None:
+                    process.kill()
+                try:
+                    process.communicate(timeout=self._WORKTREE_REAP_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    logger.error("Timed-out git process could not be reaped: pid=%s", process.pid)
+                elapsed = time.monotonic() - started
+                message = (
+                    f"git worktree add timed out after {elapsed:.1f}s "
+                    f"(limit {self._WORKTREE_ADD_TIMEOUT_S:.0f}s). "
+                    f"Partial workspace, if present, was preserved for safe recovery: {workspace}"
+                )
+                logger.error(message)
+                raise TimeoutError(message) from exc
+            result = subprocess.CompletedProcess(patched, process.returncode, stdout, stderr)
+            if process.returncode:
+                raise subprocess.CalledProcessError(
+                    process.returncode, patched, output=stdout, stderr=stderr
+                )
+            return result
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "git worktree add failed (exit=%s): %s\\nstderr: %s\\nstdout: %s",
+                exc.returncode, " ".join(patched),
+                (exc.stderr or "").strip(), (exc.stdout or "").strip(),
+            )
+            raise
+        finally:
+            # A successful process has already exited. On errors this is safe
+            # to call repeatedly and also handles an assignment failure.
+            tree.close()
+            if process is not None and process.poll() is None:
+                process.kill()
+                try:
+                    process.communicate(timeout=self._WORKTREE_REAP_TIMEOUT_S)
+                except subprocess.TimeoutExpired:
+                    logger.error("Could not reap git process pid=%s", process.pid)
 
     def _run_git(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         """Synchronous git call, cwd=repo_root, no shell=True.
