@@ -1283,6 +1283,7 @@ class Kontrollierer:
         from ..conductor.lanes import first_lane
         from ..conductor.lessons import _active as active_lessons
         from ..conductor.loop import Conductor, OrderHalted, as_single_prompt
+        from ..conductor.requested import requested_executor
         from ..conductor.shadow import TEAM
 
         executor_cli: dict[str, Literal["claude", "codex"]] = {
@@ -1355,7 +1356,18 @@ class Kontrollierer:
             return "\n".join(parts)
 
         lessons = active_lessons.render(first_lane(prompt)) if active_lessons else "(none)"
-        conductor = Conductor(ask, TEAM, lessons=lessons)
+        # A worker the user named is an instruction: conduct the order over
+        # that executor alone, so the conductor cannot answer in its place
+        # from the seat, where it has no file access (live 2026-10-25).
+        # Whether that worker can actually run is decided where it already is
+        # — the spawn returns SETUP_FAILED or WAITING_CAPACITY and halts the
+        # order honestly, rather than quietly routing to someone else.
+        requested = requested_executor(clean_request_body(prompt))
+        team = {requested: TEAM[requested]} if requested in TEAM else TEAM
+        if requested:
+            logger.info("conductor: %s the user named %s, conducting over %s",
+                        mission_id, requested, ", ".join(team))
+        conductor = Conductor(ask, team, lessons=lessons)
         ledger = MissionPaidLedger(await self._mission_paid_spent(mission_id))
         if mission_id in self._paid_approval:
             ledger.grant_manual()
@@ -1401,7 +1413,21 @@ class Kontrollierer:
                                          mission_id, plan))
             return MissionState.FAILED
         # Done counts only when the last worker step (if any) was approved: the
-        # conductor may route around a failed step, never claim one.
+        # conductor may route around a failed step, never claim one. An order
+        # that named its worker also needs that worker to have actually run —
+        # a seat answer is not evidence that Codex looked at the file.
+        if requested and not ran:
+            logger.warning("conductor: %s named %s but no worker step ran",
+                           mission_id, requested)
+            self._mission_failure_context[mission_id] = {
+                "error_class": "conductor_no_worker_evidence",
+                "error_detail": f"the order named {requested}, which never ran",
+                "failed_provider": requested,
+            }
+            await self._fail_mission(mission_id, "conductor_no_worker_evidence",
+                                     partial_artifacts=self._collect_partial_artifacts(
+                                         mission_id, plan))
+            return MissionState.FAILED
         if result.status == "done" and (not outcomes or outcomes[-1] == TaskOutcome.APPROVED):
             # The conductor's final answer is what the user hears and reads.
             self._task_answers[mission_id] = [result.answer] if result.answer.strip() else []
