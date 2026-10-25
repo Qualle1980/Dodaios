@@ -850,7 +850,7 @@ class WorktreeManager:
             return result
         except subprocess.CalledProcessError as exc:
             logger.error(
-                "git worktree add failed (exit=%s): %s\\nstderr: %s\\nstdout: %s",
+                "git worktree add failed (exit=%s): %s\nstderr: %s\nstdout: %s",
                 exc.returncode, " ".join(patched),
                 (exc.stderr or "").strip(), (exc.stdout or "").strip(),
             )
