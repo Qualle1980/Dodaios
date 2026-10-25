@@ -116,6 +116,7 @@ from ..stream_evidence import (
     summarize_answers,
 )
 from ..task_kind import is_read_task
+from ..timing import timed
 from ..worker_runtime.workspace import materialize_worker_contract
 from ..workers.base import WorkerProtocol
 from .decomposer import MissionDecomposer, MissionPlan, Step
@@ -1703,12 +1704,15 @@ class Kontrollierer:
                 # froze every route and WebSocket of the desktop app for 15 s+
                 # (loop-watchdog stack 2026-10-02: worktree.create ->
                 # _write_base_sha -> CreateProcess).
-                worktree = await asyncio.to_thread(
-                    self._create_worktree,
-                    mission_slug=_short_slug(mission_prompt),
-                    task_id=step.task_id,
-                    needs_repo=step.needs_repo,
-                )
+                # Timed from the loop's side as well: this also covers waiting
+                # for a free thread, which the in-thread timings cannot see.
+                with timed("setup.worktree_offloaded", step.task_id[:13], always=True):
+                    worktree = await asyncio.to_thread(
+                        self._create_worktree,
+                        mission_slug=_short_slug(mission_prompt),
+                        task_id=step.task_id,
+                        needs_repo=step.needs_repo,
+                    )
             except (
                 SourceCheckoutUnavailableError,
                 subprocess.CalledProcessError,
@@ -1737,7 +1741,8 @@ class Kontrollierer:
             # only regresses to the pre-fix behaviour and must not block
             # the mission.
             try:
-                materialize_worker_contract(worktree, mission_id)
+                with timed("setup.worker_contract", step.task_id[:13]):
+                    materialize_worker_contract(worktree, mission_id)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "materialize_worker_contract failed for %s",
@@ -1798,8 +1803,16 @@ class Kontrollierer:
 
     def _create_worktree(self, **kwargs: Any) -> Path:
         """``WorktreeManager.create``, one at a time. Worker thread only."""
-        with self._worktree_lock:
-            return self._worktrees.create(**kwargs)
+        ref = str(kwargs.get("task_id", ""))[:13]
+        # Timed separately from the checkout itself: waiting for another task's
+        # workspace and building your own look identical from the outside.
+        with timed("setup.worktree_lock_wait", ref):
+            self._worktree_lock.acquire()
+        try:
+            with timed("setup.worktree_create", ref, always=True):
+                return self._worktrees.create(**kwargs)
+        finally:
+            self._worktree_lock.release()
 
     def _remove_worktree_only(self, worktree: Path) -> None:
         """Remove a workspace WITHOUT archiving it — its archive must keep the
@@ -1888,7 +1901,8 @@ class Kontrollierer:
             if not (review_only and iteration == 0):
                 # A restored result that only waits for its review was made
                 # before these corrections; they count as not yet handed.
-                handed = await asyncio.to_thread(inbox.read)
+                with timed("setup.inbox_read", step.task_id[:13]):
+                    handed = await asyncio.to_thread(inbox.read)
                 prior_block = "\n\n".join(
                     b for b in (prior_block, render_corrections(handed)) if b
                 )
@@ -1899,9 +1913,10 @@ class Kontrollierer:
             # paths, all worker CLIs, every critic iteration.
             # Rules learned from earlier failures of this kind of order go
             # ahead of this attempt's own feedback (ADR-0043 lessons).
-            learned = await asyncio.to_thread(lessons_block, step.prompt)
-            prior_block = "\n\n".join(b for b in (learned, prior_block) if b)
-            worker_prompt = compose_worker_prompt(prior_block, step.prompt)
+            with timed("setup.prompt_build", step.task_id[:13], always=True):
+                learned = await asyncio.to_thread(lessons_block, step.prompt)
+                prior_block = "\n\n".join(b for b in (learned, prior_block) if b)
+                worker_prompt = compose_worker_prompt(prior_block, step.prompt)
 
             # State-Machine drive-thru:
             #   iter 0: PENDING/RUNNING -> CRITIQUING (single jump).
@@ -1968,7 +1983,8 @@ class Kontrollierer:
                 # Worker spawn (real or fake depending on the factory). A factory
                 # that refuses to switch to a billing fallback parks the task.
                 try:
-                    worker, paid_gate = self._make_worker(mission_id, step)
+                    with timed("setup.make_worker", step.task_id[:13], always=True):
+                        worker, paid_gate = self._make_worker(mission_id, step)
                 except WorkerCapacityUnavailable as exc:
                     logger.warning(
                         "Task %s iter %d: no worker capacity (%s) — parking the "
