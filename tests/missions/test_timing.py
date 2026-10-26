@@ -6,12 +6,14 @@ one that ends in an exception — and that the line carries no payload.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from jarvis.missions.timing import timed
+from jarvis.missions.timing import timed, timed_offload
 
 
 def test_a_slow_phase_is_reported(caplog: pytest.LogCaptureFixture) -> None:
@@ -26,7 +28,9 @@ def test_a_slow_phase_is_reported(caplog: pytest.LogCaptureFixture) -> None:
     assert message.rstrip().endswith("ms")
 
 
-def test_a_fast_phase_stays_quiet_unless_asked(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_fast_phase_leaves_the_info_stream_unless_asked(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     with caplog.at_level(logging.INFO, logger="jarvis.missions.timing"):
         with timed("setup.quick", "task-2"):
             pass
@@ -36,6 +40,19 @@ def test_a_fast_phase_stays_quiet_unless_asked(caplog: pytest.LogCaptureFixture)
         with timed("setup.quick", "task-2", always=True):
             pass
     assert len(caplog.records) == 1
+
+
+def test_a_fast_phase_is_still_recorded_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A phase is attributed by subtraction, so an absent line is not a zero."""
+    with caplog.at_level(logging.DEBUG, logger="jarvis.missions.timing"):
+        with timed("setup.quick", "task-6"):
+            pass
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.DEBUG
+    assert "setup.quick" in caplog.records[0].getMessage()
 
 
 def test_a_failing_phase_is_timed_and_marked(caplog: pytest.LogCaptureFixture) -> None:
@@ -65,3 +82,80 @@ def test_nothing_but_phase_reference_and_duration_is_logged(
     line = caplog.records[0].getMessage()
     assert secret not in line
     assert line.startswith("mission timing: task-5 setup.probe")
+
+
+def test_an_offload_reports_its_queue_wait_and_its_total(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The wait for a free thread is measured, never derived by subtraction."""
+    def work(*, value: int) -> int:
+        time.sleep(0.01)
+        return value * 2
+
+    with caplog.at_level(logging.INFO, logger="jarvis.missions.timing"):
+        result = asyncio.run(timed_offload("setup.offload", "task-7", work, value=21))
+
+    assert result == 42
+    phases = [r.getMessage().split()[3] for r in caplog.records]
+    assert phases == ["setup.offload.queue_wait", "setup.offload"]
+    assert all(r.levelno == logging.INFO for r in caplog.records)
+    assert all("(failed)" not in r.getMessage() for r in caplog.records)
+
+
+def test_an_offload_does_not_swallow_the_callables_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def work() -> None:
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.INFO, logger="jarvis.missions.timing"):
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(timed_offload("setup.offload", "task-8", work))
+
+    # The thread was entered, so the wait itself is a real number, not a bound.
+    assert len(caplog.records) == 2
+    assert all("(failed)" not in r.getMessage() for r in caplog.records)
+
+
+def test_an_offload_cancelled_before_its_thread_marks_the_wait_as_a_bound() -> None:
+    """A call that never reached a thread knows only a lower bound on its wait."""
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        def blocker() -> None:
+            started.set()
+            time.sleep(0.5)
+
+        # One worker thread, already busy: the second call can only queue.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        busy = asyncio.create_task(asyncio.to_thread(blocker))
+        await started.wait()
+
+        queued = asyncio.create_task(timed_offload("setup.offload", "task-9", lambda: None))
+        await asyncio.sleep(0.05)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        await busy
+
+    handler = _Collect()
+    logger = logging.getLogger("jarvis.missions.timing")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        asyncio.run(scenario())
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    waits = [r for r in records if "setup.offload.queue_wait" in r.getMessage()]
+    assert len(waits) == 1
+    assert "(failed)" in waits[0].getMessage()

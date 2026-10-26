@@ -116,7 +116,7 @@ from ..stream_evidence import (
     summarize_answers,
 )
 from ..task_kind import is_read_task
-from ..timing import timed
+from ..timing import timed, timed_offload
 from ..worker_runtime.workspace import materialize_worker_contract
 from ..workers.base import WorkerProtocol
 from .decomposer import MissionDecomposer, MissionPlan, Step
@@ -1704,15 +1704,18 @@ class Kontrollierer:
                 # froze every route and WebSocket of the desktop app for 15 s+
                 # (loop-watchdog stack 2026-10-02: worktree.create ->
                 # _write_base_sha -> CreateProcess).
-                # Timed from the loop's side as well: this also covers waiting
-                # for a free thread, which the in-thread timings cannot see.
-                with timed("setup.worktree_offloaded", step.task_id[:13], always=True):
-                    worktree = await asyncio.to_thread(
-                        self._create_worktree,
-                        mission_slug=_short_slug(mission_prompt),
-                        task_id=step.task_id,
-                        needs_repo=step.needs_repo,
-                    )
+                # Timed from the loop's side as well, and the wait for a free
+                # thread is reported on its own: the in-thread timings cannot
+                # see it, and deriving it by subtraction would depend on every
+                # inner phase having been logged.
+                worktree = await timed_offload(
+                    "setup.worktree_offloaded",
+                    step.task_id[:13],
+                    self._create_worktree,
+                    mission_slug=_short_slug(mission_prompt),
+                    task_id=step.task_id,
+                    needs_repo=step.needs_repo,
+                )
             except (
                 SourceCheckoutUnavailableError,
                 subprocess.CalledProcessError,
@@ -1806,7 +1809,7 @@ class Kontrollierer:
         ref = str(kwargs.get("task_id", ""))[:13]
         # Timed separately from the checkout itself: waiting for another task's
         # workspace and building your own look identical from the outside.
-        with timed("setup.worktree_lock_wait", ref):
+        with timed("setup.worktree_lock_wait", ref, always=True):
             self._worktree_lock.acquire()
         try:
             with timed("setup.worktree_create", ref, always=True):
