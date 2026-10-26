@@ -64,6 +64,15 @@ LOGIN_TIMEOUT_S = 600.0
 REFRESH_MARGIN_S = 120.0
 LOCK_TIMEOUT_S = 30.0
 HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+#: How long a fetched model list stays usable for the SAME account. The
+#: conductor resolves a default model before every seat call, and one order
+#: made five of them (live mission 01a17410, 2026-10-25: five
+#: ``GET /v1/models``, roughly 1.5 s apiece), for an answer that cannot change
+#: mid-order. Short enough that a plan change shows up on its own, and the key
+#: is the account itself, so no TTL has to expire for a sign-out to take
+#: effect.
+MODELS_TTL_S = 300.0
 _RETRY_DELAYS = (0.5, 1.5, 4.0)
 
 # Refresh codes after which only a new sign-in helps (token-reference).
@@ -386,6 +395,8 @@ class PlanAuth:
         self._login_error = ""
         self._mu = threading.Lock()
         self._discovery: Discovery | None = None
+        #: (account identity, monotonic fetch time, rows) - see ``models``.
+        self._models: tuple[str, float, tuple[dict[str, str], ...]] | None = None
 
     # -- status ---------------------------------------------------------
 
@@ -636,6 +647,11 @@ class PlanAuth:
     def logout(self) -> bool:
         """Revoke the refresh token, then clear tokens locally either way."""
         revoked = False
+        # Signing out is the moment a plan change is most likely, and signing
+        # the same account back in leaves the cache key unchanged, so the held
+        # list is dropped here rather than left to the TTL.
+        with self._mu:
+            self._models = None
         with self.store.lock():
             data = self.store.read()
             refresh = _tokens_of(data).get("refresh_token")
@@ -666,8 +682,34 @@ class PlanAuth:
 
     # -- models -----------------------------------------------------------
 
-    def models(self) -> list[dict[str, str]]:
-        """The account's listed models, in server order."""
+    def _account_identity(self) -> str:
+        """Who the cached list belongs to: the subject, else the signed-in mail.
+
+        Read from the store rather than remembered, so a sign-out, a sign-in or
+        a switch of account invalidates the cache by changing the key - nothing
+        has to notice the event, and no TTL has to expire first.
+        """
+        data = self.store.read()
+        subject = data.get("sub") or data.get("email") or ""
+        return f"{subject}|{data.get('scope') or ''}"
+
+    def models(self, *, refresh: bool = False) -> list[dict[str, str]]:
+        """The account's listed models, in server order.
+
+        Held for :data:`MODELS_TTL_S` per account. The list is a property of
+        the plan, not of the call that asks: resolving a default model before
+        every seat call turned one order into five identical round trips. A
+        caller that must observe a change right now passes ``refresh=True``.
+        """
+        identity = self._account_identity()
+        if not refresh:
+            with self._mu:
+                cached = self._models
+            if cached is not None:
+                owner, fetched_at, rows = cached
+                if owner == identity and time.monotonic() - fetched_at < MODELS_TTL_S:
+                    return [dict(row) for row in rows]
+
         token = self.access_token()
         resp = self._client().get(
             MODELS_URL, headers={"Authorization": f"Bearer {token}"}, timeout=HTTP_TIMEOUT
@@ -679,7 +721,16 @@ class PlanAuth:
                 status=resp.status_code,
                 request_id=resp.headers.get("x-request-id"),
             )
-        return parse_models(resp.json())
+        rows = parse_models(resp.json())
+        # An empty list is a real answer about the account, but it is also what
+        # a caller treats as a hard error, so it is not held onto.
+        with self._mu:
+            self._models = (
+                (identity, time.monotonic(), tuple(dict(row) for row in rows))
+                if rows
+                else None
+            )
+        return rows
 
 
 def parse_models(payload: Any) -> list[dict[str, str]]:
