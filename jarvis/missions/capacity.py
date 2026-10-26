@@ -192,28 +192,47 @@ _OUTPUT_KEYS = ("output_tokens", "completion_tokens")
 _CACHE_READ_KEYS = ("cache_hit_tokens", "cache_read_input_tokens", "cached_input_tokens")
 _CACHE_WRITE_KEYS = ("cache_write_tokens", "cache_creation_input_tokens")
 
+#: Input keys whose count ALREADY CONTAINS the cached tokens. Providers split
+#: here: an Anthropic ``input_tokens`` counts only what was neither read from
+#: nor written to the cache, while an OpenAI-shaped ``prompt_tokens`` is the
+#: whole prompt with the cached part inside it. Billing both the inclusive
+#: total at the full input rate and the cached part again at the cache rate
+#: charges the cache twice, and since the reservation fails closed, an
+#: overstated cost parks work that would in fact have fit.
+_INCLUSIVE_INPUT_KEYS = frozenset({"prompt_tokens"})
+
 
 def usage_cost_usd(model: str, usage: dict[str, Any]) -> float:
     """USD for one usage block: uncached input, output, cache reads at the
     vendor's read rate and cache writes at :data:`CACHE_WRITE_PREMIUM`."""
     from jarvis.brain.cost import calculate_cost_usd, resolve_rates
 
-    def first(keys: tuple[str, ...]) -> int:
-        for key in keys:
-            value = usage.get(key)
-            if value is not None:
-                try:
-                    return max(0, int(value))
-                except (TypeError, ValueError):
-                    # A non-numeric count says nothing; the reservation's fail
-                    # closed rule covers a call that reported nothing usable.
-                    return 0
-        return 0
+    def first_key(keys: tuple[str, ...]) -> str | None:
+        return next((key for key in keys if usage.get(key) is not None), None)
 
-    cost = calculate_cost_usd(
-        model, first(_INPUT_KEYS), first(_OUTPUT_KEYS), first(_CACHE_READ_KEYS)
-    )
+    def count(key: str | None) -> int:
+        if key is None:
+            return 0
+        try:
+            return max(0, int(usage[key]))
+        except (TypeError, ValueError):
+            # A non-numeric count says nothing; the reservation's fail closed
+            # rule covers a call that reported nothing usable.
+            return 0
+
+    def first(keys: tuple[str, ...]) -> int:
+        return count(first_key(keys))
+
+    input_key = first_key(_INPUT_KEYS)
+    uncached = count(input_key)
+    cache_read = first(_CACHE_READ_KEYS)
     written = first(_CACHE_WRITE_KEYS)
+    if input_key in _INCLUSIVE_INPUT_KEYS:
+        # Clamped at zero: a provider reporting more cached tokens than prompt
+        # tokens is incoherent, and a negative count would pay the caller back.
+        uncached = max(0, uncached - cache_read - written)
+
+    cost = calculate_cost_usd(model, uncached, first(_OUTPUT_KEYS), cache_read)
     if written:
         rates = resolve_rates(model)
         if rates is not None:
