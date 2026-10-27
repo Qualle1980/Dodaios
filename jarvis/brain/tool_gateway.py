@@ -8,9 +8,11 @@ and every call resolves against the current catalog immediately before use.
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
+from pathlib import Path
 from uuid import UUID
 
 from jarvis.core.protocols import (
@@ -42,6 +44,9 @@ _VOICE_SUPERSEDED_TOOLS = frozenset(
 )
 
 
+log = logging.getLogger(__name__)
+
+
 class BrainSupervisorToolGateway:
     """Adapter that keeps Brain Manager implementation details private."""
 
@@ -54,12 +59,16 @@ class BrainSupervisorToolGateway:
         session_tools: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
         | None = None,
         workspace_tool: Tool | None = None,
+        voice_project_root: Path | None = None,
+        voice_project_resolver: Callable[[], Path | None] | None = None,
     ) -> None:
         self._manager = manager
         self._session_tool = session_tool
         self._browser_tool = browser_tool
         self._session_tools = session_tools
         self._workspace_tool = workspace_tool
+        self._voice_project_root = voice_project_root.resolve() if voice_project_root else None
+        self._voice_project_resolver = voice_project_resolver
         self._lock = threading.Lock()
         self._fingerprint: tuple[tuple[str, int], ...] = ()
         self._catalog_version = 0
@@ -177,6 +186,26 @@ class BrainSupervisorToolGateway:
             from jarvis.society.runtime import current_runtime
 
             tools[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
+        # Voice may read ONLY a project explicitly selected by the app. Never
+        # fall back to the process cwd or an unscoped drive-wide search.
+        try:
+            root = (
+                self._voice_project_resolver()
+                if self._voice_project_resolver
+                else self._voice_project_root
+            )
+            if root is not None and root.is_dir():
+                from jarvis.agent_chat.folder_tools import folder_tools
+                from jarvis.brain.voice_folder_tools import scoped_voice_read_tools
+
+                tools.update(scoped_voice_read_tools(
+                    folder_tools(root, stance="plan"),
+                    root,
+                ))
+        except Exception as exc:  # noqa: BLE001 - the rest of the voice surface never depends on this
+            # No folder is readable rather than the wrong one, and the other
+            # live tools stay available.
+            log.warning("Voice project read tools unavailable, offering none: %s", exc)
         if self._workspace_tool is not None:
             # Live delegates coding to one addressed service. The old prompt
             # tools silently choose an ambient pane and cannot safely coexist.
