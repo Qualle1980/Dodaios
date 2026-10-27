@@ -8,6 +8,7 @@ and every call resolves against the current catalog immediately before use.
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -41,6 +42,9 @@ _VOICE_SUPERSEDED_TOOLS = frozenset(
         "screenshot",
     }
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class BrainSupervisorToolGateway:
@@ -184,15 +188,24 @@ class BrainSupervisorToolGateway:
             tools[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
         # Voice may read ONLY a project explicitly selected by the app. Never
         # fall back to the process cwd or an unscoped drive-wide search.
-        root = self._voice_project_resolver() if self._voice_project_resolver else self._voice_project_root
-        if root is not None and root.is_dir():
-            from jarvis.agent_chat.folder_tools import folder_tools
-            from jarvis.brain.voice_folder_tools import scoped_voice_read_tools
+        try:
+            root = (
+                self._voice_project_resolver()
+                if self._voice_project_resolver
+                else self._voice_project_root
+            )
+            if root is not None and root.is_dir():
+                from jarvis.agent_chat.folder_tools import folder_tools
+                from jarvis.brain.voice_folder_tools import scoped_voice_read_tools
 
-            tools.update(scoped_voice_read_tools(
-                folder_tools(root, stance="plan"),
-                root,
-            ))
+                tools.update(scoped_voice_read_tools(
+                    folder_tools(root, stance="plan"),
+                    root,
+                ))
+        except Exception as exc:  # noqa: BLE001 - the rest of the voice surface never depends on this
+            # No folder is readable rather than the wrong one, and the other
+            # live tools stay available.
+            log.warning("Voice project read tools unavailable, offering none: %s", exc)
         if self._workspace_tool is not None:
             # Live delegates coding to one addressed service. The old prompt
             # tools silently choose an ambient pane and cannot safely coexist.
