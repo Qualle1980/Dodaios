@@ -715,3 +715,46 @@ def test_a_metered_codex_brain_behind_subscription_voice_does_not_warn(
         )
 
     assert not [record for record in caplog.records if "AP-22" in record.message]
+
+# --- P5: the subscription live transport may never become a billed one ---
+
+
+def test_pinned_subscription_live_provider_excludes_every_billed_provider() -> None:
+    """The three flags that keep a subscription call off an API key.
+
+    A pinned subscription owns its access choice: it declares no credential
+    candidates, forbids provider fallback, and forbids the implicit classic
+    usage fallback. Flipping any of them would let a call that the user started
+    on their subscription silently continue on a paid key.
+    """
+    from jarvis.plugins.realtime.openai_subscription_live import (
+        OpenAISubscriptionLiveProvider,
+    )
+
+    provider = OpenAISubscriptionLiveProvider
+    assert provider.credential_candidates == ()
+    assert provider.provider_fallback_allowed is False
+    assert provider.implicit_usage_fallback_allowed is False
+    assert provider.external_credentials_kind == "chatgpt_oauth"
+
+
+def test_a_pinned_no_fallback_provider_is_the_only_candidate_id() -> None:
+    """An old API-key fallback setting must not survive a subscription pin."""
+    from types import SimpleNamespace
+
+    from jarvis.realtime.factory import _explicit_provider_ids
+
+    cfg = SimpleNamespace(
+        brain=SimpleNamespace(
+            realtime=SimpleNamespace(
+                provider="openai-live-subscription",
+                fallback_provider="openai-live",
+                fallback_provider_2="openai-live",
+            )
+        )
+    )
+
+    ids = _explicit_provider_ids(cfg)
+
+    assert ids == ["openai-live-subscription"] or ids == []
+    assert "openai-live" not in ids
