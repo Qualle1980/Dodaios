@@ -159,3 +159,23 @@ def test_an_offload_cancelled_before_its_thread_marks_the_wait_as_a_bound() -> N
     waits = [r for r in records if "setup.offload.queue_wait" in r.getMessage()]
     assert len(waits) == 1
     assert "(failed)" in waits[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_an_offload_forwards_positional_arguments_unchanged(caplog) -> None:
+    """Instrumenting a positional call must not turn it into a keyword call.
+
+    Wrapping an existing ``to_thread`` call in ``timed_offload`` once rewrote
+    ``fn(a, b)`` as ``fn(x=a, y=b)``, which broke a caller that only accepted
+    positional arguments.
+    """
+    seen: list[tuple] = []
+
+    def record(*args, **kwargs):
+        seen.append((args, kwargs))
+        return "done"
+
+    result = await timed_offload("phase", "ref", record, 1, "two", flag=True)
+
+    assert result == "done"
+    assert seen == [((1, "two"), {"flag": True})]

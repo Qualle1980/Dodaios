@@ -83,9 +83,16 @@ async def timed_offload(
     ref: str,
     fn: Callable[..., _T],
     /,
+    *args: Any,
     **kwargs: Any,
 ) -> _T:
-    """``asyncio.to_thread(fn, **kwargs)`` with the queue wait measured, not derived.
+    """``asyncio.to_thread(fn, ...)`` with the queue wait measured, not derived.
+
+    Positional arguments are forwarded as given, so wrapping an existing
+    ``to_thread`` call does not change how its callable is invoked. Switching a
+    positional call to keywords here once broke a test double that only accepted
+    positional arguments, which is a real caller's contract being changed by an
+    instrumentation detail.
 
     Offloading hides two different delays behind one number: the time the call
     spent queued for a free thread in the default executor, and the time the
@@ -103,7 +110,7 @@ async def timed_offload(
     def _run() -> _T:
         nonlocal entered
         entered = time.perf_counter()
-        return fn(**kwargs)
+        return fn(*args, **kwargs)
 
     try:
         return await asyncio.to_thread(_run)

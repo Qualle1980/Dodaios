@@ -1708,14 +1708,22 @@ class Kontrollierer:
                 # thread is reported on its own: the in-thread timings cannot
                 # see it, and deriving it by subtraction would depend on every
                 # inner phase having been logged.
-                worktree = await timed_offload(
-                    "setup.worktree_offloaded",
-                    step.task_id[:13],
-                    self._create_worktree,
-                    mission_slug=_short_slug(mission_prompt),
-                    task_id=step.task_id,
-                    needs_repo=step.needs_repo,
-                )
+                # The thread cannot be interrupted once it is blocked on the
+                # worktree lock, so it is told the step is gone instead.
+                abandoned = threading.Event()
+                try:
+                    worktree = await timed_offload(
+                        "setup.worktree_offloaded",
+                        step.task_id[:13],
+                        self._create_worktree,
+                        mission_slug=_short_slug(mission_prompt),
+                        task_id=step.task_id,
+                        needs_repo=step.needs_repo,
+                        abandoned=abandoned,
+                    )
+                except asyncio.CancelledError:
+                    abandoned.set()
+                    raise
             except (
                 SourceCheckoutUnavailableError,
                 subprocess.CalledProcessError,
@@ -1754,8 +1762,15 @@ class Kontrollierer:
 
             restored = False
             if restore_dir is not None:
-                restored = await asyncio.to_thread(
-                    self._restore_task_workspace, worktree, restore_dir
+                # A resumed step copies its parked work back in. Only a resume
+                # pays this, and a file copy of unknown size belongs in the
+                # attribution rather than in the leftover.
+                restored = await timed_offload(
+                    "setup.workspace_restore",
+                    step.task_id[:13],
+                    self._restore_task_workspace,
+                    worktree,
+                    restore_dir,
                 )
 
             if review_only and not restored:
@@ -1804,14 +1819,29 @@ class Kontrollierer:
                     )
                 )
 
-    def _create_worktree(self, **kwargs: Any) -> Path:
-        """``WorktreeManager.create``, one at a time. Worker thread only."""
+    def _create_worktree(
+        self, *, abandoned: threading.Event | None = None, **kwargs: Any
+    ) -> Path:
+        """``WorktreeManager.create``, one at a time. Worker thread only.
+
+        ``abandoned`` is set by the loop when its await was cancelled. A thread
+        already blocked on the lock cannot be interrupted, so without that
+        check a cancelled step still built a whole worktree for nobody — and
+        held this one process-wide lock while the next task waited behind it.
+        """
         ref = str(kwargs.get("task_id", ""))[:13]
         # Timed separately from the checkout itself: waiting for another task's
         # workspace and building your own look identical from the outside.
         with timed("setup.worktree_lock_wait", ref, always=True):
             self._worktree_lock.acquire()
         try:
+            if abandoned is not None and abandoned.is_set():
+                logger.info(
+                    "Task %s: setup was cancelled while queued for the worktree "
+                    "lock; skipping the checkout instead of building an orphan.",
+                    ref,
+                )
+                raise asyncio.CancelledError
             with timed("setup.worktree_create", ref, always=True):
                 return self._worktrees.create(**kwargs)
         finally:
@@ -3576,13 +3606,24 @@ class Kontrollierer:
     async def _safe_transition(
         self, mission_id: str, to_state: MissionState, reason: str
     ) -> bool:
-        """Transition under the mission lock and report whether it committed."""
+        """Transition under the mission lock and report whether it committed.
+
+        Both halves are timed because they fail differently: waiting for the
+        mission lock means another coroutine holds it (the critic, a parallel
+        step), while the transition itself is a state write plus its bus
+        fan-out. Three of these run inside the setup window, and until they
+        were measured they were part of the unattributed stretch.
+        """
         lock = self._state_locks.setdefault(mission_id, asyncio.Lock())
-        async with lock:
+        ref = mission_id[:13]
+        with timed(f"transition.{to_state.value}.lock_wait", ref, always=True):
+            await lock.acquire()
+        try:
             try:
-                await self._manager.transition_state(
-                    mission_id, to_state, reason=reason, source_actor="kontrollierer"
-                )
+                with timed(f"transition.{to_state.value}", ref):
+                    await self._manager.transition_state(
+                        mission_id, to_state, reason=reason, source_actor="kontrollierer"
+                    )
                 return True
             except IllegalStateTransition:
                 # already at the target state or further — not a crash
@@ -3592,6 +3633,8 @@ class Kontrollierer:
                     to_state.value,
                 )
                 return False
+        finally:
+            lock.release()
 
     # --- Capacity resume ----------------------------------------------------
 
