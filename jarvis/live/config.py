@@ -25,6 +25,12 @@ def _persona_block() -> str:
     brain, while a call pays for its instructions once per session and keeps the
     character rules short. An empty or unreadable persona leaves the rest of the
     instructions untouched rather than failing the call.
+
+    It goes to the SPEAKING model only. The delegation backend is the reasoning
+    and tool arm whose answer the speaking model renders, and one session.started
+    message has to carry both prompts, the tool declarations and the history
+    seed inside a 20 kB prompt budget (``test_coordination``); spending the
+    character twice broke that budget by 253 bytes.
     """
     try:
         from jarvis.brain.persona_loader import load_effective_persona_prompt
@@ -108,7 +114,6 @@ class LiveConfig(BaseModel):
             "instructions": (
                 identity
                 + "\n\n"
-                + _persona_block()
                 + PRODUCT_BRIEF
                 + " "
                 + HISTORY_CONTEXT_RULE

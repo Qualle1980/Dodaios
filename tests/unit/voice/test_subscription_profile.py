@@ -222,6 +222,7 @@ async def test_action_turns_keep_the_existing_orchestrator() -> None:
     assert delegated == ["Open Chrome now."]
     assert brain._last_turn_executed_action_tool is True
 
+
 # --- persona on the voice paths (P5): one character on chat, pipeline and live ---
 
 
@@ -267,17 +268,25 @@ def test_persona_fault_still_leaves_a_usable_language_pin(monkeypatch) -> None:
     assert "Christian" not in prompt
 
 
-def test_live_session_instructions_carry_the_persona_on_both_blocks() -> None:
-    """A call and its reasoning backend get the same character as the chat."""
+def test_live_session_instructions_carry_the_persona_on_the_speaking_model() -> None:
+    """The voice the user hears gets the character, inside the prompt budget.
+
+    The delegation backend deliberately does not repeat it: one
+    ``session.started`` message carries both prompts, the tool declarations and
+    the history seed under 20 kB, and spending the persona twice overran that
+    by 253 bytes.
+    """
     from jarvis.live.config import LiveConfig
 
     config = LiveConfig(configured=True, backend_model="gpt-5")
     session = config.session_config(language="de", tools=[], identity="You are Jarvis.")
 
     assert "Christian" in session["instructions"]
-    assert "Christian" in session["delegation"]["responses"]["instructions"]
+    assert "Christian" not in session["delegation"]["responses"]["instructions"]
     # Identity stays the first thing the model reads.
     assert session["instructions"].startswith("You are Jarvis.")
+    budget = session["instructions"] + session["delegation"]["responses"]["instructions"]
+    assert len(budget.encode("utf-8")) < 20_000
 
 
 def test_persona_handbook_keeps_the_humour_safety_rules() -> None:
