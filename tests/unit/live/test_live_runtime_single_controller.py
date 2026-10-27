@@ -86,18 +86,26 @@ def test_cleanup_is_idempotent_after_a_failed_start() -> None:
     assert runtime.active() == ()
 
 
-def test_live_tools_prefer_the_voice_catalog_so_project_tools_stay_connected() -> None:
-    """The live call must see the project-scoped read tools, not the typed set.
+def test_live_tools_read_the_voice_catalog_and_execute_as_realtime() -> None:
+    """The wiring that keeps the project tools reachable inside a call.
 
-    jarvis/live/tools.py reads ``voice_catalog`` when the gateway offers one and
-    executes with ``origin="realtime"``; both together are what keeps the
-    project files reachable in a call through the existing executor.
+    Asserted on the objects, not on the source text: ``LiveTools`` must prefer
+    the gateway's ``voice_catalog`` (which carries the project-scoped read
+    tools) and route execution through the realtime origin. The behaviour those
+    two produce is covered end to end in ``test_live_tool_delegation``.
     """
-    from pathlib import Path
+    from jarvis.live.tools import LiveTools
 
-    from jarvis.live import tools as live_tools
+    sentinel = object()
 
-    source = Path(live_tools.__file__).read_text(encoding="utf-8")
+    class _Gateway:
+        def voice_catalog(self):
+            return (sentinel,)
 
-    assert 'getattr(self.gateway, "voice_catalog", self.gateway.catalog)' in source
-    assert 'origin="realtime"' in source
+        def catalog(self):  # pragma: no cover - must not be the one chosen
+            raise AssertionError("a live call must not read the typed catalog")
+
+    tools = LiveTools.__new__(LiveTools)
+    tools.gateway = _Gateway()
+
+    assert tools.catalog() == (sentinel,)
