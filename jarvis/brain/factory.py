@@ -840,6 +840,22 @@ def is_worker_bootstrap_failed() -> bool:
     return bool(_WORKER_BOOTSTRAP_FAILED[0])
 
 
+def _active_voice_project_root() -> Path | None:
+    """Only the visible, explicitly focused coding workspace is readable.
+
+    Module level rather than a closure so this boundary can be tested
+    directly against a real registry: no selection, a switch, a folder that
+    has gone away.
+    """
+    from jarvis.agentic_ide.session import get_registry
+
+    current = get_registry().session
+    if current is None or not current.focus_mode or not current.folder:
+        return None
+    folder = Path(current.folder).resolve()
+    return folder if folder.is_dir() else None
+
+
 def _register_runtime_manager(manager: Any) -> None:
     """Publish one Brain Manager and its public tool gateway for all surfaces."""
     try:
@@ -878,16 +894,6 @@ def _register_runtime_manager(manager: Any) -> None:
 
             return await tools_for_cli_session(session_id, tools, manager)
 
-        def active_voice_project_root() -> Path | None:
-            """Only the visible, explicitly focused coding workspace is readable."""
-            from jarvis.agentic_ide.session import get_registry
-
-            current = get_registry().session
-            if current is None or not current.focus_mode or not current.folder:
-                return None
-            folder = Path(current.folder).resolve()
-            return folder if folder.is_dir() else None
-
         runtime_refs.set_brain_manager(manager)
         runtime_refs.set_supervisor_tool_gateway(
             BrainSupervisorToolGateway(
@@ -896,7 +902,7 @@ def _register_runtime_manager(manager: Any) -> None:
                 browser_tool=browser_tool,
                 session_tools=session_tools,
                 workspace_tool=WorkspaceOrchestrationTool(WorkspaceGateway()),
-                voice_project_resolver=active_voice_project_root,
+                voice_project_resolver=_active_voice_project_root,
             )
         )
     except Exception as exc:  # noqa: BLE001 - registration never blocks boot
