@@ -221,3 +221,77 @@ async def test_action_turns_keep_the_existing_orchestrator() -> None:
     assert result == ["Done."]
     assert delegated == ["Open Chrome now."]
     assert brain._last_turn_executed_action_tool is True
+
+# --- persona on the voice paths (P5): one character on chat, pipeline and live ---
+
+
+def test_subscription_voice_prompt_carries_the_persona_and_the_language_pin() -> None:
+    """The transport answered as a generic assistant without the persona block."""
+    from jarvis.voice.subscription_profile import subscription_system_prompt
+
+    prompt = subscription_system_prompt("de")
+
+    assert "REPLY LANGUAGE" in prompt
+    assert "HUMOUR" in prompt.upper()
+    assert "Christian" in prompt
+    # The persona comes first; the language pin must still win as the last word.
+    assert prompt.index("Christian") < prompt.index("REPLY LANGUAGE")
+
+
+def test_subscription_voice_prompt_uses_the_one_central_persona_loader(monkeypatch) -> None:
+    """A custom prompt set in settings must reach voice, not only the chat."""
+    import jarvis.brain.persona_loader as loader
+
+    monkeypatch.setattr(loader, "read_custom_prompt", lambda: "You are a laconic test rig.")
+    from jarvis.voice.subscription_profile import subscription_system_prompt
+
+    prompt = subscription_system_prompt("en")
+
+    assert "You are a laconic test rig." in prompt
+    assert "REPLY LANGUAGE" in prompt
+    assert "Christian" not in prompt
+
+
+def test_persona_fault_still_leaves_a_usable_language_pin(monkeypatch) -> None:
+    import jarvis.brain.persona_loader as loader
+
+    def boom(*_args, **_kwargs):
+        raise OSError("persona unreadable")
+
+    monkeypatch.setattr(loader, "load_effective_persona_prompt", boom)
+    from jarvis.voice.subscription_profile import subscription_system_prompt
+
+    prompt = subscription_system_prompt("de")
+
+    assert "REPLY LANGUAGE" in prompt
+    assert "Christian" not in prompt
+
+
+def test_live_session_instructions_carry_the_persona_on_both_blocks() -> None:
+    """A call and its reasoning backend get the same character as the chat."""
+    from jarvis.live.config import LiveConfig
+
+    config = LiveConfig(configured=True, backend_model="gpt-5")
+    session = config.session_config(language="de", tools=[], identity="You are Jarvis.")
+
+    assert "Christian" in session["instructions"]
+    assert "Christian" in session["delegation"]["responses"]["instructions"]
+    # Identity stays the first thing the model reads.
+    assert session["instructions"].startswith("You are Jarvis.")
+
+
+def test_persona_handbook_keeps_the_humour_safety_rules() -> None:
+    """The carve-outs are the point: wit is never allowed to override care."""
+    from jarvis.brain.persona_loader import (
+        load_compact_persona_prompt,
+        load_persona_prompt,
+    )
+
+    for block in (load_persona_prompt(), load_compact_persona_prompt()):
+        lowered = block.lower()
+        assert "christian" in lowered
+        # No jokes where they would do damage.
+        assert "security" in lowered
+        assert "destructive" in lowered
+        # And never the same gag on repeat.
+        assert "never the same joke" in lowered or "never the same one" in lowered

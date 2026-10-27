@@ -18,6 +18,26 @@ from jarvis.live.product import PRODUCT_BRIEF
 from jarvis.live.recovery import HISTORY_CONTEXT_RULE
 
 
+def _persona_block() -> str:
+    """The compact persona, so a call sounds like the same assistant as the chat.
+
+    Compact on purpose: the full handbook is assembled per turn for the typing
+    brain, while a call pays for its instructions once per session and keeps the
+    character rules short. An empty or unreadable persona leaves the rest of the
+    instructions untouched rather than failing the call.
+    """
+    try:
+        from jarvis.brain.persona_loader import load_effective_persona_prompt
+
+        persona = load_effective_persona_prompt(compact=True)
+    except Exception:  # noqa: BLE001 — a persona fault must never block a call
+        import logging
+
+        logging.getLogger(__name__).warning("live voice: persona unavailable", exc_info=True)
+        return ""
+    return persona.strip() + "\n\n" if persona.strip() else ""
+
+
 class LiveConfig(BaseModel):
     """A saved selection, never an implicit opt-in to a billed model."""
 
@@ -88,6 +108,7 @@ class LiveConfig(BaseModel):
             "instructions": (
                 identity
                 + "\n\n"
+                + _persona_block()
                 + PRODUCT_BRIEF
                 + " "
                 + HISTORY_CONTEXT_RULE
@@ -162,6 +183,7 @@ class LiveConfig(BaseModel):
             "instructions": (
                 identity
                 + "\n\n"
+                + _persona_block()
                 + PRODUCT_BRIEF
                 + " "
                 + language_rule
