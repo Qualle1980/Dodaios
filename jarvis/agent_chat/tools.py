@@ -341,11 +341,36 @@ def _ls(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     return out, False
 
 
+def _within(path: Path, base: Path) -> bool:
+    """True only if ``path`` really lives under ``base`` once links are resolved."""
+    try:
+        path.resolve().relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        # Silence is the safe answer: a path we cannot resolve (broken link,
+        # permission denied, resolution loop) counts as outside the folder and
+        # is skipped, which is exactly what the caller would do with the error.
+        return False
+    return True
+
+
 def _iter_files(root: Path):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+    """Walk ``root`` and nothing else.
+
+    ``os.walk`` does not classify a Windows junction (a directory reparse
+    point) as a link, so ``followlinks=False`` does not stop it from
+    descending through one. Without this prune a Glob or Grep rooted at the
+    folder reports -- and for Grep, quotes lines from -- files outside it.
+    """
+    base = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(base):
+        here = Path(dirpath)
+        dirnames[:] = [
+            d for d in dirnames if d not in _SKIP_DIRS and _within(here / d, base)
+        ]
         for fn in filenames:
-            yield Path(dirpath) / fn
+            candidate = here / fn
+            if _within(candidate, base):
+                yield candidate
 
 
 def _glob(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
