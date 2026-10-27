@@ -1828,6 +1828,14 @@ class Kontrollierer:
         already blocked on the lock cannot be interrupted, so without that
         check a cancelled step still built a whole worktree for nobody — and
         held this one process-wide lock while the next task waited behind it.
+
+        Scope, exactly: the flag is read once, after the lock is held and
+        before the checkout starts. It therefore covers a cancellation that
+        arrives while the call is queued for a thread or waiting for the lock —
+        the window that actually lasts, since the wait is for another task's
+        full checkout. A cancellation that arrives once ``create`` is already
+        running is NOT handled here: that checkout runs to its own completion
+        or to ``_WORKTREE_ADD_TIMEOUT_S``, which reaps the process tree.
         """
         ref = str(kwargs.get("task_id", ""))[:13]
         # Timed separately from the checkout itself: waiting for another task's
