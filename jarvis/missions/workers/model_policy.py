@@ -65,14 +65,25 @@ _ALIAS_TIERS: Final[dict[str, ModelTier]] = {
     "fable": ModelTier.PREMIUM,
 }
 
-#: Full model ids: ``claude-<family>-<version>`` in either order
-#: (``claude-3-5-sonnet-20241022``, ``claude-sonnet-5-5``, ``claude-opus-4-8``).
-#: Matching on the family word rather than a version list is deliberate: a
-#: version table goes stale and a stale table would silently answer "unknown"
-#: for a next-generation Opus, which is the one answer that must never be wrong
-#: in the cheap direction.
-_FAMILY_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b(haiku|sonnet|opus|fable)\b"
+#: Full Claude model ids, and nothing else. The id must be Anthropic's own —
+#: an optional vendor prefix (``anthropic/claude-…`` as OpenRouter writes it,
+#: ``us.anthropic.claude-…`` as Bedrock does), then ``claude-``, then the
+#: family word somewhere in the version part:
+#: ``claude-3-5-sonnet-20241022``, ``claude-sonnet-5-5``, ``claude-opus-4-8``.
+#:
+#: Matching the family word rather than a version list is deliberate — a
+#: version table goes stale, and a stale table would answer "unknown" for a
+#: next-generation Opus, the one answer that must never be wrong in the cheap
+#: direction. But the word alone is not enough: ``gpt-opus-4`` and
+#: ``grok-sonnet-1`` contain it while being another vendor's model entirely,
+#: and treating them as Claude tiers would both mis-price them and hand
+#: ``claude --model`` an id it cannot run (review of PR #67).
+_CLAUDE_ID_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:(?:[a-z]{2,6}\.)?anthropic[./])?"  # optional vendor prefix
+    r"claude[-.]"  # Anthropic's own family marker, always present
+    r"(?:[a-z0-9]+[-.])*?"  # version parts before the family word
+    r"(haiku|sonnet|opus|fable)"
+    r"(?:[-.][a-z0-9:]+)*$"  # version parts after it
 )
 
 #: The model a Claude worker runs when nothing was asked for and nothing is
@@ -129,7 +140,7 @@ def tier_of(model: str | None) -> ModelTier | None:
     alias = _ALIAS_TIERS.get(name)
     if alias is not None:
         return alias
-    match = _FAMILY_RE.search(name)
+    match = _CLAUDE_ID_RE.match(name)
     if match is None:
         return None
     return _ALIAS_TIERS[match.group(1)]
@@ -304,6 +315,49 @@ def classify_billing_source(env: Mapping[str, str]) -> BillingSource:
     return BillingSource.UNKNOWN
 
 
+def paid_api_usage_authorized() -> bool:
+    """Whether this install may bill a metered API key for mission work.
+
+    This asks the authorizations that already exist; it invents none:
+
+    * ``capacity.paid_api_fallback_enabled()`` — the user's persisted
+      ``[missions] paid_api_fallback`` switch, written only from the Settings
+      route. It is the explicit "yes, spend my key" answer.
+    * ``init.install_is_pinned()`` — whether missions on this install are
+      pinned to subscriptions. On an install with NO subscription connected the
+      user's key IS the primary and only way to run anything, and refusing it
+      would brick a legitimate single-key install (AGENTS.md: "any single key
+      must work"). Once a subscription IS connected, the same document is
+      explicit that a failing subscription makes work WAIT rather than fall
+      back to a key — which is what this function then answers.
+
+    Fails CLOSED in the one case that matters: when the install is pinned and
+    the switch is off, the answer is no. An unreadable signal already resolves
+    to "pinned" inside ``capacity``, so an unreadable config cannot buy a yes.
+    """
+    try:
+        from ..capacity import paid_api_fallback_enabled
+
+        if paid_api_fallback_enabled():
+            return True
+    except Exception:  # noqa: BLE001
+        # Unreadable switch: not an approval. Logged, then the pinning check
+        # below still decides, so a single-key install keeps working.
+        logger.warning("model policy: paid-fallback switch unreadable", exc_info=True)
+    try:
+        from ..init import install_is_pinned
+
+        return not install_is_pinned()
+    except Exception:  # noqa: BLE001
+        # The pinning signal is what protects a subscription install from
+        # silent paid use, so an unreadable one must not authorize spending.
+        logger.warning(
+            "model policy: subscription pinning unreadable — treating paid API "
+            "use as unauthorized", exc_info=True,
+        )
+        return False
+
+
 __all__ = [
     "DEFAULT_WORKER_MODEL",
     "UNKNOWN_MODEL",
@@ -315,6 +369,7 @@ __all__ = [
     "is_claude_model",
     "is_escalation",
     "normalise",
+    "paid_api_usage_authorized",
     "resolve_worker_model",
     "retry_model_after_rejection",
     "tier_of",

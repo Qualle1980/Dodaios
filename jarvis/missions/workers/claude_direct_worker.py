@@ -63,8 +63,10 @@ from .model_policy import (
     classify_billing_source,
     cross_family_model,
     is_escalation,
+    paid_api_usage_authorized,
     resolve_worker_model,
     retry_model_after_rejection,
+    tier_of,
 )
 from .process_utils import create_worker_subprocess
 from .provider_chain import _resolve_provider_chain
@@ -439,6 +441,8 @@ class ClaudeDirectWorker:
         # ``retry_model`` is set only by this method's own model-rejection
         # retry below, which may never pick a dearer model than the one the
         # CLI refused.
+        session_id = resume_session_id or str(uuid.uuid4())
+        self.last_session_id = session_id
         chain = _resolve_provider_chain()
         primary = chain[0] if chain else None
         cross_family = primary is not None and primary.provider != "claude-api"
@@ -457,6 +461,43 @@ class ClaudeDirectWorker:
         self.last_requested_model = (model or "").strip()
         self.last_actual_model = UNKNOWN_MODEL
         self.last_billing_source = classify_billing_source(env)
+        if (
+            self.last_billing_source is BillingSource.API_KEY
+            and not paid_api_usage_authorized()
+        ):
+            # A detected metered key is not an authorization to spend it. On an
+            # install pinned to subscriptions, AGENTS.md is explicit that a
+            # failing subscription makes work WAIT rather than fall back to a
+            # key, and ``[missions] paid_api_fallback`` is the user's own "yes"
+            # — asked here, never assumed (review of PR #67). A single-key
+            # install is unaffected: it is not pinned, so the key IS its
+            # primary way and the gate passes.
+            #
+            # Deliberately NOT gated on BillingSource.UNKNOWN: the CLI
+            # commonly authenticates from the user's own credential store,
+            # which this environment cannot see, and refusing that would stop
+            # every ordinary mission. Unknown stays unknown in the telemetry
+            # and is never reported as a seat or as free.
+            message = (
+                "ClaudeDirectWorker: this run would bill a metered Anthropic "
+                "API key, and paid API use is not authorized on this install "
+                "(missions are pinned to subscriptions and "
+                "[missions] paid_api_fallback is off). Refusing to start. "
+                "Enable the paid fallback in Settings, or connect a "
+                "subscription, to run this task."
+            )
+            logger.error("%s worker=%s", message, worker_id)
+            with suppress(OSError):
+                (log_dir / _MCP_CONFIG_FILENAME).unlink(missing_ok=True)
+            yield ClaudeResult(
+                subtype="error_during_execution",
+                is_error=True,
+                session_id=resume_session_id or session_id,
+                duration_ms=0,
+                result=message,
+            )
+            return
+
         if choice.blocked:
             logger.warning(
                 "ClaudeDirectWorker[%s]: model %r was refused by the model "
@@ -488,8 +529,7 @@ class ClaudeDirectWorker:
                 self.last_billing_source.value,
             )
 
-        session_id = resume_session_id or str(uuid.uuid4())
-        self.last_session_id = session_id
+
         broker_servers = (
             broker_binding.mcp_server_config() if broker_binding is not None else {}
         )
@@ -629,6 +669,9 @@ class ClaudeDirectWorker:
         # between lines, a long silent reasoning phase is legitimate (BUG-032
         # class). timed_out stays the STRUCTURED signal the orchestrator reads.
         timed_out = False
+        # Set to the CLI-reported model when it outranks the approved tier; the
+        # loop then breaks and the run is refused after the normal cleanup.
+        tier_violation: str | None = None
         timeout_message = ""
         stderr_bytes = b""
         final_result: ClaudeResult | None = None
@@ -755,10 +798,26 @@ class ClaudeDirectWorker:
                             claude_model,
                             reported,
                         )
+                    reported_tier = tier_of(reported)
+                    approved_tier = tier_of(claude_model)
+                    if (
+                        reported_tier is not None
+                        and approved_tier is not None
+                        and reported_tier > approved_tier
+                    ):
+                        # The CLI loaded a DEARER model than the policy
+                        # approved. Recording it would make the telemetry
+                        # honest and the spending still wrong, so the run stops
+                        # here, before the worker does any work (review of
+                        # PR #67). A different spelling of the same tier —
+                        # alias vs full id — is not a deviation and does not
+                        # stop anything.
+                        tier_violation = reported
+                        break
                 continue
 
         # Reap the subprocess + collect stderr.
-        if timed_out:
+        if timed_out or tier_violation is not None:
             with suppress(ProcessLookupError):
                 proc.kill()
         # Audit-2 H3 (2026-05-17): always wait() after the loop so the asyncio
@@ -784,6 +843,30 @@ class ClaudeDirectWorker:
         # the mission logs as a secret-at-rest (security 2026-05-28).
         with suppress(OSError):
             (log_dir / _MCP_CONFIG_FILENAME).unlink(missing_ok=True)
+
+        if tier_violation is not None:
+            # The CLI was killed above, so nothing further ran. This is a
+            # refusal, not a retry: the CLI already proved it resolves the
+            # requested name to a dearer model, and asking it again would
+            # either repeat that or spend more to find out.
+            message = (
+                f"ClaudeDirectWorker: refused the run — the claude CLI "
+                f"reported loading {tier_violation!r} while only "
+                f"{claude_model!r} was approved for this task. A dearer model "
+                f"needs an explicit pick, so the worker stopped before doing "
+                f"any work."
+            )
+            logger.error("%s worker=%s", message, worker_id)
+            yield ClaudeResult(
+                subtype="error_during_execution",
+                is_error=True,
+                cost_usd=None,
+                num_turns=None,
+                session_id=session_id,
+                duration_ms=int((time.perf_counter() - t0) * 1000),
+                result=message,
+            )
+            return
 
         # 5. Build the terminal result when the stream carried no `result` line.
         if final_result is None:

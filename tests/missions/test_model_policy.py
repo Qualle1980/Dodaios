@@ -17,6 +17,7 @@ from jarvis.missions.workers.model_policy import (
     cross_family_model,
     is_claude_model,
     is_escalation,
+    paid_api_usage_authorized,
     resolve_worker_model,
     retry_model_after_rejection,
     tier_of,
@@ -187,3 +188,98 @@ def test_no_credential_in_the_environment_is_unknown_never_free() -> None:
     """The CLI may authenticate from the user's own store; this layer cannot
     see it, and a guess would be the kind of claim that hid an Opus run."""
     assert classify_billing_source({}) is BillingSource.UNKNOWN
+
+
+# --- strict id validation (review of PR #67) -------------------------------
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gpt-opus-4",
+        "grok-sonnet-1",
+        "my-haiku-model",
+        "sonnet-pro",
+        "opus-x",
+        "gemini-sonnet",
+        "llama-3-opus",
+        "haiku.gpt",
+    ],
+)
+def test_a_foreign_id_containing_a_family_word_is_not_a_claude_model(
+    model: str,
+) -> None:
+    """The first matcher accepted any string containing the family word.
+
+    ``gpt-opus-4`` and ``grok-sonnet-1`` would have been priced as Claude
+    tiers and then handed to ``claude --model``, which cannot run them. The id
+    must be Anthropic's own.
+    """
+    assert tier_of(model) is None
+    assert is_claude_model(model) is False
+
+
+@pytest.mark.parametrize(
+    ("model", "tier"),
+    [
+        ("claude-3-opus-20240229", ModelTier.PREMIUM),
+        ("claude-sonnet-4-5", ModelTier.STANDARD),
+        ("anthropic/claude-sonnet-4-5", ModelTier.STANDARD),
+        ("us.anthropic.claude-opus-4-1-v1:0", ModelTier.PREMIUM),
+        ("CLAUDE-HAIKU-4-5", ModelTier.ECONOMY),
+    ],
+)
+def test_real_claude_ids_still_resolve(model: str, tier: ModelTier) -> None:
+    """Including the vendor-prefixed spellings a config may legitimately hold."""
+    assert tier_of(model) is tier
+
+
+def test_a_foreign_id_is_refused_rather_than_forwarded_to_the_cli() -> None:
+    choice = resolve_worker_model(requested="gpt-opus-4", configured="")
+    assert choice.model == DEFAULT_WORKER_MODEL
+    assert choice.blocked == "gpt-opus-4"
+
+
+# --- paid API authorization (review of PR #67) -----------------------------
+
+
+def test_the_user_switch_authorizes_paid_api_use(monkeypatch) -> None:
+    """``[missions] paid_api_fallback`` is the explicit yes, and it is enough."""
+    monkeypatch.setattr(
+        "jarvis.missions.capacity.paid_api_fallback_enabled", lambda: True
+    )
+    monkeypatch.setattr("jarvis.missions.init.install_is_pinned", lambda: True)
+    assert paid_api_usage_authorized() is True
+
+
+def test_a_subscription_install_with_the_switch_off_is_not_authorized(
+    monkeypatch,
+) -> None:
+    """AGENTS.md: a failing subscription makes work WAIT, never bill a key."""
+    monkeypatch.setattr(
+        "jarvis.missions.capacity.paid_api_fallback_enabled", lambda: False
+    )
+    monkeypatch.setattr("jarvis.missions.init.install_is_pinned", lambda: True)
+    assert paid_api_usage_authorized() is False
+
+
+def test_an_install_with_no_subscription_may_use_its_own_key(monkeypatch) -> None:
+    """A single-key install must keep working — its key IS the primary path."""
+    monkeypatch.setattr(
+        "jarvis.missions.capacity.paid_api_fallback_enabled", lambda: False
+    )
+    monkeypatch.setattr("jarvis.missions.init.install_is_pinned", lambda: False)
+    assert paid_api_usage_authorized() is True
+
+
+def test_an_unreadable_pinning_signal_does_not_authorize_spending(
+    monkeypatch,
+) -> None:
+    def _boom() -> bool:
+        raise RuntimeError("signal unreadable")
+
+    monkeypatch.setattr(
+        "jarvis.missions.capacity.paid_api_fallback_enabled", lambda: False
+    )
+    monkeypatch.setattr("jarvis.missions.init.install_is_pinned", _boom)
+    assert paid_api_usage_authorized() is False
