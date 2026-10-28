@@ -758,8 +758,10 @@ async def test_claude_unavailable_model_retries_without_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An approved-access model the subscription lacks (claude-fable-5, live
-    mission 019ec615 2026-06-14) must transparently retry on the CLI default
-    so the mission completes — not die as task_error."""
+    mission 019ec615 2026-06-14) must transparently retry so the mission
+    completes — not die as task_error. The retry names an equal-or-cheaper
+    model itself: omitting ``--model`` used to hand the choice to the CLI's own
+    default, which nobody approved and which can be the premium tier."""
     unavailable = (
         b'{"type":"result","subtype":"success","is_error":true,'
         b'"result":"Claude Fable 5 is currently unavailable.","session_id":"s1"}\n'
@@ -795,7 +797,9 @@ async def test_claude_unavailable_model_retries_without_model(
     assert len(spawns) == 2, "must retry exactly once"
     assert "--model" in spawns[0], "first attempt carries the configured model"
     assert "claude-fable-5" in spawns[0]
-    assert "--model" not in spawns[1], "retry must omit --model (use CLI default)"
+    assert "--model" in spawns[1], "the retry must still pin a model explicitly"
+    assert "sonnet" in spawns[1], "the retry drops one tier, never rises"
+    assert "opus" not in " ".join(spawns[1])
 
 
 @pytest.mark.asyncio
@@ -806,7 +810,7 @@ async def test_claude_unavailable_model_on_stderr_only_retries(
     stdout carries no `result` record at all (so the assembled result text is
     just 'claude exited with code 1'). The unavailable-model detector must read
     stderr too, otherwise the rejection slips past and the mission fails instead
-    of retrying on the CLI default."""
+    of retrying on a cheaper model."""
     success = (
         b'{"type":"result","subtype":"success","is_error":false,'
         b'"result":"DONE","session_id":"s2"}\n'
@@ -843,7 +847,8 @@ async def test_claude_unavailable_model_on_stderr_only_retries(
     assert final.is_error is False, f"stderr-only rejection must retry, got {final!r}"
     assert final.result == "DONE"
     assert len(spawns) == 2, "must retry exactly once on a stderr-only rejection"
-    assert "--model" not in spawns[1], "retry must omit --model (use CLI default)"
+    assert "--model" in spawns[1], "the retry must still pin a model explicitly"
+    assert "sonnet" in spawns[1], "the retry drops one tier, never rises"
 
 
 @pytest.mark.asyncio

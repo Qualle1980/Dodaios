@@ -303,6 +303,20 @@ def _classify_worker_error(err: str, *, timed_out: bool = False) -> str | None:
     return None
 
 
+def _billing_source_value(worker: Any) -> str:
+    """The worker's billing source as a plain string, or ``"unknown"``.
+
+    Workers that do not classify their credential (every non-Claude CLI so
+    far) report ``unknown``, which is the truthful answer: this layer cannot
+    tell a subscription seat from a metered key on their behalf, and claiming
+    either would be the kind of unverified telemetry that hid the model
+    escalation of 2026-10-28.
+    """
+    source = getattr(worker, "last_billing_source", None)
+    value = getattr(source, "value", source)
+    return str(value) if value else "unknown"
+
+
 def _classify_worktree_setup_failure(exc: BaseException) -> str:
     """Map a ``WorktreeManager.create()`` failure to an actionable reason code.
 
@@ -2370,6 +2384,8 @@ class Kontrollierer:
                 cost_usd=spawn_result.cost_usd,
                 tokens_used=spawn_result.tokens_used,
                 session_id=session_id or "",
+                actual_model=spawn_result.actual_model,
+                billing_source=spawn_result.billing_source,
             )
             # Detect budget overrun caused by this iteration's draft so we
             # can publish WorkerKilled and abort fast (instead of waiting
@@ -2644,11 +2660,19 @@ class Kontrollierer:
             supervisor_tool_failed: bool = False,
             supervisor_tool_error: str | None = None,
             supervisor_tool_refusals: str | None = None,
+            actual_model: str = "unknown",
+            billing_source: str = "unknown",
         ) -> None:
             self.worker_id = worker_id
             self.cost_usd = cost_usd
             self.tokens_used = tokens_used
             self.session_id = session_id
+            # What the worker says it RAN, and whose bill it landed on — read
+            # off the worker after the stream, not derived from the step. A
+            # worker that cannot prove either reports "unknown", which is the
+            # only honest answer and never means "free".
+            self.actual_model = actual_model
+            self.billing_source = billing_source
             # True when the worker's terminal result carried the structured
             # `timed_out` flag (a wall-clock / first-output timeout). The
             # orchestrator keys is_timeout off THIS, not a "timeout" substring
@@ -2786,6 +2810,19 @@ class Kontrollierer:
                             worktree=str(worktree),
                             session_id=sid,
                             step=step,
+                            # From the worker, never from the step: the step
+                            # says what was asked for, and a worker may run
+                            # something else (a policy decision, a rejected
+                            # model, a cross-family fallback). A worker that
+                            # reports nothing yields "unknown" rather than a
+                            # guess.
+                            requested_model=getattr(
+                                worker, "last_requested_model", step.model
+                            ),
+                            actual_model=getattr(
+                                worker, "last_actual_model", "unknown"
+                            ),
+                            billing_source=_billing_source_value(worker),
                         )
                         spawned_emitted = True
 
@@ -2874,6 +2911,8 @@ class Kontrollierer:
             cost_usd=cost,
             tokens_used=tokens,
             session_id=session_id,
+            actual_model=getattr(worker, "last_actual_model", "unknown") or "unknown",
+            billing_source=_billing_source_value(worker),
             worker_error=worker_error,
             worker_timed_out=worker_timed_out,
             # Only INTEGRITY failures (outcome_unknown / still-active calls)
@@ -4835,6 +4874,9 @@ class Kontrollierer:
         worktree: str,
         session_id: str | None,
         step: Step,
+        requested_model: str = "",
+        actual_model: str = "unknown",
+        billing_source: str = "unknown",
     ) -> None:
         env = EventEnvelope(
             mission_id=mission_id,
@@ -4847,6 +4889,9 @@ class Kontrollierer:
                 pid=pid,
                 cli=cli,  # type: ignore[arg-type]
                 model=model,
+                requested_model=requested_model or model,
+                actual_model=actual_model or "unknown",
+                billing_source=billing_source or "unknown",
                 worktree=worktree,
                 session_id=session_id,
             ),
@@ -4862,6 +4907,8 @@ class Kontrollierer:
         cost_usd: float,
         tokens_used: int,
         session_id: str,
+        actual_model: str = "unknown",
+        billing_source: str = "unknown",
     ) -> EventEnvelope:
         totals = self.__dict__.setdefault("_mission_tokens", {})
         totals[mission_id] = totals.get(mission_id, 0) + max(int(tokens_used or 0), 0)
@@ -4876,6 +4923,8 @@ class Kontrollierer:
                 diff=diff[:8000],  # Cap protects the event store from huge diffs.
                 tokens_used=tokens_used,
                 cost_usd=cost_usd,
+                actual_model=actual_model,
+                billing_source=billing_source,
                 session_id=session_id,
             ),
         )

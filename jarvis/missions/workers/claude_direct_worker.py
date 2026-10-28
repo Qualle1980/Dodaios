@@ -57,6 +57,15 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from .capabilities import WorkerCapabilityInventory
+from .model_policy import (
+    UNKNOWN_MODEL,
+    BillingSource,
+    classify_billing_source,
+    cross_family_model,
+    is_escalation,
+    resolve_worker_model,
+    retry_model_after_rejection,
+)
 from .process_utils import create_worker_subprocess
 from .provider_chain import _resolve_provider_chain
 from .stream_consumer import (
@@ -103,17 +112,15 @@ _HARDCAP_GRACE_S: float = 30.0
 # was found lingering across 6 mission log dirs).
 _MCP_CONFIG_FILENAME: str = ".jarvis-mcp.json"
 
-# The claude-cli ``--model`` used when ClaudeDirectWorker runs as the universal
-# heavy-worker fallback for a non-claude sub_jarvis provider (see spawn()). A
-# real claude model — NEVER a foreign slug like ``grok-4.3``, which the claude
-# CLI rejects. Overridden by ``[brain.providers.claude-api].deep_model`` when
-# the config is readable. Maintainer decision 2026-06-14 (supersedes the
-# 2026-06-10 fable mandate): ``claude-fable-5`` is approved-access-only and the
-# Claude Max subscription cannot reach it via the CLI ("Claude Fable 5 is
-# currently unavailable", live mission 019ec615), so the last-resort default is
-# ``claude-opus-4-8`` — a model the subscription CAN reach. The
-# model-unavailable retry below is the safety net on top of this constant.
-_DEFAULT_CLAUDE_MODEL: str = "claude-opus-4-8"
+# The model a Claude worker runs is decided in ONE place —
+# ``jarvis.missions.workers.model_policy`` — so the request, the operator's
+# config and the fallback paths cannot drift apart. This module used to hold a
+# ``_DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"`` constant that won over the
+# caller's own pick, because ``spawn()`` accepted ``model`` and never read it:
+# a mission dispatched with ``step.model = "haiku"`` ran on Opus and its
+# telemetry still said haiku (live 2026-10-28). The policy module's
+# ``DEFAULT_WORKER_MODEL`` is the middle tier, and no path here may select a
+# higher one that nobody asked for.
 
 
 _MODEL_UNAVAILABLE_MARKERS: tuple[str, ...] = (
@@ -173,25 +180,25 @@ def _claude_error_is_auth_failure(text: str) -> bool:
     return any(m in low for m in _CLAUDE_AUTH_FAILURE_MARKERS)
 
 
-def _resolve_claude_model(primary: Any) -> str:
-    """Resolve the claude-cli ``--model`` this worker actually runs.
+def _configured_claude_model(primary: Any) -> str:
+    """The operator's configured Claude model, or ``""`` when none is set.
 
-    * If the resolved chain primary IS ``claude-api`` with a model, honour it
-      verbatim (unchanged behaviour for a claude-api sub_jarvis config).
-    * Otherwise — the universal-fallback case where ``_worker_factory`` routed a
-      ``grok`` / ``gemini`` / ``openai`` / ``openrouter`` / unset provider here
-      because none of them has a direct worker anymore — resolve the
-      ``[brain.providers.claude-api].deep_model`` from config, falling back to a
-      sane fable default. We must NEVER pass the foreign chain model (e.g.
-      ``grok-4.3``) to ``claude --model``: that is the 2026-06-08 instant-fail
-      bug (``primary provider is grok, expected claude-api``).
+    A configured model is an explicit choice and therefore an approval of its
+    tier, whatever that tier is. Two sources, in order: the resolved chain
+    primary when it IS ``claude-api`` (the deliberate sub_jarvis selection),
+    then ``[brain.providers.claude-api].deep_model``/``model`` from config.
+
+    A foreign chain model (``grok-4.3`` when the chain primary is grok) is
+    NEVER returned: it is not a Claude model, the CLI rejects it, and that was
+    the 2026-06-08 instant-fail bug. The policy module refuses it again, so
+    this is defence in depth rather than the only guard.
     """
     provider = getattr(primary, "provider", None)
     model = getattr(primary, "model", None)
     if provider == "claude-api" and model:
         return str(model)
-    # Config read is best-effort — a missing/unreadable config falls through to
-    # the sane fable default below rather than crashing the worker spawn.
+    # Config read is best-effort — a missing/unreadable config leaves the
+    # choice to the policy default rather than crashing the worker spawn.
     with suppress(Exception):
         from jarvis.core.config import load_config
 
@@ -202,7 +209,7 @@ def _resolve_claude_model(primary: Any) -> str:
             resolved = getattr(pcfg, "deep_model", None) or getattr(pcfg, "model", None)
             if resolved:
                 return str(resolved)
-    return _DEFAULT_CLAUDE_MODEL
+    return ""
 
 
 def _resolve_claude_binary() -> str | None:
@@ -287,6 +294,14 @@ class ClaudeDirectWorker:
     ) -> None:
         self.last_pid: int | None = None
         self.last_session_id: str | None = None
+        # Model telemetry, read by the orchestrator for WorkerSpawned /
+        # WorkerDraftReady. ``last_actual_model`` stays ``UNKNOWN_MODEL`` until
+        # the CLI itself names a model: a run whose model cannot be proved is
+        # reported as unknown, never as the one we asked for (live 2026-10-28,
+        # where the event said haiku and Opus had run).
+        self.last_requested_model: str = ""
+        self.last_actual_model: str = UNKNOWN_MODEL
+        self.last_billing_source: BillingSource = BillingSource.UNKNOWN
         # False pins this worker to Claude: on a spent window or a dead login it
         # surfaces the error instead of finishing the mission on codex, so the
         # orchestrator can park the mission (jarvis/missions/capacity.py).
@@ -316,7 +331,8 @@ class ClaudeDirectWorker:
         first_output_timeout_s: float = _DEFAULT_FIRST_OUTPUT_TIMEOUT_S,
         mission_id: str = "",
         allow_backend_fallback: bool = True,
-        force_default_model: bool = False,
+        retry_model: str = "",
+        models_tried: tuple[str, ...] = (),
         _broker_binding: Any | None = None,
         **_unused: Any,
     ) -> AsyncIterator[Any]:
@@ -347,7 +363,8 @@ class ClaudeDirectWorker:
                 first_output_timeout_s=first_output_timeout_s,
                 mission_id=mission_id,
                 allow_backend_fallback=allow_backend_fallback and self.backend_fallback,
-                force_default_model=force_default_model,
+                retry_model=retry_model,
+                models_tried=models_tried,
                 broker_binding=broker_binding,
                 **_unused,
             ):
@@ -378,7 +395,8 @@ class ClaudeDirectWorker:
         first_output_timeout_s: float = _DEFAULT_FIRST_OUTPUT_TIMEOUT_S,
         mission_id: str = "",
         allow_backend_fallback: bool = True,
-        force_default_model: bool = False,
+        retry_model: str = "",
+        models_tried: tuple[str, ...] = (),
         broker_binding: Any | None,
         **_unused: Any,
     ) -> AsyncIterator[Any]:
@@ -416,18 +434,58 @@ class ClaudeDirectWorker:
         # in ~3 s with "primary provider is <X>, expected claude-api"). We resolve
         # the claude model from the chain, run on Claude here, and only LOG when the
         # configured provider differs.
+        #
+        # The TIER, however, is decided by ``model_policy`` and nothing else.
+        # ``retry_model`` is set only by this method's own model-rejection
+        # retry below, which may never pick a dearer model than the one the
+        # CLI refused.
         chain = _resolve_provider_chain()
         primary = chain[0] if chain else None
-        claude_model = _resolve_claude_model(primary)
-        if primary is not None and primary.provider != "claude-api":
+        cross_family = primary is not None and primary.provider != "claude-api"
+        if retry_model:
+            choice = resolve_worker_model(requested=retry_model, configured="")
+        elif cross_family:
+            # A family fallback approves the family, never a tier: neither the
+            # other family's model id nor a configured Claude premium model may
+            # select the tier here.
+            choice = cross_family_model(model)
+        else:
+            choice = resolve_worker_model(
+                requested=model, configured=_configured_claude_model(primary),
+            )
+        claude_model = choice.model
+        self.last_requested_model = (model or "").strip()
+        self.last_actual_model = UNKNOWN_MODEL
+        self.last_billing_source = classify_billing_source(env)
+        if choice.blocked:
+            logger.warning(
+                "ClaudeDirectWorker[%s]: model %r was refused by the model "
+                "policy (not a Claude model, or a tier nobody approved) — "
+                "running %s (%s) instead.",
+                worker_id, choice.blocked, claude_model, choice.source,
+            )
+        if is_escalation(requested=model, candidate=claude_model):
+            # Belt to the policy's braces. Reaching this would mean a tier
+            # above an explicit ask got through, which is the whole defect this
+            # guard exists for, so it is refused here rather than logged and
+            # obeyed.
+            logger.error(
+                "ClaudeDirectWorker[%s]: refusing to run %r for a task that "
+                "asked for %r — an upgrade to a dearer tier needs an explicit "
+                "pick, not a fallback.",
+                worker_id, claude_model, model,
+            )
+            claude_model = resolve_worker_model(requested=model, configured="").model
+        if cross_family:
             logger.warning(
                 "ClaudeDirectWorker[%s]: configured sub_jarvis provider is %r, "
                 "which has no direct worker (Jarvis-Agent path removed in Welle 4) — "
-                "running heavy work on the Claude Max OAuth backend (model=%s) "
-                "instead of failing the mission.",
+                "running heavy work on the Claude Max OAuth backend (model=%s, "
+                "billing=%s) instead of failing the mission.",
                 worker_id,
                 primary.provider,
                 claude_model,
+                self.last_billing_source.value,
             )
 
         session_id = resume_session_id or str(uuid.uuid4())
@@ -436,11 +494,13 @@ class ClaudeDirectWorker:
             broker_binding.mcp_server_config() if broker_binding is not None else {}
         )
 
-        # 2. Build the claude argv. ``force_default_model`` omits ``--model``
-        # entirely so the CLI picks its own accessible default — the recovery
-        # path when the configured model is approved-access-only and the
-        # subscription can't reach it (live mission 019ec615, 2026-06-14:
-        # claude-fable-5 "is currently unavailable").
+        # 2. Build the claude argv. ``--model`` is ALWAYS explicit. The
+        # recovery path for an approved-access model the subscription cannot
+        # reach (live mission 019ec615, 2026-06-14: claude-fable-5 "is
+        # currently unavailable") used to drop the flag and let the CLI pick
+        # its own default — a model nobody chose, possibly the premium tier.
+        # It now retries a NAMED equal-or-cheaper model instead, and gives up
+        # honestly once the ladder is exhausted.
         argv_prefix = _resolve_claude_argv_prefix()
         from jarvis.claude_auth import (
             claude_cli_supports_safe_mode,
@@ -462,8 +522,7 @@ class ClaudeDirectWorker:
             "--add-dir",
             str(worktree),
         ]
-        if not force_default_model:
-            cmd.extend(["--model", claude_model])
+        cmd.extend(["--model", claude_model])
         if allowed_tools:
             cmd.extend(["--allowedTools", allowed_tools])
         # The CLI sees only the local broker adapter. Connector credentials stay
@@ -677,7 +736,26 @@ class ClaudeDirectWorker:
             if obj_type == "stream_event":
                 yield ClaudeStreamDelta(event=obj.get("event", {}), session_id=session_id)
                 continue
-            # ignore "system" events — we already emitted our synthetic init.
+            if obj_type == "system":
+                # The CLI's own init record names the model it actually
+                # loaded. This is the ONE authoritative source: everything
+                # else upstream is what we asked for. It used to be dropped
+                # here ("we already emitted our synthetic init"), which is why
+                # an Opus run could be reported as haiku. The event itself
+                # stays unforwarded — upstream already has its synthetic init.
+                reported = str(obj.get("model") or "").strip()
+                if reported:
+                    self.last_actual_model = reported
+                    if reported != claude_model:
+                        logger.warning(
+                            "ClaudeDirectWorker[%s]: asked the CLI for %r and "
+                            "it reports running %r — recording the CLI's "
+                            "answer as the actual model.",
+                            worker_id,
+                            claude_model,
+                            reported,
+                        )
+                continue
 
         # Reap the subprocess + collect stderr.
         if timed_out:
@@ -779,39 +857,57 @@ class ClaudeDirectWorker:
             final_result.is_error
             and not timed_out
             and not any_tool_use
-            and not force_default_model
             and _claude_error_is_model_unavailable((final_result.result or "") + "\n" + stderr_text)
         ):
-            logger.warning(
-                "ClaudeDirectWorker[%s]: model %r rejected by the CLI (%r) — "
-                "retrying without --model so the CLI picks an accessible "
-                "default and the mission completes.",
-                worker_id,
-                claude_model,
-                (final_result.result or "")[:160],
+            next_model = retry_model_after_rejection(
+                claude_model, already_tried=(*models_tried, claude_model)
             )
-            async for ev in self.spawn(
-                prompt,
-                worktree=worktree,
-                env=env,
-                job=job,
-                worker_id=worker_id,
-                log_dir=log_dir,
-                model=model,
-                allowed_tools=allowed_tools,
-                permission_mode=permission_mode,
-                max_turns=max_turns,
-                resume_session_id=None,
-                extra_args=extra_args,
-                timeout_s=timeout_s,
-                first_output_timeout_s=first_output_timeout_s,
-                mission_id=mission_id,
-                allow_backend_fallback=allow_backend_fallback,
-                force_default_model=True,
-                _broker_binding=broker_binding,
-            ):
-                yield ev
-            return
+            if next_model is None:
+                # No equal-or-cheaper Claude model is left. Dropping --model to
+                # let the CLI choose would be an unapproved upgrade, so the
+                # honest outcome is the rejection the CLI already reported; it
+                # falls through to the error paths below.
+                logger.error(
+                    "ClaudeDirectWorker[%s]: model %r was rejected and no "
+                    "equal-or-cheaper Claude model is left to try (%s) — "
+                    "surfacing the failure instead of upgrading the tier.",
+                    worker_id,
+                    claude_model,
+                    ", ".join((*models_tried, claude_model)),
+                )
+            else:
+                logger.warning(
+                    "ClaudeDirectWorker[%s]: model %r rejected by the CLI (%r) "
+                    "— retrying on %r, an equal-or-cheaper model chosen here on "
+                    "purpose rather than whatever the CLI would default to.",
+                    worker_id,
+                    claude_model,
+                    (final_result.result or "")[:160],
+                    next_model,
+                )
+                async for ev in self.spawn(
+                    prompt,
+                    worktree=worktree,
+                    env=env,
+                    job=job,
+                    worker_id=worker_id,
+                    log_dir=log_dir,
+                    model=model,
+                    allowed_tools=allowed_tools,
+                    permission_mode=permission_mode,
+                    max_turns=max_turns,
+                    resume_session_id=None,
+                    extra_args=extra_args,
+                    timeout_s=timeout_s,
+                    first_output_timeout_s=first_output_timeout_s,
+                    mission_id=mission_id,
+                    allow_backend_fallback=allow_backend_fallback,
+                    retry_model=next_model,
+                    models_tried=(*models_tried, claude_model),
+                    _broker_binding=broker_binding,
+                ):
+                    yield ev
+                return
 
         # Auth-failure recovery (2026-07-06, missions 019f36e5 + 019f38b1 —
         # the exact mirror of the codex-side 2026-06-08 incident): the Claude

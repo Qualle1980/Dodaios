@@ -61,7 +61,21 @@ class WorkerSpawned(_PayloadBase):
     step: dict[str, Any] = Field(default_factory=dict)
     pid: int
     cli: Literal["claude", "codex", "python", "browser"]
+    #: What the worker was ASKED to run. Kept under its original name so every
+    #: reader (UI, replay, shadow log, persisted history) keeps working.
     model: str
+    #: The same value under an unambiguous name. ``model`` alone made a
+    #: request look like a fact: a mission dispatched with ``haiku`` ran on
+    #: ``claude-opus-4-8`` and this event still said haiku (live 2026-10-28).
+    requested_model: str = ""
+    #: What actually ran, when the CLI has said so, else ``"unknown"``. At
+    #: spawn time the CLI has not answered yet, so ``unknown`` is the honest
+    #: value here; ``WorkerDraftReady`` carries the confirmed one.
+    actual_model: str = "unknown"
+    #: ``subscription_oauth`` | ``api_key`` | ``unknown`` — see
+    #: ``jarvis.missions.workers.model_policy.classify_billing_source``.
+    #: ``unknown`` is a real answer and never means "free".
+    billing_source: str = "unknown"
     worktree: str
     session_id: str | None = None
 
@@ -82,7 +96,16 @@ class WorkerDraftReady(_PayloadBase):
     artifact_uri: str
     diff: str
     tokens_used: int
+    #: The provider CLI's own cost figure for this run. On a subscription seat
+    #: it is an EQUIVALENT, not an invoice: read it together with
+    #: ``billing_source``, which says whose bill the run landed on. The mission
+    #: total stays whatever ``BudgetTracker`` holds, and that tracker is a
+    #: no-op while the budget is disabled — this field never changes that.
     cost_usd: float
+    #: The model the provider CLI reported running, or ``"unknown"``.
+    actual_model: str = "unknown"
+    #: Whose bill this run landed on (same values as ``WorkerSpawned``).
+    billing_source: str = "unknown"
     session_id: str
 
 
