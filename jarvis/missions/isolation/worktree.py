@@ -34,6 +34,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
+
+from .workspace_pool import WorkspacePool, resolve_pool_root
 from jarvis.missions.timing import timed
 
 logger = logging.getLogger(__name__)
@@ -208,18 +210,29 @@ class WorktreeManager:
         *,
         repo_root: Path,
         outputs_root: Path | None = None,
+        pool_size: int = 0,
     ) -> None:
         """
         Inputs:
             repo_root: path to the main repo (the one that contains `.git`).
             outputs_root: optional override for the mission outputs root.
                 Default: ``resolve_outputs_root(repo_root)``.
+            pool_size: how many finished worktrees may be kept for reuse
+                instead of removed (see
+                :mod:`jarvis.missions.isolation.workspace_pool`). ``0``, the
+                default, is today's behaviour exactly: every task builds its
+                own checkout and that checkout is destroyed afterwards.
         """
         self._repo_root = repo_root.resolve()
         self._outputs_root = (
             outputs_root.resolve()
             if outputs_root is not None
             else resolve_outputs_root(self._repo_root)
+        )
+        self._pool = WorkspacePool(
+            repo_root=self._repo_root,
+            pool_root=resolve_pool_root(self._outputs_root),
+            size=pool_size,
         )
 
     # --- Public API ---------------------------------------------------------
@@ -307,6 +320,25 @@ class WorktreeManager:
         workspace.parent.mkdir(parents=True, exist_ok=True)
 
         branch_name = f"agent/{task_part}-{short_uuid}"
+
+        # A reusable slot, when the pool holds one, is the same checkout
+        # without the checkout: 0.67 s against 27 s measured (see
+        # ``workspace_pool``). The pool answers None whenever anything is
+        # unusual, and then this falls through to the fresh build below.
+        pooled = (
+            self._pool.acquire(
+                base_ref=self._resolve_base_commit(base_branch),
+                branch=branch_name,
+            )
+            if self._pool.enabled
+            else None
+        )
+        if pooled is not None:
+            # Same sidecar as a fresh worktree: the Kontrollierer diffs the
+            # task against this SHA, so a reused tree must record the commit
+            # it was just reset to, not the one the previous task used.
+            self._write_base_sha(pooled)
+            return pooled
 
         cmd = [
             "git",
@@ -404,6 +436,29 @@ class WorktreeManager:
         if not raw_top or top != self._repo_root:
             raise SourceCheckoutUnavailableError(self._repo_root)
 
+    def _resolve_base_commit(self, base_branch: str) -> str:
+        """Resolve ``base_branch`` against the MAIN checkout, as a commit SHA.
+
+        A fresh ``git worktree add <path> HEAD`` resolves ``HEAD`` in the main
+        checkout — the commit the app runs, which is what ``create`` documents
+        and what every caller means. Inside a reused slot the same word would
+        resolve to that SLOT's HEAD, i.e. whatever the previous task left
+        behind, and the worker would silently get the wrong code. So the ref
+        is pinned to a SHA here, in the repository, before the pool sees it.
+
+        Returns the original ref when it cannot be resolved; the pool then
+        fails its own git call and the caller falls back to a fresh checkout.
+        """
+        try:
+            out = self._run_git(["git", "rev-parse", "--verify", base_branch])
+        except (subprocess.CalledProcessError, OSError):
+            # `_run_git` has already logged git's own reason. An unresolvable
+            # ref is handed on unchanged so the pool's first git call fails on
+            # it and the caller falls back to a fresh checkout - the one path
+            # that cannot hand a worker the wrong commit.
+            return base_branch
+        return (out.stdout or "").strip() or base_branch
+
     def _write_base_sha(self, workspace: Path) -> None:
         """Persist the worktree's base commit SHA next to (not inside) the tree.
 
@@ -498,8 +553,23 @@ class WorktreeManager:
         ``git worktree prune`` to clean up, because the lean repo was never
         registered there in the first place.
         """
+        if self._pool.release(path):
+            # A leased slot is not removed: it goes back to the pool for the
+            # next task. The caller has already archived the task's artifacts
+            # (``Kontrollierer._finish_task_workspace`` archives first), and
+            # the tree is reset at the next acquire, not here, so a cancelled
+            # mission is never held up by a reset it is waiting on.
+            return
+
         if self._is_lean_workspace(path):
             self._remove_lean(path)
+            return
+
+        if self._pool.adopt(path):
+            # The pool had room, so this finished worktree becomes a slot
+            # instead of being destroyed. This is the ONLY way slots are
+            # created: nothing is built on speculation and nothing runs at
+            # boot (AP-26).
             return
 
         cmd = ["git", "worktree", "remove"]
