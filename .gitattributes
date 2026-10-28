@@ -64,3 +64,14 @@ install/tuf/*.json           text eol=lf
 # language statistics. Contributors never commit it; the maintainer rebuilds
 # the bundle from HEAD's sources (see CONTRIBUTING.md, "Opening your PR").
 jarvis/ui/web/dist/**        linguist-generated=true
+
+# The Android Gradle wrapper. `gradlew` is a POSIX shell script without the
+# `.sh` extension the rule above matches, so without this it follows
+# `core.autocrlf` and a Windows checkout produces CRLF — which makes
+# `./gradlew` fail on macOS/Linux and inside Docker with "bad interpreter".
+# `gradlew.bat` is cmd.exe's and wants CRLF. The wrapper jar is a binary whose
+# SHA-256 is verified against Gradle's published checksum
+# (tests/unit/mobile/test_android_gradle_wrapper.py) and must never be touched.
+mobile/android/gradlew       text eol=lf
+mobile/android/gradlew.bat   text eol=crlf
+*.jar                        binary
