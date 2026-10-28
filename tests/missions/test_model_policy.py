@@ -15,7 +15,9 @@ from jarvis.missions.workers.model_policy import (
     ModelTier,
     classify_billing_source,
     cross_family_model,
+    explicitly_allowed_models,
     is_claude_model,
+    actual_model_is_allowed,
     is_escalation,
     paid_api_usage_authorized,
     resolve_worker_model,
@@ -283,3 +285,69 @@ def test_an_unreadable_pinning_signal_does_not_authorize_spending(
     )
     monkeypatch.setattr("jarvis.missions.init.install_is_pinned", _boom)
     assert paid_api_usage_authorized() is False
+
+
+# --- accepting what the CLI reports (review of PR #67) ---------------------
+
+
+@pytest.mark.parametrize(
+    ("approved", "reported"),
+    [
+        ("sonnet", "claude-sonnet-5-5"),  # alias vs full id, same tier
+        ("claude-sonnet-5-5", "sonnet"),  # and the other way round
+        ("sonnet", "sonnet"),
+        ("sonnet", "claude-haiku-4-5"),  # cheaper
+        ("opus", "claude-sonnet-4-5"),
+        ("haiku", ""),  # nothing reported: nothing to object to
+    ],
+)
+def test_an_equal_or_cheaper_reported_model_is_allowed(
+    approved: str, reported: str
+) -> None:
+    assert actual_model_is_allowed(approved=approved, reported=reported) is True
+
+
+@pytest.mark.parametrize(
+    ("approved", "reported"),
+    [
+        ("haiku", "claude-opus-4-8"),  # the live 2026-10-28 shape
+        ("sonnet", "opus"),
+        ("haiku", "sonnet"),
+        ("sonnet", "gpt-opus-4"),  # foreign id: unplaceable, so refused
+        ("sonnet", "some-new-model-9"),  # unknown id: refused as well
+        ("sonnet", "claude-instant-1.2"),  # a Claude id outside the table
+    ],
+)
+def test_a_dearer_or_unverifiable_reported_model_is_not_allowed(
+    approved: str, reported: str
+) -> None:
+    assert actual_model_is_allowed(approved=approved, reported=reported) is False
+
+
+def test_the_acceptance_check_is_the_escalation_rule() -> None:
+    """One rule, not two: the check after the fact and the decision before it
+    must never disagree, so the former is defined by the latter."""
+    for approved, reported in (
+        ("haiku", "claude-opus-4-8"),
+        ("sonnet", "claude-haiku-4-5"),
+        ("sonnet", "some-new-model-9"),
+        ("opus", "claude-sonnet-5-5"),
+    ):
+        assert actual_model_is_allowed(approved=approved, reported=reported) is (
+            not is_escalation(requested=approved, candidate=reported)
+        )
+
+
+def test_an_explicitly_allowed_model_passes(monkeypatch) -> None:
+    monkeypatch.setenv("JARVIS_ALLOWED_WORKER_MODELS", " some-new-model-9 , x-9 ")
+    assert (
+        actual_model_is_allowed(approved="sonnet", reported="SOME-NEW-MODEL-9") is True
+    )
+    assert actual_model_is_allowed(approved="sonnet", reported="x-9") is True
+    # Only what was named: a dearer KNOWN model is still refused.
+    assert actual_model_is_allowed(approved="haiku", reported="opus") is False
+
+
+def test_nothing_is_allowed_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("JARVIS_ALLOWED_WORKER_MODELS", raising=False)
+    assert explicitly_allowed_models() == frozenset()

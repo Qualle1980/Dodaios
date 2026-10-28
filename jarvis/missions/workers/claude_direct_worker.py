@@ -62,11 +62,11 @@ from .model_policy import (
     BillingSource,
     classify_billing_source,
     cross_family_model,
+    actual_model_is_allowed,
     is_escalation,
     paid_api_usage_authorized,
     resolve_worker_model,
     retry_model_after_rejection,
-    tier_of,
 )
 from .process_utils import create_worker_subprocess
 from .provider_chain import _resolve_provider_chain
@@ -798,20 +798,18 @@ class ClaudeDirectWorker:
                             claude_model,
                             reported,
                         )
-                    reported_tier = tier_of(reported)
-                    approved_tier = tier_of(claude_model)
-                    if (
-                        reported_tier is not None
-                        and approved_tier is not None
-                        and reported_tier > approved_tier
+                    if not actual_model_is_allowed(
+                        approved=claude_model, reported=reported
                     ):
-                        # The CLI loaded a DEARER model than the policy
-                        # approved. Recording it would make the telemetry
-                        # honest and the spending still wrong, so the run stops
-                        # here, before the worker does any work (review of
-                        # PR #67). A different spelling of the same tier —
-                        # alias vs full id — is not a deviation and does not
-                        # stop anything.
+                        # The CLI did not load a model this task agreed to.
+                        # Recording that would make the telemetry honest and
+                        # the spending still wrong, so the run stops here,
+                        # before any worker output is accepted. The rule is
+                        # the policy's own ``is_escalation``: the same tier
+                        # passes (an alias and its full id are
+                        # interchangeable), a cheaper tier passes, a dearer
+                        # one does not, and an id the tier table cannot place
+                        # does not either unless it was explicitly allowed.
                         tier_violation = reported
                         break
                 continue
@@ -853,8 +851,10 @@ class ClaudeDirectWorker:
                 f"ClaudeDirectWorker: refused the run — the claude CLI "
                 f"reported loading {tier_violation!r} while only "
                 f"{claude_model!r} was approved for this task. A dearer model "
-                f"needs an explicit pick, so the worker stopped before doing "
-                f"any work."
+                f"needs an explicit pick, and a model whose tier cannot be "
+                f"established is not proof of a cheap one, so the worker "
+                f"stopped before doing any work. Name the model in "
+                f"JARVIS_ALLOWED_WORKER_MODELS to allow it deliberately."
             )
             logger.error("%s worker=%s", message, worker_id)
             yield ClaudeResult(

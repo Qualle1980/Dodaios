@@ -35,6 +35,7 @@ An unproven run is never reported as a free one.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -315,6 +316,55 @@ def classify_billing_source(env: Mapping[str, str]) -> BillingSource:
     return BillingSource.UNKNOWN
 
 
+#: Environment variable naming model ids that may run even though this module
+#: cannot place their tier — comma-separated, read fresh on every check. It is
+#: the explicit allowance for a model that is simply newer than
+#: :data:`_ALIAS_TIERS`: without it the only way past the acceptance check
+#: below would be a code change, and with it an unknown id still never passes
+#: silently. Empty by default, so nothing is allowed that was not named.
+ALLOWED_UNVERIFIED_MODELS_ENV: Final[str] = "JARVIS_ALLOWED_WORKER_MODELS"
+
+
+def explicitly_allowed_models() -> frozenset[str]:
+    """Model ids named in :data:`ALLOWED_UNVERIFIED_MODELS_ENV`, normalised."""
+    raw = os.environ.get(ALLOWED_UNVERIFIED_MODELS_ENV, "")
+    return frozenset(
+        normalise(part) for part in raw.split(",") if normalise(part)
+    )
+
+
+def actual_model_is_allowed(*, approved: str, reported: str) -> bool:
+    """Whether a provider CLI may run ``reported`` when ``approved`` was agreed.
+
+    The rule is :func:`is_escalation` and nothing else, so the acceptance check
+    after the fact and the decision before it can never disagree:
+
+    * the same tier passes, which is what makes an alias and its full id
+      interchangeable (``sonnet`` agreed, ``claude-sonnet-5-5`` reported);
+    * a cheaper tier passes;
+    * a dearer tier does not;
+    * an id this module cannot place does not either — ``is_escalation``
+      already treats unplaceable as the expensive answer, because nothing
+      proves it is not.
+
+    Two ways past it, both explicit: the reported id is literally the approved
+    one, or it was named in :data:`ALLOWED_UNVERIFIED_MODELS_ENV`.
+    """
+    approved_name = normalise(approved)
+    reported_name = normalise(reported)
+    if not reported_name or reported_name == approved_name:
+        return True
+    if reported_name in explicitly_allowed_models():
+        logger.info(
+            "model policy: %r is not in the tier table but was explicitly "
+            "allowed via %s.",
+            reported_name,
+            ALLOWED_UNVERIFIED_MODELS_ENV,
+        )
+        return True
+    return not is_escalation(requested=approved_name, candidate=reported_name)
+
+
 def paid_api_usage_authorized() -> bool:
     """Whether this install may bill a metered API key for mission work.
 
@@ -359,13 +409,16 @@ def paid_api_usage_authorized() -> bool:
 
 
 __all__ = [
+    "ALLOWED_UNVERIFIED_MODELS_ENV",
     "DEFAULT_WORKER_MODEL",
     "UNKNOWN_MODEL",
     "BillingSource",
     "ModelChoice",
     "ModelTier",
+    "actual_model_is_allowed",
     "classify_billing_source",
     "cross_family_model",
+    "explicitly_allowed_models",
     "is_claude_model",
     "is_escalation",
     "normalise",

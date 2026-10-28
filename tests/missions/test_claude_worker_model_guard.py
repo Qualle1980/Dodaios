@@ -264,20 +264,44 @@ async def test_a_cheaper_model_reported_by_the_cli_is_accepted(
 
 
 @pytest.mark.asyncio
-async def test_an_unplaceable_reported_model_is_recorded_without_a_refusal(
+async def test_an_unverifiable_reported_model_also_stops_the_run(
     fake_cli, tmp_path: Path
 ) -> None:
-    """An id this code cannot place is not proof of a dearer run.
+    """An id whose tier cannot be established is not proof of a cheap run.
 
-    It is recorded verbatim — the telemetry says what the CLI said — and the
-    run continues, because refusing every unrecognised id would stop ordinary
-    missions on a model that is merely newer than this table.
+    It is still recorded verbatim — the telemetry says what the CLI said —
+    but the run is refused, because "unplaceable" is exactly the state in
+    which nobody can tell what the task is spending.
     """
-    fake_cli(reported_model="claude-instant-1.2")
+    fake_cli(reported_model="some-new-model-9")
     worker = ClaudeDirectWorker()
     events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+
+    assert worker.last_actual_model == "some-new-model-9"
+    results = _results(events)
+    assert results and results[-1].is_error
+    assert "some-new-model-9" in results[-1].result
+    assert not any(
+        ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_allowed_unverifiable_model_runs(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch for a model that is merely newer than the tier table.
+
+    Naming it in the environment is a deliberate act; nothing passes silently.
+    """
+    fake_cli(reported_model="some-new-model-9")
+    monkeypatch.setenv("JARVIS_ALLOWED_WORKER_MODELS", "some-new-model-9")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+
     assert _results(events)[-1].is_error is False
-    assert worker.last_actual_model == "claude-instant-1.2"
+    assert worker.last_actual_model == "some-new-model-9"
+    assert any(ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events)
 
 
 # --- paid API use ----------------------------------------------------------
