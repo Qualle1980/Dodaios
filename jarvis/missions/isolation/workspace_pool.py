@@ -201,6 +201,13 @@ class WorkspacePool:
             # the destination itself not to (verified: it answers "No such
             # file or directory" otherwise).
             slot.mkdir(parents=True, exist_ok=True)
+            # A slot path whose directory is gone - quarantined earlier, or
+            # deleted by something outside the app - stays REGISTERED in git,
+            # and `worktree move` then refuses that destination for good
+            # ("missing but already registered worktree", caught by the setup
+            # benchmark on 2026-10-28). Prune forgets exactly those missing
+            # entries and nothing else, so a slot name is reusable again.
+            self._git(["git", "worktree", "prune"], cwd=self._repo_root)
             # `git worktree move` keeps git's registration correct. A plain
             # rename would leave the admin file pointing at the old path and
             # every later git call in the slot would fail.
@@ -387,24 +394,39 @@ class WorkspacePool:
             return False
         if not self._is_worktree_link(workspace):
             return False
+        slot_common = self._common_dir(workspace)
+        repo_common = self._common_dir(self._repo_root)
+        # Both sides come from git. Comparing against ``repo_root / ".git"``
+        # instead looks right and is wrong whenever the repo root is itself a
+        # linked worktree: its common dir then lives in the MAIN checkout, so
+        # every slot failed validation and nothing was ever reused (caught by
+        # the setup benchmark, 2026-10-28).
+        return slot_common is not None and slot_common == repo_common
+
+    def _common_dir(self, tree: Path) -> Path | None:
+        """Absolute git common dir of ``tree``, or ``None`` when git refuses.
+
+        The common dir is the one thing every worktree of a repository shares
+        and no unrelated repository can claim, which makes it the right
+        identity to compare two trees on.
+        """
         try:
             out = self._git(
                 ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                cwd=workspace,
+                cwd=tree,
             )
         except (subprocess.SubprocessError, OSError):
-            # git cannot answer for this tree, so it does not count as a worktree of this repo.
-            return False
-        common = (out.stdout or "").strip()
-        if not common:
-            return False
+            # git cannot answer for this tree, so it cannot be shown to belong
+            # to this repository - and only proof may unlock a reset.
+            return None
+        raw = (out.stdout or "").strip()
+        if not raw:
+            return None
         try:
-            if Path(common).resolve() != (self._repo_root / ".git").resolve():
-                return False
+            return Path(raw).resolve()
         except OSError:
-            # An unreadable common dir is not proof of ownership, and only proof may unlock a reset.
-            return False
-        return True
+            # An unresolvable path is no proof of ownership either.
+            return None
 
     @staticmethod
     def _is_worktree_link(workspace: Path) -> bool:

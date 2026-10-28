@@ -331,3 +331,58 @@ def test_release_leaves_the_tree_for_the_next_acquire_to_reset(
 
     assert not (slot / LEASE_NAME).exists()
     assert (slot / "workspace" / "unarchived.txt").is_file()
+
+
+def test_a_slot_is_reused_when_the_repo_root_is_itself_a_linked_worktree(
+    repo: Path, tmp_path: Path,
+) -> None:
+    """The validation bug the setup benchmark found on 2026-10-28.
+
+    Identity was checked against ``repo_root / ".git"``, which is correct only
+    for a main checkout. Run from a linked worktree — every agent worktree of
+    this project, and the benchmark itself — the common dir lives in the MAIN
+    checkout instead, so every slot failed validation, was quarantined, and
+    the pool silently never reused anything while still looking healthy.
+    """
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-b", "side", str(linked), "HEAD")
+    manager = WorktreeManager(
+        repo_root=linked, outputs_root=tmp_path / "outputs", pool_size=1,
+    )
+    pool_root = resolve_pool_root(tmp_path / "outputs")
+
+    first = manager.create(mission_slug="m", task_id="01-a")
+    manager.remove(first, force=True)
+    second = manager.create(mission_slug="m", task_id="02-b")
+
+    assert second == pool_root / "ws-00" / "workspace"
+    assert not [p for p in pool_root.iterdir() if p.name.startswith("quarantine-")]
+
+
+def test_a_slot_name_left_registered_by_a_vanished_directory_is_reusable(
+    manager: WorktreeManager, tmp_path: Path,
+) -> None:
+    """The second bug the setup benchmark found on 2026-10-28.
+
+    A slot directory that disappears without ``git worktree remove`` — the
+    quarantine rename, or anything outside the app — leaves the path
+    registered. ``worktree move`` then refuses that destination permanently
+    ("missing but already registered worktree"), so the pool could never
+    adopt again and every task silently paid for a full checkout.
+    """
+    pool_root = resolve_pool_root(tmp_path / "outputs")
+    first = manager.create(mission_slug="m", task_id="01-a")
+    manager.remove(first, force=True)
+    assert (pool_root / "ws-00" / "workspace").is_dir()
+    # The directory goes away; git's registration for it does not.
+    shutil.rmtree(pool_root, onerror=_force_rmtree)
+
+    second = manager.create(mission_slug="m", task_id="02-b")
+    manager.remove(second, force=True)
+    assert (pool_root / "ws-00" / "workspace" / "README.md").is_file()
+
+
+def _force_rmtree(func, path, exc_info) -> None:  # type: ignore[no-untyped-def]
+    """``rmtree`` hook: git leaves read-only files that Windows refuses to delete."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
