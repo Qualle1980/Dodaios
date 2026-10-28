@@ -68,13 +68,22 @@ export interface MissionPlanReady extends BasePayload {
   expected_output: string;
 }
 
+export type BillingSource = "subscription_oauth" | "api_key" | "unknown";
+
 export interface WorkerSpawned extends BasePayload {
   event_type: "WorkerSpawned";
   worker_id: string;
   step: Record<string, unknown>;
   pid: number;
   cli: WorkerCli;
+  /** What the worker was asked to run. */
   model: string;
+  /** The same value, named so it cannot be mistaken for what ran. */
+  requested_model?: string;
+  /** What ran, once the provider CLI said so; "unknown" until then. */
+  actual_model?: string;
+  /** Whose bill the run lands on. "unknown" never means free. */
+  billing_source?: BillingSource;
   worktree: string;
   session_id: string | null;
 }
@@ -95,7 +104,12 @@ export interface WorkerDraftReady extends BasePayload {
   artifact_uri: string;
   diff: string;
   tokens_used: number;
+  /** The provider CLI's own figure. On a subscription seat this is an
+   *  equivalent, not an invoice — read it with `billing_source`. */
   cost_usd: number;
+  /** The model the provider CLI reported running, or "unknown". */
+  actual_model?: string;
+  billing_source?: BillingSource;
   session_id: string;
 }
 

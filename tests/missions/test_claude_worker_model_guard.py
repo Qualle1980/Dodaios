@@ -1,0 +1,416 @@
+"""ClaudeDirectWorker against a FAKE claude CLI: what it runs, and what it reports.
+
+No model is called anywhere here. The "CLI" is a small Python script this test
+writes, which records the argv it was given and prints the stream-json records
+a real ``claude --print --output-format stream-json`` would print — including
+the ``system`` init record that names the model the CLI actually loaded.
+
+The defect being pinned: on 2026-10-28 a mission asked for ``haiku``, Opus ran,
+and the telemetry still said haiku.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jarvis.missions.workers import claude_direct_worker as cdw
+from jarvis.missions.workers.claude_direct_worker import ClaudeDirectWorker
+from jarvis.missions.workers.model_policy import DEFAULT_WORKER_MODEL, BillingSource
+
+_API_KEY_ENV = {"ANTHROPIC_API_KEY": "sk-ant-api03-test"}
+
+
+def _results(events: list[Any]) -> list[Any]:
+    return [ev for ev in events if ev.__class__.__name__ == "ClaudeResult"]
+
+_FAKE_CLI = '''
+import json, sys, pathlib
+argv = sys.argv[1:]
+record = pathlib.Path(sys.argv[0]).with_suffix(".argv.json")
+record.write_text(json.dumps(argv), encoding="utf-8")
+model = argv[argv.index("--model") + 1] if "--model" in argv else ""
+sys.stdin.read()
+reported = __FAKE_REPORTED_MODEL__ or model
+if __FAKE_REJECT_MODELS__ and model in __FAKE_REJECT_MODELS__:
+    print(json.dumps({"type": "result", "subtype": "error_during_execution",
+                      "is_error": True, "session_id": "fake",
+                      "result": "API Error: the requested model is currently unavailable"}))
+    sys.exit(0)
+print(json.dumps({"type": "system", "subtype": "init", "model": reported,
+                  "session_id": "fake"}))
+print(json.dumps({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Write", "input": {}}]}}))
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "session_id": "fake", "total_cost_usd": 0.0, "num_turns": 1,
+                  "result": "done"}))
+'''
+
+
+class _Job:
+    def assign(self, pid: int) -> None:
+        return None
+
+
+@pytest.fixture
+def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Install a fake claude CLI; returns a builder for its behaviour."""
+
+    def build(*, reported_model: str | None = None, reject: tuple[str, ...] = ()) -> Path:
+        script = tmp_path / "fake_claude.py"
+        script.write_text(
+            _FAKE_CLI.replace(
+                "__FAKE_REPORTED_MODEL__", json.dumps(reported_model or "")
+            ).replace("__FAKE_REJECT_MODELS__", json.dumps(list(reject))),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            cdw, "_resolve_claude_argv_prefix", lambda: [sys.executable, str(script)]
+        )
+        monkeypatch.setattr(
+            "jarvis.claude_auth.claude_cli_supports_safe_mode", lambda _prefix: False
+        )
+        # No configured model: the policy default applies unless a test pins one.
+        monkeypatch.setattr(cdw, "_configured_claude_model", lambda _primary: "")
+        monkeypatch.setattr(cdw, "_resolve_provider_chain", lambda: ())
+        return script
+
+    return build
+
+
+async def _run(
+    worker: ClaudeDirectWorker,
+    *,
+    tmp_path: Path,
+    model: str,
+    env: dict[str, str] | None = None,
+) -> list[Any]:
+    worktree = tmp_path / "ws"
+    worktree.mkdir(exist_ok=True)
+    log_dir = tmp_path / "logs"
+    return [
+        ev
+        async for ev in worker.spawn(
+            "write a file",
+            worktree=worktree,
+            env=env if env is not None else {},
+            job=_Job(),
+            worker_id="w1",
+            log_dir=log_dir,
+            model=model,
+            allowed_tools="Write",
+        )
+    ]
+
+
+def _argv(script: Path) -> list[str]:
+    return json.loads(script.with_suffix(".argv.json").read_text(encoding="utf-8"))
+
+
+def _model_arg(script: Path) -> str:
+    argv = _argv(script)
+    assert "--model" in argv, f"--model missing from {argv}"
+    return argv[argv.index("--model") + 1]
+
+
+# --- what runs -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_haiku_requested_is_haiku_executed(fake_cli, tmp_path: Path) -> None:
+    script = fake_cli()
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="haiku")
+    assert _model_arg(script) == "haiku"
+
+
+@pytest.mark.asyncio
+async def test_haiku_requested_never_silently_becomes_opus(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even with Opus configured, an explicit cheap pick is what runs."""
+    script = fake_cli()
+    monkeypatch.setattr(cdw, "_configured_claude_model", lambda _p: "claude-opus-4-8")
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="haiku")
+    assert _model_arg(script) == "haiku"
+    assert "opus" not in " ".join(_argv(script))
+
+
+@pytest.mark.asyncio
+async def test_no_request_and_no_config_does_not_reach_opus(
+    fake_cli, tmp_path: Path
+) -> None:
+    script = fake_cli()
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="")
+    assert _model_arg(script) == DEFAULT_WORKER_MODEL
+
+
+@pytest.mark.asyncio
+async def test_a_stale_codex_login_fallback_does_not_escalate_the_tier(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production path: codex login dead -> ClaudeDirectWorker.
+
+    The factory's decision moves the FAMILY. It approves no tier, and the
+    step's codex model id is not a Claude model, so the worker must land on
+    the default tier and never on the premium one.
+    """
+    script = fake_cli()
+
+    class _Primary:
+        provider = "openai-codex"
+        model = "gpt-5-codex"
+
+    monkeypatch.setattr(cdw, "_resolve_provider_chain", lambda: (_Primary(),))
+    monkeypatch.setattr(cdw, "_configured_claude_model", lambda _p: "claude-opus-4-8")
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="gpt-5-codex")
+    assert _model_arg(script) == DEFAULT_WORKER_MODEL
+
+
+# --- the rejection path ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_model_retries_one_step_cheaper_with_an_explicit_flag(
+    fake_cli, tmp_path: Path
+) -> None:
+    """``--model`` is never dropped: the retry names a cheaper model itself."""
+    script = fake_cli(reject=("claude-opus-4-8",))
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="claude-opus-4-8")
+    assert _model_arg(script) == "sonnet"
+    assert not any(
+        getattr(ev, "is_error", False) for ev in events if ev.__class__.__name__ == "ClaudeResult"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_ladder_fails_instead_of_letting_the_cli_choose(
+    fake_cli, tmp_path: Path
+) -> None:
+    script = fake_cli(reject=("haiku",))
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="haiku")
+    assert _model_arg(script) == "haiku"  # never retried without the flag
+    results = [ev for ev in events if ev.__class__.__name__ == "ClaudeResult"]
+    assert results and results[-1].is_error
+
+
+# --- telemetry -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_dearer_model_reported_by_the_cli_stops_the_run(
+    fake_cli, tmp_path: Path
+) -> None:
+    """haiku asked for, Opus loaded: recorded AND refused.
+
+    Recording alone would make the telemetry honest and leave the spending
+    wrong, so the worker stops before doing any work. The fake CLI prints a
+    ``tool_use`` record after its init record; the refusal means that record
+    never reaches the caller.
+    """
+    fake_cli(reported_model="claude-opus-4-8")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="haiku")
+
+    assert worker.last_requested_model == "haiku"
+    assert worker.last_actual_model == "claude-opus-4-8"  # the CLI is authoritative
+    results = _results(events)
+    assert results and results[-1].is_error
+    assert "claude-opus-4-8" in results[-1].result
+    assert not any(
+        ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events
+    ), "no worker output may be accepted after the deviation"
+
+
+@pytest.mark.asyncio
+async def test_a_different_spelling_of_the_approved_tier_does_not_stop_anything(
+    fake_cli, tmp_path: Path
+) -> None:
+    """``sonnet`` asked for, ``claude-sonnet-5-5`` reported: same tier, fine.
+
+    The alias is how the CLI is invoked and the full id is how it answers, so
+    a literal string comparison would refuse every ordinary run.
+    """
+    fake_cli(reported_model="claude-sonnet-5-5")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+
+    results = _results(events)
+    assert results and results[-1].is_error is False
+    assert worker.last_actual_model == "claude-sonnet-5-5"
+    # The fake CLI emits a tool_use record after its init record. Seeing it
+    # here is what makes the refusal test above a real discriminator: that one
+    # asserts the same record never arrives.
+    assert any(ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_a_cheaper_model_reported_by_the_cli_is_accepted(
+    fake_cli, tmp_path: Path
+) -> None:
+    """Only the expensive direction is a violation."""
+    fake_cli(reported_model="claude-haiku-4-5")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+    assert _results(events)[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_an_unverifiable_reported_model_also_stops_the_run(
+    fake_cli, tmp_path: Path
+) -> None:
+    """An id whose tier cannot be established is not proof of a cheap run.
+
+    It is still recorded verbatim — the telemetry says what the CLI said —
+    but the run is refused, because "unplaceable" is exactly the state in
+    which nobody can tell what the task is spending.
+    """
+    fake_cli(reported_model="some-new-model-9")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+
+    assert worker.last_actual_model == "some-new-model-9"
+    results = _results(events)
+    assert results and results[-1].is_error
+    assert "some-new-model-9" in results[-1].result
+    assert not any(
+        ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_allowed_unverifiable_model_runs(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch for a model that is merely newer than the tier table.
+
+    Naming it in the environment is a deliberate act; nothing passes silently.
+    """
+    fake_cli(reported_model="some-new-model-9")
+    monkeypatch.setenv("JARVIS_ALLOWED_WORKER_MODELS", "some-new-model-9")
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="sonnet")
+
+    assert _results(events)[-1].is_error is False
+    assert worker.last_actual_model == "some-new-model-9"
+    assert any(ev.__class__.__name__ == "ClaudeAssistantMessage" for ev in events)
+
+
+# --- paid API use ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_metered_key_without_authorization_refuses_before_spawning(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A detected API key is not permission to spend it.
+
+    Pinned to subscriptions and the paid switch off: the worker must stop
+    BEFORE the subprocess exists, which the missing argv file proves.
+    """
+    script = fake_cli()
+    monkeypatch.setattr(cdw, "paid_api_usage_authorized", lambda: False)
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="haiku", env=dict(_API_KEY_ENV))
+
+    results = _results(events)
+    assert results and results[-1].is_error
+    assert "not authorized" in results[-1].result
+    assert not script.with_suffix(".argv.json").exists(), "the CLI must not have run"
+    assert worker.last_billing_source is BillingSource.API_KEY
+
+
+@pytest.mark.asyncio
+async def test_an_authorized_metered_key_still_runs(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An install whose key IS its way of working must not be bricked."""
+    script = fake_cli()
+    monkeypatch.setattr(cdw, "paid_api_usage_authorized", lambda: True)
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="haiku", env=dict(_API_KEY_ENV))
+
+    assert _model_arg(script) == "haiku"
+    assert _results(events)[-1].is_error is False
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_billing_source_is_not_blocked_but_stays_unknown(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI usually authenticates from the user's own store.
+
+    That run cannot be proved metered, so it is not refused — and it is not
+    relabelled a subscription or a free run either.
+    """
+    script = fake_cli()
+    monkeypatch.setattr(cdw, "paid_api_usage_authorized", lambda: False)
+    worker = ClaudeDirectWorker()
+    events = await _run(worker, tmp_path=tmp_path, model="haiku", env={})
+
+    assert _model_arg(script) == "haiku"
+    assert _results(events)[-1].is_error is False
+    assert worker.last_billing_source is BillingSource.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_an_oauth_seat_is_never_gated(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = fake_cli()
+    monkeypatch.setattr(cdw, "paid_api_usage_authorized", lambda: False)
+    worker = ClaudeDirectWorker()
+    events = await _run(
+        worker,
+        tmp_path=tmp_path,
+        model="haiku",
+        env={"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test"},
+    )
+    assert _model_arg(script) == "haiku"
+    assert _results(events)[-1].is_error is False
+    assert worker.last_billing_source is BillingSource.SUBSCRIPTION_OAUTH
+
+
+@pytest.mark.asyncio
+async def test_an_unproven_model_is_reported_unknown_not_guessed(
+    fake_cli, tmp_path: Path
+) -> None:
+    """A CLI that names no model leaves ``unknown``, never the request."""
+    fake_cli(reject=("haiku",))  # errors out before any system record
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="haiku")
+    assert worker.last_actual_model == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_the_billing_source_is_read_from_the_worker_environment(
+    fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_cli()
+    monkeypatch.setattr(cdw, "paid_api_usage_authorized", lambda: True)
+    worker = ClaudeDirectWorker()
+    await _run(
+        worker,
+        tmp_path=tmp_path,
+        model="haiku",
+        env={"ANTHROPIC_API_KEY": "sk-ant-api03-test"},
+    )
+    assert worker.last_billing_source is BillingSource.API_KEY
+
+
+@pytest.mark.asyncio
+async def test_no_credential_means_unknown_billing_not_a_free_run(
+    fake_cli, tmp_path: Path
+) -> None:
+    fake_cli()
+    worker = ClaudeDirectWorker()
+    await _run(worker, tmp_path=tmp_path, model="haiku", env={})
+    assert worker.last_billing_source is BillingSource.UNKNOWN

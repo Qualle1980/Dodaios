@@ -210,44 +210,57 @@ async def test_safe_mode_preserves_native_auth_without_loading_user_config(
     assert captured["env"]["USER"] == "tester"
 
 
-def test_resolve_claude_model_never_returns_foreign_slug() -> None:
-    """_resolve_claude_model must map any non-claude primary to a claude model,
-    honour a claude-api primary verbatim, and survive a None primary."""
-    # Foreign provider -> a claude model, never the foreign slug.
-    m = cdw._resolve_claude_model(_FallbackStep("gemini", "gemini-3.1-pro-preview"))
-    assert m != "gemini-3.1-pro-preview"
-    assert m.startswith("claude") or m in {"opus", "sonnet", "haiku"}
-    # claude-api primary with a model -> honoured verbatim.
+def test_configured_model_never_returns_a_foreign_slug() -> None:
+    """``_configured_claude_model`` reads the operator's Claude pin only.
+
+    A foreign chain model (``gemini-3.1-pro-preview``) is not a Claude model
+    and must never reach ``claude --model`` — the 2026-06-08 instant-fail bug.
+    The resolver answers "" for it and the policy picks the tier instead.
+    """
+    foreign = cdw._configured_claude_model(
+        _FallbackStep("gemini", "gemini-3.1-pro-preview")
+    )
+    assert "gemini" not in foreign
+    # A claude-api primary with a model IS an explicit approval of that tier.
     assert (
-        cdw._resolve_claude_model(_FallbackStep("claude-api", "claude-opus-4-8"))
+        cdw._configured_claude_model(_FallbackStep("claude-api", "claude-opus-4-8"))
         == "claude-opus-4-8"
     )
-    # None primary -> safe claude default, never a crash.
-    none_model = cdw._resolve_claude_model(None)
-    assert none_model.startswith("claude") or none_model in {"opus", "sonnet", "haiku"}
+    # A None primary must not crash; it simply configures nothing.
+    assert isinstance(cdw._configured_claude_model(None), str)
 
 
-def test_default_model_is_reachable_opus_never_fable(monkeypatch) -> None:
-    """Maintainer decision 2026-06-14 (supersedes the 2026-06-10 fable mandate):
+def test_the_last_resort_default_is_neither_fable_nor_premium(monkeypatch) -> None:
+    """Two rules at once, and they no longer agree with the old constant.
+
     ``claude-fable-5`` is approved-access-only and the Claude Max subscription
     cannot reach it via the CLI ("Claude Fable 5 is currently unavailable",
-    live mission 019ec615) — so the last-resort default must be a model the
-    subscription CAN reach (``claude-opus-4-8``), never the unreachable fable.
+    live mission 019ec615), so it may never be the default — that part is the
+    maintainer decision of 2026-06-14 and still holds.
 
-    The module constant is the last line of defense when neither
-    ``[brain.sub_jarvis].model`` nor ``[brain.providers.claude-api].deep_model``
-    is configured; the worker's model-unavailable retry is the safety net on top.
+    What changed is the other half. The replacement default was
+    ``claude-opus-4-8``, the dearest tier, and because ``spawn()`` ignored the
+    caller's ``model`` it won over an explicit cheap pick: a mission asking for
+    haiku ran on Opus (live 2026-10-28). An absent configuration must resolve
+    DOWN, so the default is the middle tier.
     """
-    assert cdw._DEFAULT_CLAUDE_MODEL == "claude-opus-4-8"
-    # With config access broken entirely, the resolver must land on the
-    # reachable opus default — never the unreachable fable slug, never a crash.
-    # (load_config is imported function-locally, so patch it at its source.)
+    from jarvis.missions.workers.model_policy import (
+        DEFAULT_WORKER_MODEL,
+        ModelTier,
+        resolve_worker_model,
+        tier_of,
+    )
+
+    assert DEFAULT_WORKER_MODEL != "claude-fable-5"
+    assert tier_of(DEFAULT_WORKER_MODEL) is ModelTier.STANDARD
+
+    # With config access broken entirely, nothing is configured and the policy
+    # default applies — no crash, no premium tier.
     def _boom(*_a, **_k):
         raise RuntimeError("config unavailable")
 
     monkeypatch.setattr("jarvis.core.config.load_config", _boom)
-    resolved = cdw._resolve_claude_model(None)
-    assert resolved == "claude-opus-4-8"
-    assert resolved != "claude-fable-5", (
-        f"unreachable fable default resurfaced: {resolved!r}"
-    )
+    assert cdw._configured_claude_model(None) == ""
+    resolved = resolve_worker_model(requested="", configured="").model
+    assert resolved == DEFAULT_WORKER_MODEL
+    assert tier_of(resolved) < ModelTier.PREMIUM
