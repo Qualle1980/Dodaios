@@ -18,9 +18,16 @@
 # Prefer the known-good interpreter (a bare 'python' may be a deps-less venv on
 # this machine); fall back to whatever 'python'/'python3' resolves to. The
 # scripts are stdlib + git only, so any Python 3.x works. No Python at all -> skip.
+# A resolved interpreter is not a working one: on Windows, an unused
+# `python3`/`python` is a Microsoft Store stub that prints an install notice and
+# exits non-zero. Taking it would turn the fail-open path below into a hard
+# block with a misleading reason, so each candidate is run once before use.
+_py_works() { [ -n "$1" ] && "$1" -c "" >/dev/null 2>&1; }
+
 PY="/c/Program Files/Python311/python.exe"
-[ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"
-[ -n "$PY" ] || exit 0
+_py_works "$PY" || PY="$(command -v python 2>/dev/null)"
+_py_works "$PY" || PY="$(command -v python3 2>/dev/null)"
+_py_works "$PY" || exit 0
 
 # --- BRANCH gate (FAIL-CLOSED on a commit on main) ----------------------------
 # Local main mirrors origin/main and moves only by fast-forward. A commit made

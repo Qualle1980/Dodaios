@@ -138,3 +138,60 @@ async def test_a_halted_step_ends_the_loop_without_another_seat_call() -> None:
     assert out.status == "halted" and out.answer == ""
     assert seat.calls == ["facts", "plan", "ledger"]  # no final answer, no second ledger
     assert out.steps[0].result == "outcome: waiting_capacity"
+
+
+# ---- the seat-call budget --------------------------------------------------
+#
+# Live mission 01a17410 (2026-10-25) spent 37.6 s, 16 % of the run, on five
+# seat calls for a single-step order whose executor the user had already
+# named, which made "cut the conductor's calls" an obvious place to look.
+# These pin what each of those five calls is FOR, so a later saving has to
+# name the guarantee it drops instead of quietly dropping one.
+
+
+async def test_a_one_step_order_costs_exactly_five_seat_calls() -> None:
+    """2 planning + 1 progress per round + 1 final answer, and no more."""
+    seat = _Seat([_ledger(), _ledger(done=True)])
+    team = _Team()
+
+    outcome = await Conductor(seat, TEAM).run("List the TODOs in a.py", team)
+
+    assert outcome.status == "done"
+    assert outcome.rounds == 2
+    assert seat.calls == ["facts", "plan", "ledger", "ledger", "final"]
+
+
+async def test_the_second_progress_call_is_what_notices_the_order_is_done() -> None:
+    """It is not a spare round: without it nothing reports completion."""
+    seat = _Seat([_ledger(), _ledger(done=True)])
+
+    outcome = await Conductor(seat, TEAM).run("List the TODOs in a.py", _Team())
+
+    # One progress call per round, and the order finished on the second.
+    assert seat.calls.count("ledger") == outcome.rounds == 2
+    assert outcome.status == "done"
+
+
+async def test_a_stall_still_costs_its_replan_and_is_bounded() -> None:
+    """The progress call is also the stall detector; dropping it loses both."""
+    seat = _Seat([_ledger(progress=False), _ledger(progress=False)])
+
+    outcome = await Conductor(seat, TEAM, max_stalls=1, max_replans=1).run(
+        "List the TODOs in a.py", _Team()
+    )
+
+    assert outcome.replans == 1
+    assert "facts_update" in seat.calls and "plan_update" in seat.calls
+    assert outcome.status == "stopped"
+    assert seat.calls[-1] == "final"
+
+
+async def test_a_named_executor_is_still_the_conductors_to_choose() -> None:
+    """A saving must not start executing without a recorded decision."""
+    seat = _Seat([_ledger(nxt="claude-code"), _ledger(done=True)])
+    team = _Team()
+
+    outcome = await Conductor(seat, TEAM).run("Refactor a.py", team)
+
+    assert team.steps == [("claude-code", "List the TODOs in a.py")]
+    assert [entry.next_executor.answer for entry in outcome.ledgers][0] == "claude-code"

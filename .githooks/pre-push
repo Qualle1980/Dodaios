@@ -52,12 +52,19 @@ remote_url="$2"
 # dependencies. Cover POSIX and Windows layouts, then retain the historical
 # known-good Windows interpreter before falling back to PATH. No Python at all
 # -> fail OPEN.
+# A resolved interpreter is not a working one: on Windows, an unused
+# `python3`/`python` is a Microsoft Store stub that prints an install notice and
+# exits non-zero. Taking it would turn the fail-open path below into a hard
+# block with a misleading reason, so each candidate is run once before use.
+_py_works() { [ -n "$1" ] && "$1" -c "" >/dev/null 2>&1; }
+
 PY=".venv/bin/python3"
-[ -x "$PY" ] || PY=".venv/bin/python"
-[ -x "$PY" ] || PY=".venv/Scripts/python.exe"
-[ -x "$PY" ] || PY="/c/Program Files/Python311/python.exe"
-[ -x "$PY" ] || PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"
-[ -n "$PY" ] || exit 0
+_py_works "$PY" || PY=".venv/bin/python"
+_py_works "$PY" || PY=".venv/Scripts/python.exe"
+_py_works "$PY" || PY="/c/Program Files/Python311/python.exe"
+_py_works "$PY" || PY="$(command -v python 2>/dev/null)"
+_py_works "$PY" || PY="$(command -v python3 2>/dev/null)"
+_py_works "$PY" || exit 0
 
 # Read all pushed refs from stdin FIRST (into a temp file), so each gate's own
 # subprocess can never consume the hook's stdin pipe and corrupt the loop.

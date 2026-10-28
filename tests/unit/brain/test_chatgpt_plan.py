@@ -417,6 +417,106 @@ def test_model_catalog_keeps_listed_rows(plan, fake) -> None:
     ]
 
 
+def _two_models() -> tuple[int, dict[str, Any]]:
+    return (
+        200,
+        {
+            "models": [
+                {"slug": "gpt-a", "display_name": "GPT A", "visibility": "list"},
+                {"slug": "gpt-b", "visibility": "list"},
+            ]
+        },
+    )
+
+
+def _model_fetches(fake: FakeOpenAI) -> int:
+    return sum(1 for url, _ in fake.calls if url == MODELS_URL)
+
+
+def test_the_model_list_is_fetched_once_for_a_run_of_calls(plan, fake) -> None:
+    """The conductor resolves a model before EVERY seat call; one order made
+    five of them, and the account's plan cannot change between them."""
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+
+    first = plan.models()
+    for _ in range(4):
+        assert plan.models() == first
+
+    assert _model_fetches(fake) == 1
+
+
+def test_an_explicit_refresh_always_asks_the_server(plan, fake) -> None:
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+    plan.models()
+
+    plan.models(refresh=True)
+
+    assert _model_fetches(fake) == 2
+
+
+def test_a_different_account_never_reads_the_previous_list(plan, fake) -> None:
+    """The key is the account, so no TTL has to expire for a switch to land."""
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+    assert [row["slug"] for row in plan.models()] == ["gpt-a", "gpt-b"]
+
+    data = plan.store.read()
+    data["sub"] = "user-2"
+    plan.store.write(data)
+    fake.models_reply = (
+        200,
+        {"models": [{"slug": "gpt-c", "visibility": "list"}]},
+    )
+
+    assert [row["slug"] for row in plan.models()] == ["gpt-c"]
+    assert _model_fetches(fake) == 2
+
+
+def test_a_sign_out_drops_the_cached_list(plan, fake) -> None:
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+    plan.models()
+
+    plan.logout()
+    _signed_in(plan)
+    plan.models()
+
+    assert _model_fetches(fake) == 2
+
+
+def test_an_expired_list_is_fetched_again(plan, fake, monkeypatch) -> None:
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+    plan.models()
+
+    clock = time.monotonic() + chatgpt_plan_auth.MODELS_TTL_S + 1.0
+    monkeypatch.setattr(chatgpt_plan_auth.time, "monotonic", lambda: clock)
+    plan.models()
+
+    assert _model_fetches(fake) == 2
+
+
+def test_an_empty_list_is_not_held_onto(plan, fake) -> None:
+    """Callers treat "no models" as a hard error, so it must stay askable."""
+    _signed_in(plan)
+    fake.models_reply = (200, {"models": []})
+    assert plan.models() == []
+
+    fake.models_reply = _two_models()
+    assert [row["slug"] for row in plan.models()] == ["gpt-a", "gpt-b"]
+    assert _model_fetches(fake) == 2
+
+
+def test_a_caller_cannot_mutate_the_cached_list(plan, fake) -> None:
+    _signed_in(plan)
+    fake.models_reply = _two_models()
+    plan.models()[0]["slug"] = "tampered"
+
+    assert [row["slug"] for row in plan.models()] == ["gpt-a", "gpt-b"]
+
+
 def test_model_catalog_failure(plan, fake) -> None:
     _signed_in(plan)
     fake.models_reply = (403, {})

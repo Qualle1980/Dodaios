@@ -34,6 +34,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
+from jarvis.missions.timing import timed
 
 logger = logging.getLogger(__name__)
 
@@ -317,11 +318,13 @@ class WorktreeManager:
             base_branch,
         ]
         logger.info("WorktreeManager.create: %s", " ".join(cmd))
-        self._run_worktree_add(cmd, workspace)
+        with timed("worktree.checkout", task_part, always=True):
+            self._run_worktree_add(cmd, workspace)
 
         # Record the base commit (the forked-from HEAD) so the Kontrollierer can
         # diff against it and capture files the worker later ``git commit``s.
-        self._write_base_sha(workspace)
+        with timed("worktree.base_sha", task_part):
+            self._write_base_sha(workspace)
         return workspace
 
     # Identity used for the lean repo's initial commit. A fresh ``git init``
