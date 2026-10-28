@@ -1232,6 +1232,13 @@ async def bootstrap_missions(
     cleanup_daily: bool = False,
     # Orchestrator flags (from [phase6.orchestrator])
     max_workers: int = 5,
+    # Isolation flags (from [phase6.isolation]). How many finished task
+    # worktrees may be kept and reused instead of rebuilt. The checkout is the
+    # dominant cost of mission setup (27 s median, 53 s cold, against 0.67 s
+    # for a reused tree — benchmark 2026-10-27), and one slot already covers
+    # the common single-task mission. ``0`` restores the previous behaviour of
+    # building and destroying a checkout per task.
+    workspace_pool_size: int = 1,
     # Wave-4 Y: speech bus for MissionAnnouncer (Mission-Bus -> Speech-Bus bridge).
     # When None: no announcer is started — Wave-3 behaviour.
     speech_bus: _SpeechEventBus | None = None,
@@ -1334,6 +1341,7 @@ async def bootstrap_missions(
     worktree_mgr = WorktreeManager(
         repo_root=repo_root,
         outputs_root=isolation_root,
+        pool_size=workspace_pool_size,
     )
 
     # H6 (2026-05-17 audit): one-shot boot-time sweep of leaked worktree

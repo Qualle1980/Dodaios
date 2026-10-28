@@ -3316,6 +3316,13 @@ class WebServer:
             cleanup_startup_sweep=True,
             cleanup_daily=False,
             max_workers=5,
+            # One reusable task workspace. The per-task checkout is the
+            # dominant cost of mission setup on a spinning disk (27 s median,
+            # 53 s from cold, against 0.67 s for a reused tree — benchmark
+            # 2026-10-27), and a single slot already covers the common
+            # one-task mission. Nothing is pre-built: the first mission's
+            # worktree becomes the slot when it finishes.
+            workspace_pool_size=1,
         )
 
         self.app.state.mission_manager = result["manager"]
