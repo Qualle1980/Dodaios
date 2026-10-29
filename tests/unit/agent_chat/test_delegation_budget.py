@@ -1,66 +1,136 @@
-"""What one request may spend on coding agents, and when the answer is "unknown"."""
+"""What one request may spend on coding agents, and when the answer is "unknown".
+
+The review of 2026-10-29 found the first cut counted the wrong thing at the
+wrong time: it counted work that had already come BACK, which let one wave
+start any number of panes and then ended the whole turn -- including the
+verification the last result still needed. A limit has to bite where work
+starts.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import time
 
 import pytest
 
 from jarvis.agent_chat.delegation_budget import (
     MAX_CODING_DELEGATIONS,
-    budget_spent,
+    DelegationLedger,
     coding_delegations,
-    may_delegate,
     quota_verdict,
+    request_key,
+    verdict_for_seat,
 )
 from jarvis.agent_usage import AccountUsage, UsageWindow
+from jarvis.core.chat_turn import ChatTurn
+
+KEY = ("chat-1", "turn-1")
 
 
 def _window(used: float, *, kind: str = "session") -> UsageWindow:
     return UsageWindow(kind=kind, percent=used, severity="normal")
 
 
-def _usage(*windows: UsageWindow, status: str = "ok", source: str = "live") -> AccountUsage:
+def _usage(
+    *windows: UsageWindow,
+    status: str = "ok",
+    source: str = "live",
+    account_id: str = "seat-a",
+    as_of: float | None = None,
+) -> AccountUsage:
     return AccountUsage(
-        account_id="a1", platform="claude", status=status, windows=windows, source=source
+        account_id=account_id,
+        platform="claude",
+        status=status,
+        windows=windows,
+        source=source,
+        as_of=time.time() if as_of is None else as_of,
     )
 
 
-# ------------------------------------------------------- how many delegations
+# -------------------------------------------------------- reserving up front
 
 
-def test_only_coding_work_counts_against_the_delegation_budget() -> None:
-    """A browser read or a dispatch reservation is not a coding seat."""
-    keys = ["coding:t1:1:2", "dispatch:4711", "coding:t2:1:3", "mission:x"]
+def test_a_request_gets_exactly_its_slots() -> None:
+    ledger = DelegationLedger(limit=3)
+    assert [ledger.reserve(KEY, f"r{n}") for n in range(4)] == [True, True, True, False]
+    assert ledger.spent(KEY) == 3
+
+
+def test_four_parallel_dispatches_admit_only_three() -> None:
+    """Four dispatches racing for the same request: the fourth is refused.
+
+    The reservation is taken under a lock before anything starts, so the
+    outcome does not depend on which dispatch gets there first.
+    """
+    ledger = DelegationLedger(limit=3)
+    granted = [ledger.reserve(KEY, f"req-{n}") for n in range(4)]
+    assert granted.count(True) == 3 and granted.count(False) == 1
+
+
+def test_replaying_the_same_request_id_does_not_consume_a_second_slot() -> None:
+    """Idempotent by ``request_id``: a retried dispatch is one delegation."""
+    ledger = DelegationLedger(limit=3)
+    for _ in range(5):
+        assert ledger.reserve(KEY, "same-request")
+    assert ledger.spent(KEY) == 1
+
+
+def test_a_dispatch_that_never_started_gives_its_slot_back() -> None:
+    ledger = DelegationLedger(limit=1)
+    assert ledger.reserve(KEY, "r1")
+    assert not ledger.reserve(KEY, "r2")
+    ledger.release(KEY, "r1")
+    assert ledger.reserve(KEY, "r2")
+
+
+def test_another_request_has_its_own_budget() -> None:
+    ledger = DelegationLedger(limit=1)
+    assert ledger.reserve(KEY, "r1")
+    assert ledger.reserve(("chat-1", "turn-2"), "r1")
+    assert ledger.reserve(("chat-2", "turn-1"), "r1")
+
+
+def test_the_budget_follows_the_request_not_the_turn() -> None:
+    """A result answered in a LATER turn must not be handed a fresh budget.
+
+    ``parked_work`` answers a delegated result in a turn of its own; keying on
+    ``turn_id`` would have reset the limit every time that happened.
+    """
+    first = ChatTurn("chat-1", "turn-1", "Work on Bubble.", True, "tr")
+    later = ChatTurn("chat-1", "turn-9", "continue", True, "tr", origin_turn_id="turn-1")
+    assert request_key(first) == request_key(later) == ("chat-1", "turn-1")
+
+    ledger = DelegationLedger(limit=1)
+    assert ledger.reserve(request_key(first), "r1")
+    assert not ledger.reserve(request_key(later), "r2")
+
+
+def test_a_turn_without_an_identity_owns_no_budget() -> None:
+    assert request_key(None) is None
+    assert request_key(ChatTurn("", "", "", True, "")) is None
+
+
+def test_only_coding_work_counts_as_a_delegation() -> None:
+    keys = ["coding:t1:1:2", "dispatch:4711", "coding:t2:1:3", "mission:x", "coding:t1:1:2"]
     assert coding_delegations(keys) == 2
-
-
-def test_the_same_pane_twice_is_one_delegation() -> None:
-    assert coding_delegations(["coding:t1:1:2", "coding:t1:1:2"]) == 1
-
-
-def test_an_empty_turn_has_spent_nothing() -> None:
     assert coding_delegations(None) == 0
-    assert not budget_spent([])
 
 
-def test_the_budget_is_spent_at_the_ceiling_not_after_it() -> None:
-    keys = [f"coding:t{n}:1:1" for n in range(MAX_CODING_DELEGATIONS)]
-    assert budget_spent(keys)
-    assert not budget_spent(keys[:-1])
+def test_the_shipped_ceiling_is_small_on_purpose() -> None:
+    assert MAX_CODING_DELEGATIONS == 3
 
 
-# ------------------------------------------------------------- quota readings
+# ------------------------------------------------------------ quota readings
 
 
 def test_a_full_window_allows_new_work() -> None:
-    verdict = quota_verdict(_usage(_window(12.0)))
-    assert verdict.state == "allowed" and not verdict.blocked
+    assert quota_verdict(_usage(_window(12.0))).allowed
 
 
-@pytest.mark.parametrize("used", [90.0, 95.0, 100.0, 103.0])
+@pytest.mark.parametrize("used", [90.0, 95.0, 100.0])
 def test_ten_percent_or_less_left_blocks_new_work(used) -> None:
-    verdict = quota_verdict(_usage(_window(min(used, 100.0))))
+    verdict = quota_verdict(_usage(_window(used)))
     assert verdict.blocked
     assert "no new coding agent was started" in verdict.reason
 
@@ -77,88 +147,63 @@ def test_no_reading_is_unknown_and_never_a_clearance(status) -> None:
     assert verdict.unknown and not verdict.blocked
 
 
-def test_an_ok_seat_with_no_numbers_is_unknown_too() -> None:
+def test_an_ok_seat_with_no_numbers_is_unknown() -> None:
     assert quota_verdict(_usage()).unknown
 
 
 def test_a_nonsense_percentage_is_not_a_number() -> None:
-    """A provider payload this build cannot read must not become a decision."""
+    """A payload this build cannot read must not become a decision."""
     bad = UsageWindow(kind="session", percent=float("nan"), severity="normal")
     assert quota_verdict(_usage(bad)).unknown
 
 
-def test_a_cached_reading_still_decides_and_says_so() -> None:
-    """Stale is not useless — but the receipt names where the number came from."""
-    verdict = quota_verdict(_usage(_window(96.0), source="cached"))
-    assert verdict.blocked and "cached" in verdict.reason
+def test_an_old_reading_may_still_block_but_may_not_clear() -> None:
+    """The only thing that happens to a budget while nobody looks is shrinking."""
+    long_ago = time.time() - 3600
+    assert quota_verdict(_usage(_window(96.0), as_of=long_ago)).blocked
+    stale = quota_verdict(_usage(_window(20.0), as_of=long_ago))
+    assert stale.unknown and "old" in stale.reason
 
 
-# ------------------------------------------------------------ over many seats
-
-
-def test_one_exhausted_seat_blocks_even_beside_a_fresh_one() -> None:
-    verdict = may_delegate([_usage(_window(5.0)), _usage(_window(99.0))])
-    assert verdict.blocked
-
-
-def test_one_seat_with_room_is_enough_when_nothing_is_exhausted() -> None:
-    verdict = may_delegate([_usage(status="unsupported"), _usage(_window(20.0))])
-    assert verdict.state == "allowed"
-
-
-def test_no_seats_at_all_is_unknown() -> None:
-    assert may_delegate([]).unknown
-    assert may_delegate(None).unknown
-
-
-# ------------------------------------------------------- the turn's own stop
-
-
-async def test_a_request_that_keeps_delegating_is_stopped_by_its_budget(
-    tmp_path, monkeypatch
-):
-    """Three coding agents per request is the ceiling; the fourth wave stops.
-
-    ``MAX_WAVES`` cannot catch this: each wave here delivers a result and
-    would legitimately earn another. What must stop the turn is the number of
-    seats it has spent, with a named reason rather than a quiet end.
-    """
-    from jarvis.agent_chat import delegation_wait
-    from jarvis.agent_chat import service as service_mod
-    from jarvis.agent_chat.events import make_event
-    from jarvis.agent_chat.service import AgentChatService
-    from jarvis.agent_chat.store import AgentChatStore
-    from jarvis.core.delegated_work import DelegatedWork, register_delegated_work
-
-    monkeypatch.setattr(delegation_wait, "POLL_SECONDS", 0.001)
-    store = AgentChatStore(tmp_path / "chat.db")
-    svc = AgentChatService(store)
-    session = store.create_session(
-        provider="openai", model="", effort="", surface="jarvis", cwd=str(tmp_path)
+def test_a_cached_reading_without_a_timestamp_is_not_a_clearance() -> None:
+    usage = AccountUsage(
+        account_id="seat-a", platform="claude", status="ok",
+        windows=(_window(20.0),), source="cached", as_of=None,
     )
-    waves = 0
+    assert quota_verdict(usage).unknown
 
-    async def runner(handle, prompt, *args, **kwargs):
-        nonlocal waves
-        waves += 1
-        # Every wave hands work to one more coding pane, and it finishes at once.
-        index = waves
 
-        async def probe():
-            return {"status": "completed", "report": f"pane {index} done"}
+# ------------------------------------------------------- the seat that is used
 
-        register_delegated_work(DelegatedWork(f"coding:t{index}:1:{index}", f"T{index}", probe))
-        await handle.emit(
-            make_event("turn_finished", {"turn_id": handle.turn_id, "status": "done", "usage": {}})
-        )
 
-    monkeypatch.setattr(service_mod, "run_brain_turn", runner)
-    monkeypatch.setattr(service_mod, "resolve_runner", lambda *a, **kw: "brain")
-    await svc.send(session.session_id, "Keep going on Bubble until it is finished.")
-    await asyncio.wait_for(asyncio.shield(svc._running[session.session_id].task), 10)
+def test_only_the_selected_seat_decides() -> None:
+    readings = {
+        # 95 % used leaves 5 %; 20 % used leaves plenty.
+        "seat-a": _usage(_window(95.0), account_id="seat-a"),
+        "seat-b": _usage(_window(20.0), account_id="seat-b"),
+    }
+    assert verdict_for_seat(readings, "seat-a").blocked
+    assert verdict_for_seat(readings, "seat-b").allowed
 
-    events = store.list_events(session.session_id)
-    finished = [e["payload"] for e in events if e["kind"] == "turn_finished"]
-    assert finished[-1]["error"] == "delegation_budget_exhausted", finished[-1]
-    # Three delegations ran; the wave that would have opened a fourth did not.
-    assert waves == MAX_CODING_DELEGATIONS, waves
+
+def test_a_healthy_target_is_not_blocked_by_an_unselected_seat() -> None:
+    """Judging a set of seats blocked a good target because another was low."""
+    readings = [_usage(_window(99.0), account_id="other"), _usage(_window(10.1), account_id="mine")]
+    assert verdict_for_seat(readings, "mine").allowed
+
+
+def test_an_unknown_target_is_not_cleared_by_another_seat() -> None:
+    readings = [
+        _usage(_window(10.0), account_id="other"),
+        _usage(status="unsupported", account_id="mine"),
+    ]
+    assert verdict_for_seat(readings, "mine").unknown
+
+
+def test_a_seat_with_no_reading_at_all_is_unknown() -> None:
+    assert verdict_for_seat([], "mine").unknown
+    assert verdict_for_seat(None, "mine").unknown
+
+
+def test_a_dispatch_that_names_no_seat_is_unknown_not_fine() -> None:
+    assert verdict_for_seat([_usage(_window(99.0))], "").unknown

@@ -107,6 +107,13 @@ class ScriptedChief:
             **self._tools,
             **dict(getattr(override, "tools_extra", {}) or {}),
         }
+        # The manager applies ``tool_filter`` LAST, over the merged surface
+        # (``jarvis/brain/turn_override.py``). A fake that skipped it would
+        # hand itself tools no real turn gets -- and would miss the wrappers a
+        # filter installs, which is how the acceptance gate records receipts.
+        narrow = getattr(override, "tool_filter", None)
+        if callable(narrow):
+            surface = narrow(dict(surface))
         briefing = str(getattr(override, "system_extra", "") or "")
         script = self._waves[self.wave] if self.wave < len(self._waves) else Wave(reply="")
         self.wave += 1
