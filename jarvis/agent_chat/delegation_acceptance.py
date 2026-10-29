@@ -296,8 +296,10 @@ _UNVERIFIED: dict[str, str] = {
     ),
     # i18n-allow: runtime chat output
     "de": (
-        "Der Coding-Agent meldet seine Arbeit als fertig, das ist aber nicht geprüft: "  # i18n-allow: DE chat output
-        "ich habe den Diff nicht gelesen{tests}. Sag ein Wort, dann sehe ich mir die "  # i18n-allow: DE chat output
+        "Der Coding-Agent meldet seine Arbeit als fertig, "  # i18n-allow: DE chat output
+        "das ist aber nicht geprüft: "  # i18n-allow: DE chat output
+        "ich habe den Diff nicht gelesen{tests}. "  # i18n-allow: DE chat output
+        "Sag ein Wort, dann sehe ich mir die "  # i18n-allow: DE chat output
         "Änderung an und lasse die Tests laufen."  # i18n-allow: DE chat output
     ),
     # i18n-allow: runtime chat output
