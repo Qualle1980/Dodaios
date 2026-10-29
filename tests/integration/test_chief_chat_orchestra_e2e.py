@@ -113,9 +113,17 @@ class FakePane:
 
 
 class FakeWorkspace:
-    def __init__(self, pane: FakePane, *, project: str = "p1") -> None:
+    """One open workspace: its project, its checkout on disk, its panes.
+
+    ``folder`` is load-bearing now: the handback carries it so the chief's
+    verification can be checked against the checkout the work was done in
+    (``jarvis/agent_chat/delegation_acceptance.py``).
+    """
+
+    def __init__(self, pane: FakePane, *, project: str = "p1", folder: Path | str = "") -> None:
         self.id = uuid4().hex
         self.project_id = project
+        self.folder = str(folder or "")
         self.terminals = [pane]
 
 
@@ -244,6 +252,9 @@ def chat(tmp_path, monkeypatch):
             "reader": reader,
         }
 
+    # The checkout the panes work in, so a test can bind its fake workspace to
+    # it before it opens the chat.
+    build.project = project
     return build
 
 
@@ -318,7 +329,7 @@ async def test_a_status_question_is_answered_from_the_project_without_any_agent(
 async def test_a_hard_step_is_delegated_as_a_bounded_brief_not_the_original_order(chat):
     """Case 2: read first, then send ONE narrow brief — never the person's whole order."""
     pane = FakePane(name="T1")
-    workspace = FakeWorkspace(pane)
+    workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
     brief = {
@@ -379,7 +390,7 @@ async def test_a_cli_completion_alone_may_not_be_reported_as_a_pass(chat):
     for the person, and it must not have STREAMED one either.
     """
     pane = FakePane(name="T1")
-    workspace = FakeWorkspace(pane)
+    workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
     rig = chat(
@@ -412,7 +423,7 @@ async def test_a_cli_completion_alone_may_not_be_reported_as_a_pass(chat):
 async def test_an_independent_git_and_test_read_is_what_makes_a_pass(chat):
     """Case 4: the chief reads the real diff and runs the real tests — then PASS stands."""
     pane = FakePane(name="T1")
-    workspace = FakeWorkspace(pane)
+    workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
 
@@ -488,7 +499,7 @@ async def test_a_blocked_or_failed_agent_is_never_accepted_and_never_retried(
 ):
     """Case 5: a permission question or a crashed turn ends the wait honestly."""
     pane = FakePane(name="T1")
-    workspace = FakeWorkspace(pane)
+    workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
     rig = chat(
@@ -527,8 +538,8 @@ async def test_two_waiting_projects_keep_their_own_results(chat):
     """Case 6: two panes in two projects report back without crossing over."""
     pane_a = FakePane(name="T1", project="p-a")
     pane_b = FakePane(name="T2", project="p-b")
-    ws_a = FakeWorkspace(pane_a, project="p-a")
-    ws_b = FakeWorkspace(pane_b, project="p-b")
+    ws_a = FakeWorkspace(pane_a, project="p-a", folder=chat.project)
+    ws_b = FakeWorkspace(pane_b, project="p-b", folder=chat.project)
     registry = FakeRegistry((ws_a, pane_a), (ws_b, pane_b))
     delegate = DelegateTool(registry, {"T1": (ws_a, pane_a), "T2": (ws_b, pane_b)})
     rig = chat(
@@ -572,7 +583,7 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
     so, not count the prompt as work.
     """
     pane = FakePane(name="T1")
-    workspace = FakeWorkspace(pane)
+    workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
     rig = chat(
@@ -603,3 +614,127 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
     assert "calc.py" not in str(status.result.output), status.result.output
     assert "PASS" not in _said(events).upper()
     assert len(delegate.briefs) == 1
+
+
+# ------------------------------------------------- the request's own budget
+
+
+class FakeGateway:
+    """The orchestration gateway, as ``workspace-orchestrate`` talks to it."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(self, args: dict[str, Any], *, trace_id: str = "") -> dict[str, Any]:
+        self.calls.append(dict(args))
+        return {
+            "status": "accepted",
+            "success": True,
+            "target": {"workspace_id": "w1", "terminal_id": "T1"},
+            "submitted": True,
+            "completed": False,
+        }
+
+
+async def test_a_fourth_coding_agent_is_refused_before_it_starts(chat):
+    """The limit has to bite at the dispatch, not after the work comes back.
+
+    Counting handed-back work let one wave open any number of panes first,
+    and then ended the whole turn -- taking the final verification with it.
+    Found by review, 2026-10-29. This drives the real
+    ``WorkspaceOrchestrationTool``, so the refusal is the product's own.
+    """
+    from jarvis.brain.workspace_tool import WorkspaceOrchestrationTool
+
+    gateway = FakeGateway()
+    tool = WorkspaceOrchestrationTool(gateway)
+    sends = tuple(
+        Call(
+            tool.name,
+            {
+                "action": "send",
+                "workspace_id": "w1",
+                "terminal_id": "T1",
+                "request_id": f"req-{n}",
+                "prompt": f"Bounded step {n}.",
+            },
+        )
+        for n in range(4)
+    )
+    rig = chat(
+        [Wave(calls=sends, reply="I handed out what I was allowed to.")],
+        tools={tool.name: tool},
+    )
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    chief: ScriptedChief = rig["chief"]
+    outcomes = [e.result.success for e in chief.executed]
+    assert outcomes == [True, True, True, False], outcomes
+    # Only three reached the orchestrator at all: the fourth never started.
+    assert len(gateway.calls) == 3
+    refused = chief.executed[-1].result.output
+    assert refused["status"] == "not_accepted" and refused["input_written"] is False
+    assert "limit" in refused["reason"]
+    # And the turn still answers: a spent budget is not a broken turn.
+    assert _finished(events)[-1]["status"] == "done"
+    assert not _finished(events)[-1].get("error")
+
+
+async def test_the_same_assignment_retried_keeps_its_own_slot(chat):
+    """Replay is one delegation. ``request_id`` makes the reservation idempotent."""
+    from jarvis.brain.workspace_tool import WorkspaceOrchestrationTool
+
+    gateway = FakeGateway()
+    tool = WorkspaceOrchestrationTool(gateway)
+    same = {
+        "action": "send",
+        "workspace_id": "w1",
+        "terminal_id": "T1",
+        "request_id": "one-assignment",
+        "prompt": "Add subtract().",
+    }
+    rig = chat(
+        [Wave(calls=tuple(Call(tool.name, dict(same)) for _ in range(5)), reply="Sent once.")],
+        tools={tool.name: tool},
+    )
+    await _run(rig, CONTINUE_REQUEST)
+
+    chief: ScriptedChief = rig["chief"]
+    assert [e.result.success for e in chief.executed] == [True] * 5
+    assert len(gateway.calls) == 5
+
+
+async def test_a_dispatch_that_started_nothing_gives_its_slot_back(chat):
+    """A refused or stale target must not cost the request a delegation."""
+    from jarvis.brain.workspace_tool import WorkspaceOrchestrationTool
+
+    class _Refusing(FakeGateway):
+        async def run(self, args, *, trace_id=""):
+            self.calls.append(dict(args))
+            if len(self.calls) <= 3:
+                return {"status": "stale_target", "success": False, "reason": "gone"}
+            return {"status": "accepted", "success": True, "submitted": True}
+
+    gateway = _Refusing()
+    tool = WorkspaceOrchestrationTool(gateway)
+    calls = tuple(
+        Call(
+            tool.name,
+            {
+                "action": "send",
+                "workspace_id": "w1",
+                "terminal_id": "T1",
+                "request_id": f"r{n}",
+                "prompt": "Step.",
+            },
+        )
+        for n in range(4)
+    )
+    rig = chat([Wave(calls=calls, reply="Three missed, one landed.")], tools={tool.name: tool})
+    await _run(rig, CONTINUE_REQUEST)
+
+    chief: ScriptedChief = rig["chief"]
+    # Three stale targets, then a real one: all four reached the orchestrator,
+    # because the three that started nothing returned their slots.
+    assert len(gateway.calls) == 4
+    assert [e.result.success for e in chief.executed] == [False, False, False, True]
