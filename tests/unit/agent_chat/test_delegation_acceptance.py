@@ -205,10 +205,12 @@ async def test_only_a_successful_tool_call_becomes_evidence() -> None:
     trace = uuid4()
     watch = EvidenceWatch(bus, trace)
     watch.start()
-    await bus.publish(ActionProposed(trace_id=trace, tool_name="RunCommand", args={"command": "git diff"}))
+    diff = {"command": "git diff"}
+    await bus.publish(ActionProposed(trace_id=trace, tool_name="RunCommand", args=diff))
     await bus.publish(ActionExecuted(trace_id=trace, tool_name="RunCommand", success=False))
     assert not watch.evidence.version_control
-    await bus.publish(ActionProposed(trace_id=trace, tool_name="RunCommand", args={"command": "git diff"}))
+    diff = {"command": "git diff"}
+    await bus.publish(ActionProposed(trace_id=trace, tool_name="RunCommand", args=diff))
     await bus.publish(ActionExecuted(trace_id=trace, tool_name="RunCommand", success=True))
     assert watch.evidence.version_control
     assert not watch.evidence.tests
@@ -221,7 +223,9 @@ async def test_another_turn_s_tool_calls_are_not_this_turn_s_evidence() -> None:
     watch = EvidenceWatch(bus, uuid4())
     watch.start()
     other = uuid4()
-    await bus.publish(ActionProposed(trace_id=other, tool_name="RunCommand", args={"command": "git diff"}))
+    await bus.publish(
+        ActionProposed(trace_id=other, tool_name="RunCommand", args={"command": "git diff"})
+    )
     await bus.publish(ActionExecuted(trace_id=other, tool_name="RunCommand", success=True))
     assert not watch.evidence.version_control
     watch.stop()
