@@ -64,7 +64,12 @@ async def test_claude_cache_preserves_oauth_header_and_stream_usage(
     monkeypatch.setenv("JARVIS_ANTHROPIC_PROMPT_CACHE", "1")
     wire = AnthropicWire()
     wire.intermediate_usage = intermediate_usage
-    async with AsyncAnthropic(api_key="", auth_token="test-only",  # noqa: S106 - local fake
+    # One credential only. The SDK refuses two (`api_key=` next to
+    # `auth_token=`) from 1.x on, and the empty key never carried meaning
+    # here: the OAuth path is what `auth_token` plus the beta header below
+    # establish. The lane installs `-e .`, so it tracks the SDK's own
+    # releases rather than the pinned requirements file (AP-28).
+    async with AsyncAnthropic(auth_token="test-only",  # noqa: S106 - local fake
         default_headers={"anthropic-beta": "oauth-2025-04-20"},
         http_client=wire.client(),
     ) as client:
