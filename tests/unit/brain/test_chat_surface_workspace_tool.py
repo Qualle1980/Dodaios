@@ -166,3 +166,15 @@ def test_a_failing_gateway_never_blinds_the_brain(
     monkeypatch.setattr(runtime_refs, "get_supervisor_tool_gateway", _boom)
     before = _registry()
     assert BrainManager._offer_addressed_workspace_tool(None, before) == before
+
+
+
+def test_addressed_coding_tool_requires_supervisor_first_look() -> None:
+    from jarvis.brain.workspace_tool import WorkspaceOrchestrationTool
+
+    description = WorkspaceOrchestrationTool.description
+    assert "first inspect and read the named project" in description
+    assert "complete cheap simple steps directly" in description
+    assert "NOT the entire user's original project goal" in description
+    assert "independently verify it" in description
+    assert "Explicit requests to start a named coding agent" in description
