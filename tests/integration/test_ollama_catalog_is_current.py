@@ -42,7 +42,10 @@ _ACCEPT = {"Accept": "application/vnd.docker.distribution.manifest.v2+json"}
 
 #: Every tag the 2026-08-24 shortlist refresh names, listed here so a retired
 #: one fails by NAME even if someone trims it from RECOMMENDED_MODELS without
-#: reading this file. Verified against the registry manifests on that date.
+#: reading this file. Verified against the registry manifests on that date,
+#: except ``qwen3-vl:2b-instruct``, re-verified on 2026-10-29 when the plain
+#: ``2b`` tag crossed a year old. The other tags were NOT re-reviewed then,
+#: so ``CURATED_REVIEWED_ON`` deliberately still reads 2026-08-24.
 _SHORTLIST_2026_08_24 = (
     "granite4.1:3b",
     "qwen3.5:4b",
@@ -52,7 +55,7 @@ _SHORTLIST_2026_08_24 = (
     "gemma4:26b-a4b-it-qat",
     "qwen3.8:27b",
     "nemotron-3.5-lightning",
-    "qwen3-vl:2b",
+    "qwen3-vl:2b-instruct",
     "ornith:9b",
     "qwen3.6:27b",
     "muse-glimmer:30b",
