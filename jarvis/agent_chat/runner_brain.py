@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
 
 from jarvis.agent_chat.approval_bridge import ChatApprovalBridge, ChatGrant, approval_ref
+from jarvis.agent_chat.delegation_acceptance import EvidenceWatch
 from jarvis.agent_chat.effort import normalize_effort
 from jarvis.agent_chat.events import make_event
 from jarvis.agent_chat.folder_tools import PLAN_STANCE, folder_tools, plan_filter
@@ -44,6 +45,7 @@ from jarvis.agent_chat.tool_catalog import ToolChoice
 from jarvis.agent_chat.tools import summarize_call
 from jarvis.brain.turn_override import TurnOverride
 from jarvis.core.protocols import BrainMessage, ReasoningEffort, Tool
+from jarvis.core.turn_language import DEFAULT_LOCALE
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -428,6 +430,13 @@ async def run_brain_turn(
         await handle.emit(make_event(kind, payload))
 
     mirror = _StepMirror(emit, turn_id, handle.bus, handle.trace_id)
+    # Set when this wave answers a coding agent whose "done" nobody has
+    # checked: the turn may not call that work good without its own git and
+    # test evidence (``delegation_acceptance``). Until the gate has judged,
+    # nothing of this answer is shown — a rewritten verdict must not arrive
+    # after the person has already read the claim.
+    gate = getattr(handle, "acceptance_gate", None)
+    watch = EvidenceWatch(handle.bus, handle.trace_id) if gate is not None else None
     ref = approval_ref(session.session_id)
 
     async def finish(
@@ -552,6 +561,8 @@ async def run_brain_turn(
     # sentence it writes next to one lands in the timeline as it happens.
     await emit("reasoning_started", {"turn_id": turn_id, "message_id": message_id})
     mirror.start()
+    if watch is not None:
+        watch.start()
 
     loop = asyncio.get_running_loop()
     seen: list[str] = []
@@ -561,6 +572,9 @@ async def run_brain_turn(
         if not chunk:
             return
         seen.append(chunk)
+        if gate is not None:
+            # Buffered, not streamed: see ``gate`` above.
+            return
         # The consumer is synchronous (the brain's contract); hand the emit
         # back to the loop rather than blocking the producer.
         asyncio.run_coroutine_threadsafe(
@@ -582,11 +596,35 @@ async def run_brain_turn(
         if bridge is not None:
             bridge.disarm(ref)
         mirror.stop()
+        if watch is not None:
+            watch.stop()
 
     if status == "done" and handle.cancel.is_set():
         status = "cancelled"
     if status == "done":
         answer = (reply or "").strip() or "".join(seen).strip()
+        if answer and gate is not None and watch is not None:
+            rewritten = gate.verdict(
+                answer, watch.evidence, language=handle.output_language or DEFAULT_LOCALE
+            )
+            if rewritten is not None:
+                log.warning(
+                    "Delegated coding work %s was reported as good with no independent "
+                    "evidence (missing: %s; tools seen: %s) — answering honestly instead.",
+                    list(gate.work),
+                    ", ".join(watch.evidence.missing()),
+                    sorted(set(watch.evidence.seen)),
+                )
+                answer = rewritten
+                await emit(
+                    "notice",
+                    {
+                        "kind": "delegation_unverified",
+                        "turn_id": turn_id,
+                        "work": list(gate.work),
+                        "missing": list(watch.evidence.missing()),
+                    },
+                )
         if answer:
             await emit(
                 "assistant_text", {"turn_id": turn_id, "message_id": message_id, "text": answer}
