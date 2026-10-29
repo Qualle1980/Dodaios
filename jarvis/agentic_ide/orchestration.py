@@ -151,12 +151,31 @@ def _default_cli() -> str | None:
     return None
 
 
-def _chat_pane_model(cli: str | None, requested: object = None) -> str:
-    """Fail closed before spawning a chat-addressed Claude pane on the wrong tier.
+def _chat_pane_tier(requested: object) -> str:
+    """The Claude tier a chat-addressed pane may run on, or refuse.
 
-    The mission-worker model policy does not apply to Agentic IDE panes. The
-    vendor's interactive default is not stable, so pin a documented CLI alias.
-    Never remove a credential-scrubbing security flag to make permissions work.
+    The mission-worker model policy (#67) does not reach Agentic IDE panes,
+    and the vendor's interactive default is not stable, so a chat-created pane
+    pins a documented CLI alias instead of inheriting whatever the CLI picks.
+    """
+    chosen = str(requested or "sonnet").strip().lower()
+    if chosen not in {"sonnet", "haiku"}:
+        raise SessionError("Claude Code chat panes require sonnet or haiku, not Opus.")
+    from jarvis.workspace.launch_picks import normalize_model
+
+    if normalize_model("claude", chosen) != chosen:
+        raise SessionError("Claude Code cannot pin the requested model; nothing started.")
+    return chosen
+
+
+def _chat_pane_model(cli: str | None, requested: object = None) -> str:
+    """Fail closed before SPAWNING a chat-addressed Claude pane.
+
+    Two separate reasons to refuse: a tier we will not run on, and a parent
+    Claude security environment this process inherited. The second is not ours
+    to switch off -- a credential-scrubbing flag set by whoever started Dodaios
+    stays set, and the caller gets an honest refusal instead of a pane whose
+    permission mode was silently forced back to asking.
     """
     if cli != "claude":
         return ""
@@ -168,14 +187,7 @@ def _chat_pane_model(cli: str | None, requested: object = None) -> str:
             "mode back to default. Restart Dodaios from its ordinary desktop shortcut "
             "or a clean shell; no coding prompt was sent."
         )
-    chosen = str(requested or "sonnet").strip().lower()
-    if chosen not in {"sonnet", "haiku"}:
-        raise SessionError("Claude Code chat panes require sonnet or haiku, not Opus.")
-    from jarvis.workspace.launch_picks import normalize_model
-
-    if normalize_model(cli, chosen) != chosen:
-        raise SessionError("Claude Code cannot pin the requested model; nothing started.")
-    return chosen
+    return _chat_pane_tier(requested)
 
 
 def _chat_pane_permission(cli: str | None) -> str | None:
@@ -784,7 +796,7 @@ class WorkspaceOrchestrator:
                 selected: _chat_pane_model(selected, args.get("model"))
                 for selected, _ in choices
             }
-        except SessionError as exc:
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
             return {"status": "not_accepted", "success": False, "reason": str(exc)}
         try:
             if isinstance(mixed, list) and mixed:
@@ -1080,6 +1092,13 @@ class WorkspaceOrchestrator:
         its own request_id.
         """
         before = term.status
+        if term.agent == "claude" and not str(term.model or "").strip():
+            # A pane opened before the tier guard existed (or by hand in the
+            # IDE) carries no model, so its next launch would take the CLI's
+            # own default. A restart asked for THROUGH the chat is the one
+            # moment this can be corrected without touching anyone's running
+            # work; the IDE's own restart path is left alone.
+            term.model = _chat_pane_tier(None)
         term, started = await self.registry.restart_terminal(
             target["terminal_id"], owner.id
         )
@@ -1215,7 +1234,7 @@ class WorkspaceOrchestrator:
                 }
                 for cli, count in groups for _ in range(count)
             ]
-        except SessionError as exc:
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
             return {"status": "not_accepted", "success": False, "reason": str(exc)}
         if len(requested) > MAX_PANES_PER_REQUEST:
             return {
@@ -1700,17 +1719,6 @@ class WorkspaceOrchestrator:
                 "target": target,
                 "reason": "This session does not accept coding tasks.",
             }
-        if action == "send" and found[1].agent == "claude":
-            # This applies to previously opened panes as well: otherwise a chat
-            # send can silently reuse an unpinned Opus session.
-            selected = str(found[1].model or "").lower()
-            if "sonnet" not in selected and "haiku" not in selected:
-                return {
-                    "status": "not_accepted", "success": False,
-                    "target": target, "completed": False, "input_written": False,
-                    "reason": "Claude pane model is not pinned to Sonnet/Haiku. "
-                              "Open a new Claude pane with model='sonnet'; nothing was sent.",
-                }
         if action == "send" and found[1].status in _STOPPED:
             # Pre-write, so the same request_id is retried after a restart.
             return {
@@ -1726,6 +1734,22 @@ class WorkspaceOrchestrator:
                         "continues the agent's own conversation and stops nothing), then "
                         "resend this request with the same request_id and prompt.",
             }
+        if action == "send" and found[1].agent == "claude":
+            # Previously opened panes too: otherwise a chat send silently
+            # reuses a session running on the CLI's own (Opus) default. A
+            # stopped pane is refused ABOVE this, with its restart receipt --
+            # that refusal is the one the caller can act on, and ``_restart``
+            # pins the tier on the way back up, so recovery converges here
+            # instead of dead-ending.
+            selected = str(found[1].model or "").lower()
+            if "sonnet" not in selected and "haiku" not in selected:
+                return {
+                    "status": "not_accepted", "success": False,
+                    "target": target, "completed": False, "input_written": False,
+                    "reason": "Claude pane model is not pinned to Sonnet/Haiku. "
+                              "Restart this pane or open a new one with model='sonnet'; "
+                              "nothing was sent.",
+                }
         # The low-level gateway enforces idle/asking state and refuses exited
         # agents. It never falls through to a shell or a different pane.
         try:
