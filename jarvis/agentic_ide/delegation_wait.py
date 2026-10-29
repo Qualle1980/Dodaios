@@ -19,13 +19,57 @@ from . import agent_transcript
 log = logging.getLogger(__name__)
 
 
+#: Claude tiers a chat-addressed pane may serve work on. A launch flag is a
+#: request; this is the list the CLI's own record is held against afterwards.
+ALLOWED_CLAUDE_TIERS = ("sonnet", "haiku")
+
+
+def _timeline(term: Any) -> Any | None:
+    """The pane's own record: its events AND what model its last reply carried.
+
+    One seam, so the served model and the conversation are read from the same
+    file at the same moment -- reading them separately could attest a model to
+    a completion it did not produce.
+    """
+    from .session import account_home
+
+    try:
+        return agent_transcript.read_timeline(
+            term.agent,
+            term.resume.id,
+            home=account_home(term.agent, term.account),
+            live=True,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable record is "no record"
+        log.warning("delegation handback: the pane's transcript could not be read", exc_info=True)
+        return None
+
+
+def served_model_verdict(term: Any, served: str) -> tuple[str, str]:
+    """What the CLI's OWN record says it ran, judged against what we allow.
+
+    Returns ``(state, detail)`` with state ``ok``, ``unattested`` or
+    ``refused``. The launch flag cannot settle this: the vendor decides which
+    model answers, and the only authoritative statement arrives with the first
+    reply. So this runs AFTER the work, and a wrong tier is reported rather
+    than retried -- the request was already spent, and sending a second one
+    would spend another.
+    """
+    if str(getattr(term, "agent", "") or "") != "claude":
+        return ("ok", "")
+    name = str(served or "").strip().lower()
+    if not name:
+        return ("unattested", "the pane published no model for this reply")
+    if any(tier in name for tier in ALLOWED_CLAUDE_TIERS):
+        return ("ok", name)
+    return ("refused", name)
+
+
 def _identity(term: Any) -> tuple:
     return term.process_generation, term.last_submit_at
 
 
 def _read(term: Any, identity: tuple) -> dict[str, Any] | None:
-    from .session import account_home
-
     if getattr(term, "computer_id", "") or not agent_transcript.can_read(term.agent):
         return {
             "status": "unverified",
@@ -36,14 +80,9 @@ def _read(term: Any, identity: tuple) -> dict[str, Any] | None:
         }
     if term.resume is None:
         return None
+    timeline = _timeline(term)
     events = (
-        agent_transcript.read_events(
-            term.agent,
-            term.resume.id,
-            home=account_home(term.agent, term.account),
-            live=True,
-        )
-        or []
+        timeline.events if timeline is not None else []
     )
     expected = " ".join(
         agent_transcript._clip(agent_transcript._spoken(term.last_prompt)).split()
@@ -99,10 +138,28 @@ def _read(term: Any, identity: tuple) -> dict[str, Any] | None:
         return {"status": status, "report": report or str(finish.get("error") or status)}
     if status != "done" or not report.strip():
         return None
+    served = str(getattr(timeline, "model", "") or "")
+    state, detail = served_model_verdict(term, served)
+    if state == "refused":
+        # The work may well be done; what is refused is calling it an
+        # acceptable delivery. Nothing is resent: the request is already spent.
+        return {
+            "status": "model_unverified",
+            "report": report,
+            "model": served,
+            "evidence": (
+                f"The pane's own record says this reply came from {detail!r}, which is "
+                "not a tier a chat-addressed Claude pane may run on. Nothing was resent."
+            ),
+        }
     return {
         "status": "completed",
         "report": report,
-        "evidence": "Recorded CLI completion and matching report; not independent verification",
+        "model": served,
+        "evidence": (
+            "Recorded CLI completion and matching report; not independent verification"
+            + ("" if state == "ok" and served else f"; {detail}")
+        ),
     }
 
 

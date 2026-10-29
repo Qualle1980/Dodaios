@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import os
 import random
 import re
@@ -139,6 +140,9 @@ def _coding_cli(spoken: str) -> str | None:
     return None
 
 
+log = logging.getLogger(__name__)
+
+
 def _default_cli() -> str | None:
     """The first installed coding CLI, for a request that names none."""
     from jarvis.workspace import agents as workspace_agents
@@ -149,6 +153,41 @@ def _default_cli() -> str | None:
         if accepts_prompts(info.name) and agent_argv(info.name) is not None:
             return info.name
     return None
+
+
+async def _chat_seat_quota(cli: str | None, account: str | None = None) -> tuple[str, str]:
+    """Whether the seat this dispatch would run on still has budget.
+
+    Read from :mod:`jarvis.agent_usage`, which answers per account without
+    spawning anything and says whether its numbers are live or cached. Only
+    the SELECTED seat decides: a nearly empty seat the work would not touch
+    must not block it, and a healthy one elsewhere must not clear it.
+
+    ``("blocked", reason)`` refuses the dispatch. ``("unknown", reason)`` lets
+    it proceed but has to be SAID -- a missing reading is not a clearance, and
+    several CLIs publish no usage at all, so refusing on absence would make
+    delegation impossible rather than safe.
+    """
+    if not cli:
+        return ("unknown", "no CLI was selected")
+    try:
+        from jarvis import agent_accounts, agent_usage
+        from jarvis.agent_chat.delegation_budget import verdict_for_seat
+
+        if not agent_usage.supports_usage(cli):
+            return ("unknown", f"{cli} publishes no plan usage this build can read")
+        accounts = await asyncio.to_thread(agent_accounts.list_accounts, cli)
+        seat = str(account or "") or await asyncio.to_thread(
+            lambda: agent_accounts.active_account(cli).id
+        )
+        readings = await asyncio.to_thread(agent_usage.collect, accounts)
+        verdict = verdict_for_seat(readings, seat)
+    except Exception:  # noqa: BLE001 - an unreadable budget is unknown, not empty
+        log.warning("chat dispatch: the seat's plan usage could not be read", exc_info=True)
+        return ("unknown", "the seat's plan usage could not be read")
+    if verdict.blocked:
+        return ("blocked", verdict.reason)
+    return ("allowed" if verdict.allowed else "unknown", verdict.reason)
 
 
 def _chat_pane_tier(requested: object) -> str:
@@ -798,6 +837,25 @@ class WorkspaceOrchestrator:
             }
         except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
             return {"status": "not_accepted", "success": False, "reason": str(exc)}
+        # The seat this would run on, before it runs. A plan window at or
+        # below ten percent starts nothing new; an unreadable one proceeds but
+        # is named in the receipt, because "no reading" is not "fine".
+        quota_note = ""
+        for selected, _count in choices:
+            state, reason = await _chat_seat_quota(selected, args.get("account"))
+            if state == "blocked":
+                log.info("chat dispatch refused on quota: %s", reason)
+                return {
+                    "status": "not_accepted",
+                    "success": False,
+                    "quota": "low",
+                    "reason": (
+                        f"{reason}. Nothing was started. Say so and let the person decide "
+                        "whether to spend the rest of this window."
+                    ),
+                }
+            if state == "unknown" and not quota_note:
+                quota_note = reason
         try:
             if isinstance(mixed, list) and mixed:
                 created, capped = [], False
@@ -851,6 +909,8 @@ class WorkspaceOrchestrator:
         ]
         delivery_ids = [self._issue(target) for target in targets]
         result: dict[str, Any] = {
+            # A budget nobody could read is reported, not assumed away.
+            **({"quota": "unknown", "quota_detail": quota_note} if quota_note else {}),
             "status": "created",
             "project": project["name"],
             "workspace": workspace["name"],
@@ -1734,6 +1794,23 @@ class WorkspaceOrchestrator:
                         "continues the agent's own conversation and stops nothing), then "
                         "resend this request with the same request_id and prompt.",
             }
+        if action == "send":
+            # An existing pane runs on the seat it was opened with.
+            state, reason = await _chat_seat_quota(found[1].agent, found[1].account)
+            if state == "blocked":
+                log.info("chat send refused on quota: %s", reason)
+                return {
+                    "status": "not_accepted",
+                    "success": False,
+                    "target": target,
+                    "completed": False,
+                    "input_written": False,
+                    "quota": "low",
+                    "reason": (
+                        f"{reason}. Nothing was sent. Say so and let the person decide "
+                        "whether to spend the rest of this window."
+                    ),
+                }
         if action == "send" and found[1].agent == "claude":
             # Previously opened panes too: otherwise a chat send silently
             # reuses a session running on the CLI's own (Opus) default. A

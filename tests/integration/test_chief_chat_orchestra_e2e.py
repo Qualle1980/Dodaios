@@ -26,11 +26,13 @@ No vendor call is made anywhere in this file.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -40,7 +42,6 @@ from jarvis.agent_chat import delegation_wait, runner_brain
 from jarvis.agent_chat import service as service_mod
 from jarvis.agent_chat.service import AgentChatService
 from jarvis.agent_chat.store import AgentChatStore
-from jarvis.agentic_ide import agent_transcript
 from jarvis.agentic_ide import delegation_wait as ide_wait
 from jarvis.core.bus import EventBus
 from jarvis.core.config import SafetyBlacklistConfig, SafetyConfig, SafetyWhitelistConfig
@@ -221,9 +222,12 @@ def chat(tmp_path, monkeypatch):
 
     monkeypatch.setattr(session_mod, "account_home", lambda *a, **kw: tmp_path / "home")
 
-    reader: dict[str, Any] = {"fn": lambda *a, **k: []}
+    # One seam: the pane's record, its events AND the model its reply carried.
+    reader: dict[str, Any] = {"fn": lambda *a, **k: [], "model": "claude-sonnet-4"}
     monkeypatch.setattr(
-        agent_transcript, "read_events", lambda *a, **k: reader["fn"](*a, **k)
+        ide_wait,
+        "_timeline",
+        lambda term: SimpleNamespace(events=reader["fn"](term), model=reader["model"]),
     )
 
     bus = EventBus()
@@ -361,7 +365,7 @@ async def test_a_hard_step_is_delegated_as_a_bounded_brief_not_the_original_orde
         tools={delegate.name: delegate},
     )
 
-    rig["reader"]["fn"] = lambda *a, **k: _transcript(
+    rig["reader"]["fn"] = lambda _term: _transcript(
         pane.last_prompt, reply="Added subtract to calc.py."
     )
     events = await _run(rig, CONTINUE_REQUEST)
@@ -405,7 +409,7 @@ async def test_a_cli_completion_alone_may_not_be_reported_as_a_pass(chat):
         tools={delegate.name: delegate},
     )
 
-    rig["reader"]["fn"] = lambda *a, **k: _transcript(
+    rig["reader"]["fn"] = lambda _term: _transcript(
         pane.last_prompt, reply="Done. PASS, tests pass."
     )
     events = await _run(rig, CONTINUE_REQUEST)
@@ -427,7 +431,7 @@ async def test_an_independent_git_and_test_read_is_what_makes_a_pass(chat):
     registry = FakeRegistry((workspace, pane))
     delegate = DelegateTool(registry, {"T1": (workspace, pane)})
 
-    def apply_edit(*_a, **_k):
+    def apply_edit(_term):
         # The agent's work really lands on disk before the chief looks.
         path = rig["project"] / "calc.py"
         path.write_text(
@@ -513,7 +517,7 @@ async def test_a_blocked_or_failed_agent_is_never_accepted_and_never_retried(
         tools={delegate.name: delegate},
     )
 
-    def read(*_a, **_k):
+    def read(_term):
         if transcript == "asking":
             return _asking(pane.last_prompt)
         return _transcript(pane.last_prompt, reply="crashed", status="error")
@@ -556,8 +560,8 @@ async def test_two_waiting_projects_keep_their_own_results(chat):
         tools={delegate.name: delegate},
     )
 
-    def read(agent, resume_id, **_k):
-        pane = pane_a if resume_id == pane_a.resume.id else pane_b
+    def read(term):
+        pane = pane_a if term.resume.id == pane_a.resume.id else pane_b
         return _transcript(pane.last_prompt, reply=f"Finished: {pane.last_prompt}")
 
     rig["reader"]["fn"] = read
@@ -605,7 +609,7 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
         tools={delegate.name: delegate},
     )
 
-    rig["reader"]["fn"] = lambda *a, **k: _asking(pane.last_prompt)
+    rig["reader"]["fn"] = lambda _term: _asking(pane.last_prompt)
     events = await _run(rig, CONTINUE_REQUEST)
 
     chief: ScriptedChief = rig["chief"]
@@ -738,3 +742,66 @@ async def test_a_dispatch_that_started_nothing_gives_its_slot_back(chat):
     # because the three that started nothing returned their slots.
     assert len(gateway.calls) == 4
     assert [e.result.success for e in chief.executed] == [False, False, False, True]
+
+
+# -------------------------------------------- which model actually served it
+
+
+@pytest.mark.parametrize(
+    ("served", "expected"),
+    [
+        ("claude-opus-5", "model_unverified"),
+        ("claude-sonnet-4-5", "completed"),
+        ("", "completed"),
+    ],
+)
+async def test_the_pane_s_own_record_decides_which_model_served_the_work(
+    chat, served, expected
+):
+    """A launch flag is a request; the record is the only attestation.
+
+    The vendor decides which model answers, and the first authoritative
+    statement arrives WITH the reply. So the check runs afterwards, a wrong
+    tier is reported instead of retried -- the request is already spent -- and
+    an absent record stays honestly unattested rather than being read as
+    either proof or failure.
+    """
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    registry = FakeRegistry((workspace, pane))
+    delegate = DelegateTool(registry, {"T1": (workspace, pane)})
+    rig = chat(
+        [
+            Wave(
+                calls=(
+                    Call(
+                        delegate.name,
+                        {"terminal_id": "T1", "prompt": "Add subtract().", "model": "sonnet"},
+                    ),
+                ),
+                reply="Sent to T1 on sonnet.",
+            ),
+            Wave(reply="I will not call that done."),
+        ],
+        tools={delegate.name: delegate},
+    )
+    rig["reader"]["model"] = served
+    rig["reader"]["fn"] = lambda _term: _transcript(
+        pane.last_prompt, reply="Added subtract to calc.py."
+    )
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    reports = [
+        e["payload"] for e in events if e["kind"] == "notice"
+        and e["payload"].get("kind") == "delegation_report"
+    ]
+    assert reports and reports[0]["status"] == expected, reports
+    row = json.loads(reports[0]["report"])
+    assert row.get("model") == served
+    if expected == "model_unverified":
+        assert "not a tier" in row["evidence"]
+    elif not served:
+        assert "published no model" in row["evidence"]
+    # Either way: one delegation, nothing resent, and no PASS.
+    assert len(delegate.briefs) == 1
+    assert "PASS" not in _said(events).upper()
