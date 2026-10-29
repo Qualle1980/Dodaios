@@ -206,20 +206,37 @@ class BrainSupervisorToolGateway:
             # No folder is readable rather than the wrong one, and the other
             # live tools stay available.
             log.warning("Voice project read tools unavailable, offering none: %s", exc)
-        if self._workspace_tool is not None:
-            # Live delegates coding to one addressed service. The old prompt
-            # tools silently choose an ambient pane and cannot safely coexist.
-            tools = {
-                name: tool for name, tool in tools.items() if not name.startswith("agentic-ide-")
-            }
-            tools[self._workspace_tool.name] = self._workspace_tool
-            # The same addressed service also answers for a workspace's repository.
-            workspaces = getattr(self._workspace_tool, "gateway", None)
-            if workspaces is not None:
-                from jarvis.brain.workspace_git_tool import WorkspaceGitTool
+        return self.with_addressed_workspace_tool(tools)
 
-                tools[WorkspaceGitTool.name] = WorkspaceGitTool(workspaces)
-        return tools
+    def with_addressed_workspace_tool(self, tools: dict[str, Any]) -> dict[str, Any]:
+        """Swap the ambient pane tools for the one addressed coding service.
+
+        Every surface that hands work to a coding agent goes through here, so
+        voice and chat cannot drift apart again: an ambient pane tool addresses
+        a terminal by its place in the grid, resolves no project, and sets no
+        delegation origin, so its result has no way back to the conversation
+        that asked for the work. The addressed service resolves
+        project/workspace/agent against a ``request_id`` and arms
+        ``followthrough``. The two cannot safely coexist — a model offered both
+        can still pick the ambient one.
+
+        An install whose gateway carries no workspace tool keeps the pane tools:
+        they are its only coding surface, and removing them would take the
+        capability away rather than replace it.
+        """
+        if self._workspace_tool is None:
+            return tools
+        kept = {
+            name: tool for name, tool in tools.items() if not name.startswith("agentic-ide-")
+        }
+        kept[self._workspace_tool.name] = self._workspace_tool
+        # The same addressed service also answers for a workspace's repository.
+        workspaces = getattr(self._workspace_tool, "gateway", None)
+        if workspaces is not None:
+            from jarvis.brain.workspace_git_tool import WorkspaceGitTool
+
+            kept[WorkspaceGitTool.name] = WorkspaceGitTool(workspaces)
+        return kept
 
     def voice_catalog(self) -> tuple[SupervisorToolDescriptor, ...]:
         """Live models can see desktop primitives without a second tool model."""

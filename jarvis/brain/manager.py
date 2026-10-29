@@ -7094,6 +7094,39 @@ class BrainManager:
             log.debug("knowledge-question spawn-hide gate failed", exc_info=True)
             return tools
 
+    def _offer_addressed_workspace_tool(self, tools: dict[str, Tool]) -> dict[str, Tool]:
+        """Hand coding work to the addressed service, not to an ambient pane.
+
+        Measured 2026-10-29: a chat turn offered the pane-scoped
+        ``agentic-ide-*`` family and no ``workspace-orchestrate``, because the
+        substitution lived inside the gateway's VOICE catalogue only. A pane
+        tool addresses a terminal by its place in the grid: it resolves no
+        project, so an order meant for one project can be typed into another's
+        agent, and it sets no delegation origin, so the result never returns to
+        the conversation that asked for the work.
+
+        The decision itself belongs to the gateway
+        (``with_addressed_workspace_tool``) so both surfaces share one source
+        of truth. Runs before the pane-tool hide below, which then has nothing
+        left to match. Defensive: the gateway is registered off the boot path,
+        so a turn can arrive first — any fault leaves the tools unchanged
+        rather than blinding the brain.
+        """
+        if not isinstance(tools, dict):
+            return tools
+        try:
+            from jarvis.core import runtime_refs
+
+            gateway = runtime_refs.get_supervisor_tool_gateway()
+            substitute = getattr(gateway, "with_addressed_workspace_tool", None)
+            if not callable(substitute):
+                return tools
+            offered = substitute(tools)
+            return offered if isinstance(offered, dict) and offered else tools
+        except Exception:  # noqa: BLE001 — a gate must never blind the brain
+            log.debug("addressed workspace tool unavailable", exc_info=True)
+            return tools
+
     def _hide_agentic_ide_tools_without_workspace(
         self, tools: dict[str, Tool]
     ) -> dict[str, Tool]:
@@ -12785,6 +12818,12 @@ class BrainManager:
                 _turn_tools = self._hide_spawn_when_plugin_tool_handles_turn(
                     _turn_tools, routing_text
                 )
+            # Coding work is addressed: project > workspace > agent against a
+            # request_id, with a result path back to THIS conversation. The
+            # ambient pane tools cannot do either and must not be offered
+            # beside it (see _offer_addressed_workspace_tool).
+            if isinstance(_turn_tools, dict):
+                _turn_tools = self._offer_addressed_workspace_tool(_turn_tools)
             # Agentic-IDE pane tools exist only relative to an OPEN workspace
             # (2026-07-28 cost audit): with none open they can only fail,
             # while their schemas ride every loop iteration. Status/resume
