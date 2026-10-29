@@ -247,14 +247,19 @@ def chat(tmp_path, monkeypatch):
     return build
 
 
-async def _run(rig: dict[str, Any], message: str, *, timeout: float = 10.0) -> list[dict[str, Any]]:
+#: No turn in this file does real work; anything slower is a hang.
+TURN_TIMEOUT_S = 10.0
+
+
+async def _run(rig: dict[str, Any], message: str) -> list[dict[str, Any]]:
     """Send one message and wait for the turn to end; return the event log."""
     svc: AgentChatService = rig["svc"]
     sid = rig["session"].session_id
     await svc.send(sid, message)
     run = svc._running.get(sid)
     if run is not None:
-        await asyncio.wait_for(asyncio.shield(run.task), timeout)
+        async with asyncio.timeout(TURN_TIMEOUT_S):
+            await asyncio.shield(run.task)
     return rig["store"].list_events(sid)
 
 
