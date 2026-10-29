@@ -8,11 +8,15 @@ Unsupported/remote transcript formats produce an honest unverified result.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from typing import Any
 
 from jarvis.core.delegated_work import DelegatedWork, register_delegated_work
 
 from . import agent_transcript
+
+log = logging.getLogger(__name__)
 
 
 def _identity(term: Any) -> tuple:
@@ -102,6 +106,37 @@ def _read(term: Any, identity: tuple) -> dict[str, Any] | None:
     }
 
 
+def _target(owner: Any, term: Any) -> dict[str, Any]:
+    """Who did this work, where, and on which revision.
+
+    The chat's acceptance gate (:mod:`jarvis.agent_chat.delegation_acceptance`)
+    verifies a handback against the checkout it actually came from, so the
+    identity has to travel WITH the result rather than be inferred later from
+    whichever workspace happens to be visible. The revision is read from the
+    workspace's own git directory -- a plain local read, like every other
+    probe here; it stays empty when the folder is not a checkout.
+    """
+    root = str(getattr(owner, "folder", "") or "")
+    head = ""
+    if root:
+        try:
+            from pathlib import Path
+
+            from .git_local import git_out
+
+            head = (git_out(["rev-parse", "HEAD"], Path(root)) or "").strip()
+        except Exception:  # noqa: BLE001 - no revision is a missing binding, not a failure
+            log.debug("delegation handback: could not read the workspace revision", exc_info=True)
+    return {
+        "project_id": str(getattr(owner, "project_id", "") or ""),
+        "workspace_id": str(getattr(owner, "id", "") or ""),
+        "terminal_id": "pane:" + str(getattr(term, "history_id", "") or ""),
+        "root": root,
+        "head_sha": head,
+        "at": time.time(),
+    }
+
+
 def track_submission(registry: Any, owner: Any, term: Any) -> None:
     if term.submitted is False or term.last_submit_at is None:
         return
@@ -129,6 +164,9 @@ def track_submission(registry: Any, owner: Any, term: Any) -> None:
                 "status": "superseded",
                 "report": "The coding session changed while reading its result.",
             }
+        if result is not None:
+            # The parent verifies against THIS workspace and revision.
+            result = {**result, "target": await asyncio.to_thread(_target, owner, term)}
         return result
 
     register_delegated_work(

@@ -23,7 +23,6 @@ from typing import Any
 from jarvis.core.delegated_work import DelegatedWork, collect_delegated_work
 
 from .delegation_acceptance import gate_for
-from .delegation_budget import BUDGET_EXHAUSTED, budget_spent
 from .events import make_event
 
 log = logging.getLogger(__name__)
@@ -306,18 +305,6 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 break
             if wave == MAX_WAVES - 1:
                 gate.finish["payload"].update(status="error", error="delegation_continuation_limit")
-                break
-            if budget_spent(gate.work):
-                # One request has handed work to as many coding agents as it
-                # may. The waves limit how often this turn comes back; it does
-                # not limit how many seats one request spends, and those are
-                # different numbers. The results it already has are delivered;
-                # no further wave invites another agent.
-                log.info(
-                    "agent chat %s: turn %s spent its coding-delegation budget (%s)",
-                    handle.session.session_id, handle.turn_id, sorted(gate.work),
-                )
-                gate.finish["payload"].update(status="error", error=BUDGET_EXHAUSTED)
                 break
             prompt = continuation_prompt(rows, original)
             stored = service.store.get_session(handle.session.session_id)

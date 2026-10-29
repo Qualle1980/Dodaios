@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
 
 from jarvis.agent_chat.approval_bridge import ChatApprovalBridge, ChatGrant, approval_ref
-from jarvis.agent_chat.delegation_acceptance import EvidenceWatch
+from jarvis.agent_chat.delegation_acceptance import EvidenceLedger, recording_filter
 from jarvis.agent_chat.effort import normalize_effort
 from jarvis.agent_chat.events import make_event
 from jarvis.agent_chat.folder_tools import PLAN_STANCE, folder_tools, plan_filter
@@ -431,12 +431,13 @@ async def run_brain_turn(
 
     mirror = _StepMirror(emit, turn_id, handle.bus, handle.trace_id)
     # Set when this wave answers a coding agent whose "done" nobody has
-    # checked: the turn may not call that work good without its own git and
-    # test evidence (``delegation_acceptance``). Until the gate has judged,
-    # nothing of this answer is shown — a rewritten verdict must not arrive
-    # after the person has already read the claim.
+    # checked: the turn may not call that work good without its own change
+    # and test evidence, bound to that job's own checkout
+    # (``delegation_acceptance``). Until the gate has judged, nothing of this
+    # answer is shown — a rewritten verdict must not arrive after the person
+    # has already read the claim.
     gate = getattr(handle, "acceptance_gate", None)
-    watch = EvidenceWatch(handle.bus, handle.trace_id) if gate is not None else None
+    ledger = EvidenceLedger() if gate is not None else None
     ref = approval_ref(session.session_id)
 
     async def finish(
@@ -527,6 +528,18 @@ async def run_brain_turn(
         kit_tools=kit_tools,
         system_extra=system_extra,
     )
+    if ledger is not None:
+        # Last in the chain, so it wraps the surface the model really gets:
+        # the folder tools AND the workspace tools, with their own tiers and
+        # read-only capabilities untouched (``RecordingTool`` forwards all of
+        # that). Receipts are what the gate judges — exact arguments, the real
+        # result and where it ran, instead of a capped bus preview.
+        override = replace(
+            override,
+            tool_filter=_compose_filters(
+                override.tool_filter, recording_filter(ledger, cwd=str(cwd))
+            ),
+        )
     if person_request:
         # Tools that check a call against what the person asked for (a task
         # unrelated to the turn, an authorized fan-out) read the request, not
@@ -561,8 +574,6 @@ async def run_brain_turn(
     # sentence it writes next to one lands in the timeline as it happens.
     await emit("reasoning_started", {"turn_id": turn_id, "message_id": message_id})
     mirror.start()
-    if watch is not None:
-        watch.start()
 
     loop = asyncio.get_running_loop()
     seen: list[str] = []
@@ -596,25 +607,16 @@ async def run_brain_turn(
         if bridge is not None:
             bridge.disarm(ref)
         mirror.stop()
-        if watch is not None:
-            watch.stop()
 
     if status == "done" and handle.cancel.is_set():
         status = "cancelled"
     if status == "done":
         answer = (reply or "").strip() or "".join(seen).strip()
-        if answer and gate is not None and watch is not None:
+        if answer and gate is not None and ledger is not None:
             rewritten = gate.verdict(
-                answer, watch.evidence, language=handle.output_language or DEFAULT_LOCALE
+                answer, ledger, language=handle.output_language or DEFAULT_LOCALE
             )
             if rewritten is not None:
-                log.warning(
-                    "Delegated coding work %s was reported as good with no independent "
-                    "evidence (missing: %s; tools seen: %s) — answering honestly instead.",
-                    list(gate.work),
-                    ", ".join(watch.evidence.missing()),
-                    sorted(set(watch.evidence.seen)),
-                )
                 answer = rewritten
                 await emit(
                     "notice",
@@ -622,7 +624,7 @@ async def run_brain_turn(
                         "kind": "delegation_unverified",
                         "turn_id": turn_id,
                         "work": list(gate.work),
-                        "missing": list(watch.evidence.missing()),
+                        "missing": list(gate.gaps(ledger)),
                     },
                 )
         if answer:
