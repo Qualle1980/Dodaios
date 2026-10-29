@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+
 from jarvis.core.agent_brief import AGENT_BRIEF_RULE
 from jarvis.core.protocols import ExecutionContext, ToolResult, WorkspaceOrchestrationGateway
+
+log = logging.getLogger(__name__)
 
 
 def _point_at_jarvis_agent(args: dict, result: dict) -> dict:
@@ -43,6 +48,75 @@ def _point_at_jarvis_agent(args: dict, result: dict) -> dict:
 
 # Actions that only look. ``watch`` is not one: it arranges a later report.
 _READS = frozenset({"status", "inspect", "resolve", "context", "observe"})
+
+
+#: Dispatch outcomes that started no agent, so they owe their slot back.
+_NOT_STARTED = frozenset(
+    {
+        "not_accepted",
+        "stale_target",
+        "unavailable",
+        "needs_clarification",
+        "uncertain",
+        "image_selection_required",
+        "error",
+    }
+)
+#: The actions that put a coding agent to work on something new.
+_DISPATCH_ACTIONS = frozenset({"send", "create", "open_workspace"})
+
+
+@dataclass
+class _Reservation:
+    """One slot of the request's coding-delegation budget."""
+
+    granted: bool
+    reason: str = ""
+    key: tuple[str, str] | None = None
+    request_id: str = ""
+
+    def release(self) -> None:
+        if self.granted and self.key is not None:
+            from jarvis.agent_chat.delegation_budget import LEDGER
+
+            LEDGER.release(self.key, self.request_id)
+
+
+def _reserve_delegation(args: dict) -> _Reservation | None:
+    """Take a budget slot for a dispatch that would start coding work.
+
+    ``None`` when this call is not such a dispatch, or when it belongs to no
+    chat request (a voice turn, a routine) -- the budget is the chat
+    request's, and nothing else inherits it.
+    """
+    if str(args.get("action") or "") not in _DISPATCH_ACTIONS or not args.get("prompt"):
+        return None
+    from jarvis.agent_chat.delegation_budget import (
+        LEDGER,
+        MAX_CODING_DELEGATIONS,
+        request_key,
+    )
+    from jarvis.core.protocols import current_chat_turn
+
+    turn = current_chat_turn.get()
+    key = request_key(turn) if turn is not None else None
+    if key is None:
+        return None
+    request_id = str(args.get("request_id") or "")
+    if LEDGER.reserve(key, request_id):
+        return _Reservation(True, key=key, request_id=request_id)
+    log.info(
+        "chat request %s has spent its coding-delegation budget; refusing a new one",
+        key,
+    )
+    return _Reservation(
+        False,
+        reason=(
+            f"This request has already handed work to {MAX_CODING_DELEGATIONS} coding "
+            "agents, which is its limit. Nothing was sent. Finish or verify what is "
+            "running, or ask the person whether another agent should start."
+        ),
+    )
 
 
 class WorkspaceOrchestrationTool:
@@ -317,20 +391,44 @@ class WorkspaceOrchestrationTool:
 
         from jarvis.core.delegation import current_delegation_origin, origin_metadata
 
+        # One request may only spend so many coding agents, and the limit has
+        # to bite BEFORE one starts: counting handed-back work let a single
+        # wave open any number of panes first. The slot is taken here, at the
+        # one entrance a chat-driven dispatch takes, and given straight back
+        # when the dispatch did not in fact start anything. Reads, keys,
+        # restarts and everything else are untouched -- this is only about
+        # putting a new agent to work.
+        reservation = _reserve_delegation(args)
+        if reservation is not None and not reservation.granted:
+            return ToolResult(
+                success=False,
+                output={
+                    "status": "not_accepted",
+                    "success": False,
+                    "reason": reservation.reason,
+                    "completed": False,
+                    "input_written": False,
+                },
+            )
+
         token = current_delegation_origin.set(origin_metadata(
             language=str(ctx.config.get("output_language") or ""),
         ))
+        started = False
         try:
             result = await self.gateway.run(
                 {**args, "_image_scope": scope,
                  **dispatch_context(ctx.user_utterance, ctx.config, str(ctx.trace_id))},
                 trace_id=str(ctx.trace_id),
             )
+            started = str(result.get("status") or "") not in _NOT_STARTED
         except ValueError as exc:
             # Invalid arguments go back to the model as the tool error.
             return ToolResult(success=False, output=None, error=str(exc))
         finally:
             current_delegation_origin.reset(token)
+            if reservation is not None and not started:
+                reservation.release()
         status = result.get("status")
         result = _point_at_jarvis_agent(args, result)
         return ToolResult(
