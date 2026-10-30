@@ -11,6 +11,10 @@ with the plan's access token from ``chatgpt_plan_auth``. Contract per turn:
   came back, an ``input_image`` was described), built by the OpenAI brain's
   own Chat -> Responses converters so both providers send one shape;
 * only ``response.completed`` is success; a stream that ends without it fails;
+* the finished response's ``usage`` is yielded as the turn's last delta, so
+  :class:`jarvis.brain.usage_meter.MeteredBrain` writes this route's spend to
+  the ledger like every other brain's — it comes out of the person's ChatGPT
+  plan window, the same one ``codex`` draws from;
 * nothing is ever re-sent: once the request may have left, an unclear outcome
   is ``submission_ambiguous`` and the user decides;
 * there is no API-key fallback. ``OPENAI_API_KEY`` is never read here.
@@ -24,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 import httpx
@@ -286,6 +290,44 @@ def _tool_call(item: dict[str, Any], reverse_names: dict[str, str], index: int) 
     }
 
 
+def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:
+    """What the finished response says it spent, in the canonical shape.
+
+    Every turn on this route spends the person's ChatGPT PLAN window — the
+    same window ``codex`` draws from. Until this block existed the route was
+    the only brain in the tree that reported nothing, so
+    :class:`jarvis.brain.usage_meter.MeteredBrain` wrote nothing down and the
+    most expensive calls the product makes were the only ones nobody could
+    see.
+
+    ``input_tokens`` is the UNCACHED share, as the cost contract requires and
+    as ``_openai_base`` already does for the same API: OpenAI counts cache
+    hits inside its input figure, and leaving them there prices every hit at
+    the full rate.
+    """
+    usage = (payload.get("response") or {}).get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+
+    def count(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            # A non-numeric count says nothing, and metering must never break
+            # the call it measures.
+            return 0
+
+    details = usage.get("input_tokens_details")
+    cached = count(details.get("cached_tokens")) if isinstance(details, Mapping) else 0
+    out: dict[str, int] = {
+        "input_tokens": max(count(usage.get("input_tokens")) - cached, 0),
+        "output_tokens": count(usage.get("output_tokens")),
+    }
+    if cached > 0:
+        out["cache_hit_tokens"] = cached
+    return out if any(out.values()) else None
+
+
 async def _events(
     resp: httpx.Response, reverse_names: dict[str, str] | None = None
 ) -> AsyncIterator[BrainDelta]:
@@ -321,11 +363,20 @@ async def _events(
             for call in calls:
                 yield BrainDelta(tool_call=call)
             yield BrainDelta(finish_reason="tool_calls" if calls else "stop")
+            # Usage last, after the finish reason, as the OpenAI brain's
+            # Responses path yields it: the meter reads it from the stream.
+            spent = _usage_of(payload)
+            if spent is not None:
+                yield BrainDelta(usage=spent)
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
             if reason == "max_output_tokens":
                 yield BrainDelta(finish_reason="length")
+                # A truncated answer was paid for in full; it is still spend.
+                spent = _usage_of(payload)
+                if spent is not None:
+                    yield BrainDelta(usage=spent)
                 return
             raise ChatGPTPlanError(
                 "incomplete", f"ChatGPT stopped the answer early ({reason or 'unknown'})."
