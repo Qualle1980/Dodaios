@@ -327,6 +327,56 @@ async def test_a_status_question_is_answered_from_the_project_without_any_agent(
     assert _finished(events)[-1]["status"] == "done"
 
 
+# ------------------------------------------------- 1b. cheap work is not delegated
+
+
+async def test_a_simple_remaining_step_is_finished_by_the_chief_itself(chat):
+    """Case 1b: "continue Bubble" whose open work is trivial starts NO coding agent.
+
+    The order is the very one case 2 delegates, so what differs is the work and
+    not the wording: a one-line addition the chat's own hands can make is made
+    with them. A chief that opens a pane for this spends a real seat of a real
+    subscription window on what it could already do, and the only thing that
+    proves it does not is a turn that ends with the file changed on disk and
+    the delegate untouched.
+    """
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    delegate = DelegateTool(FakeRegistry((workspace, pane)), {"T1": (workspace, pane)})
+    before = "def add(a, b):\n    return a + b\n"
+    after = before + "\n\ndef subtract(a, b):\n    return a - b\n"
+    rig = chat(
+        [
+            Wave(
+                calls=(
+                    Call("Read", {"file_path": "calc.py"}),
+                    Call(
+                        "Edit",
+                        {"file_path": "calc.py", "old_string": before, "new_string": after},
+                        why="One line. Cheaper to write than to delegate.",
+                    ),
+                ),
+                reply="subtract(a, b) now sits beside add() in calc.py. No agent was needed.",
+            )
+        ],
+        tools={delegate.name: delegate},
+    )
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    chief: ScriptedChief = rig["chief"]
+    # It looked before it wrote, and both calls went through the real executor.
+    assert [e.tool for e in chief.executed] == ["Read", "Edit"]
+    assert all(e.result.success for e in chief.executed), [e.result for e in chief.executed]
+    # The change is really on disk, in the real checkout.
+    assert "def subtract(a, b):" in (chat.project / "calc.py").read_text(encoding="utf-8")
+    # And nothing was handed to a coding agent: no brief, no pane prompt, and no
+    # second wave, because there was no delegated result to wait for.
+    assert not delegate.briefs
+    assert pane.last_prompt == ""
+    assert len(chief.calls) == 1
+    assert _finished(events)[-1]["status"] == "done"
+
+
 # ---------------------------------------------------------------- 2. delegate
 
 
