@@ -6988,8 +6988,9 @@ class BrainManager:
         except (TypeError, ValueError):
             # A malformed tool limit means 'unknown'; no trimming then.
             max_tools = 0
-        if window <= 0 and max_tools <= 0 and direct_tools is None:
-            return tools, nothing
+        # No early return for a roomy window any more: cost trims even when
+        # everything would fit. A surface with nothing worth trimming still
+        # comes back untouched -- ``plan_surface`` decides that below.
         keep: set[str] = {name for name in own_tools if name in tools}
         mandated = getattr(self, "_evidence_required_tool", None)
         if mandated:
@@ -7001,7 +7002,15 @@ class BrainManager:
             + _approx_history_tokens(history)
             + _CONTEXT_FIT_RESERVE_TOKENS
         )
-        budget = max(window - used, 0) if window > 0 else None
+        fits = max(window - used, 0) if window > 0 else None
+        # The window says what CAN be sent; the budget says what a turn
+        # should pay for. The smaller one binds, and with no declared
+        # window the budget still applies, where there was no limit at all.
+        budget = (
+            _TOOL_SURFACE_BUDGET_TOKENS
+            if fits is None
+            else min(fits, _TOOL_SURFACE_BUDGET_TOKENS)
+        )
         # One slot of a provider's count cap is held for ``find_tools``.
         limits = [max(max_tools - 1, 1)] if max_tools > 0 else []
         if 0 < window <= _SMALL_WINDOW_TOKENS:
@@ -7014,15 +7023,20 @@ class BrainManager:
         if not plan.deferred:
             return tools, nothing
         reveal_tokens: int | None = None
-        if budget is not None:
-            # The finder and what it reveals need room of their own. When the
-            # window is what forced the split, hold that room back and choose
-            # again; otherwise the first lookup overflows the window that the
-            # shown tools already fill to the brim.
+        if fits is not None:
+            # The finder and what it reveals need room of their own, and the
+            # room they get is what the WINDOW has left -- not what the cost
+            # budget has left. A split the budget forced leaves the window
+            # wide open, so no reserve is needed and the shown set stays
+            # full; a split the window forced leaves almost nothing, and
+            # without the reserve the first lookup overflows it. Measuring
+            # against the budget would hold room back in the first case for
+            # nothing and, where the window sits just above the budget,
+            # report headroom the window does not actually have.
             spent = sum(tool_tokens(name, tool) for name, tool in plan.direct.items())
-            headroom = budget - spent
+            headroom = fits - spent
             if headroom < _REVEAL_RESERVE_TOKENS:
-                reveal_tokens = min(_REVEAL_RESERVE_TOKENS, budget // 3)
+                reveal_tokens = min(_REVEAL_RESERVE_TOKENS, fits // 3)
                 plan = plan_surface(
                     tools,
                     keep=keep,
@@ -14853,6 +14867,18 @@ _CONTEXT_FIT_RESERVE_TOKENS = 4096
 _SMALL_WINDOW_TOKENS = 32_768
 #: How many tools such a model is shown besides the ones a turn pins.
 _SMALL_MODEL_DIRECT_TOOLS = 24
+#: The most tool schema a turn pays for, however much window it has. Measured
+#: 2026-10-30 on the live install: the registered tools sum to ~15_000 tokens
+#: and were sent whole on every voice turn, because a 128k window left "room
+#: to spare" and every deferral trigger was about fitting rather than cost. A
+#: hosted model bills each schema whether or not it reads it, so room to spare
+#: is not free. 6_000 keeps the everyday tools in front of the model -- the
+#: ordering in ``plan_surface`` puts them first -- and sends the long tail
+#: through ``find_tools``, the same path a small window already uses.
+#: Comfortably above ``_REVEAL_RESERVE_TOKENS + _FINDER_TOKENS`` so a lookup
+#: still has room.
+_TOOL_SURFACE_BUDGET_TOKENS = 6_000
+
 #: Room held back for the definitions ``find_tools`` adds during a turn whose
 #: window is already full, and for the finder itself with its index of names.
 _REVEAL_RESERVE_TOKENS = 2_000

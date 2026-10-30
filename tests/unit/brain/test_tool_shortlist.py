@@ -336,8 +336,20 @@ def _shown(surface: dict[str, Any], deferred: frozenset[str]) -> list[str]:
     return [name for name in surface if name not in deferred]
 
 
-def test_a_hosted_model_with_room_is_handed_the_same_dict() -> None:
-    tools = {f"t{i}": _tool(f"t{i}", size=10) for i in range(221)}
+def test_a_hosted_model_with_a_modest_surface_is_handed_the_same_dict() -> None:
+    """Room in the window no longer means the whole catalogue is sent.
+
+    Until 2026-10-30 a declared window of a million tokens meant 221 tools
+    went out on every turn. Measured on the live install that day: the tool
+    schemas were ~15_000 tokens of a 29_694-token request, resent whole each
+    time, against 101 tokens of answer. A hosted model bills every schema
+    whether it reads it or not, so cost now trims as well as fit
+    (``_TOOL_SURFACE_BUDGET_TOKENS``).
+
+    What survives is the promise this test was written for: a surface that
+    costs little is handed over untouched, with no finder and no indirection.
+    """
+    tools = {f"t{i}": _tool(f"t{i}", size=10) for i in range(8)}
     surface, deferred = _mgr()._shortlist_tools(
         tools, _Brain(1_048_576), system_prompt="x" * 40_000, history=None
     )
