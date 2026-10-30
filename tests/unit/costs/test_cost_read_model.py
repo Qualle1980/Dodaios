@@ -777,3 +777,64 @@ def test_gateway_metered_runtime_turns_are_billed_once(tmp_path: Path) -> None:
     ]
     assert all(e.role == "agent" for e in agent)
 
+
+
+def _mixed_callers_db(path: Path) -> CostSources:
+    """One voice turn and one typed-chat turn, both on ``BrainManager.generate``."""
+    conn = sqlite3.connect(path)
+    conn.executescript(_SESSIONS_DDL)
+    for turn_id, caller in (("turn-v", "voice-turn"), ("turn-c", "jarvis-chat")):
+        conn.execute(
+            "INSERT INTO voice_events (session_id, turn_id, ts_ms, kind, payload_json) "
+            "VALUES (?,?,?,?,?)",
+            ("sess-1", turn_id, T0 + 1_000, "BrainTurnCompleted", json.dumps({
+                "provider": "chatgpt-plan", "model": "gpt-x",
+                "tokens_in": 1_000, "tokens_out": 100, "cost_usd": 0.0,
+                "finish_reason": "stop", "caller": caller,
+            })),
+        )
+    conn.commit()
+    conn.close()
+    return CostSources(sessions_db=path)
+
+
+def test_a_typed_chat_turn_is_not_billed_as_voice(tmp_path: Path) -> None:
+    """Every caller of ``BrainManager.generate`` publishes ``BrainTurnCompleted``.
+
+    The speech pipeline is the biggest of them, not the only one, so the voice
+    source used to claim the typed chat's turns as well — and the chat's own
+    ledger row is where that spend belongs. Counting both would bill it twice.
+    """
+    rows = list(collect_entries(_mixed_callers_db(tmp_path / "s.db")))
+    assert len(rows) == 1, rows
+    assert rows[0].surface == "voice"
+    assert rows[0].tokens_in == 1_000
+
+
+def test_a_turn_recorded_before_the_caller_field_still_counts_as_voice(
+    tmp_path: Path,
+) -> None:
+    """Rows already on disk carry no caller; they must not silently vanish."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(_SESSIONS_DDL)
+    conn.execute(
+        "INSERT INTO voice_events (session_id, turn_id, ts_ms, kind, payload_json) "
+        "VALUES (?,?,?,?,?)",
+        ("sess-1", "turn-old", T0 + 1_000, "BrainTurnCompleted", json.dumps({
+            "provider": "openai", "model": "gpt-x",
+            "tokens_in": 700, "tokens_out": 70, "finish_reason": "stop",
+        })),
+    )
+    conn.commit()
+    conn.close()
+    rows = list(collect_entries(CostSources(sessions_db=path)))
+    assert [(e.surface, e.tokens_in) for e in rows] == [("voice", 700)]
+
+
+def test_the_typed_chat_caller_is_reported_from_the_ledger() -> None:
+    """It must NOT join the covered set, or the chat's spend disappears again."""
+    from jarvis.costs.sources import COVERED_ELSEWHERE, VOICE_CALLER
+
+    assert "jarvis-chat" not in COVERED_ELSEWHERE
+    assert VOICE_CALLER in COVERED_ELSEWHERE

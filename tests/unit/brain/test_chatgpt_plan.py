@@ -772,6 +772,106 @@ def test_no_api_key_fallback_when_signed_out(brain_env, plan) -> None:
     assert not server.requests
 
 
+def test_a_finished_turn_reports_what_it_spent(brain_env) -> None:
+    """The meter can only write down what the stream hands it.
+
+    This route spends the person's ChatGPT plan window — the same one Codex
+    draws from — and reported nothing, so its turns were the only spend in
+    the product that no ledger and no report could see.
+    """
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.output_text.delta", "delta": "hi"},
+        {"type": "response.completed", "response": {"usage": {
+            "input_tokens": 1200, "output_tokens": 48,
+            "input_tokens_details": {"cached_tokens": 1000},
+        }}},
+    ))])
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    spent = [d.usage for d in deltas if d.usage]
+    # Uncached input only: cache hits priced at the full rate was a real bug
+    # on the sibling route, so this one states the same shape.
+    assert spent == [{"input_tokens": 200, "output_tokens": 48, "cache_hit_tokens": 1000}]
+    # And it arrives after the finish reason, where the meter reads it.
+    assert [i for i, d in enumerate(deltas) if d.finish_reason] < [
+        i for i, d in enumerate(deltas) if d.usage
+    ]
+
+
+def test_a_truncated_answer_still_reports_its_spend(brain_env) -> None:
+    """An answer cut off at the output cap was paid for in full."""
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.incomplete", "response": {
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"input_tokens": 90, "output_tokens": 4096},
+        }},
+    ))])
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    assert [d.finish_reason for d in deltas if d.finish_reason] == ["length"]
+    assert [d.usage for d in deltas if d.usage] == [
+        {"input_tokens": 90, "output_tokens": 4096}
+    ]
+
+
+def test_a_response_without_usage_reports_nothing_rather_than_zeroes(brain_env) -> None:
+    """Metering must never invent a reading. A missing block is no delta."""
+    install, _ = brain_env
+    install([_completed()])
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    assert not [d.usage for d in deltas if d.usage]
+
+
+def test_an_unreadable_usage_block_never_breaks_the_turn(brain_env) -> None:
+    """A count that is not a number tells us nothing, and the answer still stands."""
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.output_text.delta", "delta": "ok"},
+        {"type": "response.completed", "response": {"usage": {
+            "input_tokens": "many", "output_tokens": None, "input_tokens_details": "nope",
+        }}},
+    ))])
+    deltas = asyncio.run(_collect(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a")))
+    assert "".join(d.content or "" for d in deltas) == "ok"
+    assert [d.finish_reason for d in deltas if d.finish_reason] == ["stop"]
+    assert not [d.usage for d in deltas if d.usage]
+
+
+def test_a_metered_plan_turn_reaches_the_usage_ledger(brain_env, monkeypatch) -> None:
+    """The whole chain, not just the delta: this is what makes the spend visible.
+
+    ``BrainProviderRegistry.instantiate`` hands every provider through
+    ``meter_brain``, which writes each usage block to
+    :func:`jarvis.costs.ledger.record_usage`. The plan brain yielded no block,
+    so that door opened onto nothing for this route.
+    """
+    from jarvis.brain.usage_meter import meter_brain
+
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "jarvis.brain.usage_meter.record_usage",
+        lambda **kw: written.append(kw),
+    )
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.completed", "response": {"usage": {
+            "input_tokens": 800, "output_tokens": 120,
+            "input_tokens_details": {"cached_tokens": 300},
+        }}},
+    ))])
+    brain = meter_brain(chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a"), "chatgpt-plan")
+
+    async def drain() -> None:
+        async for _ in brain.complete(_req()):
+            pass
+
+    asyncio.run(drain())
+    assert len(written) == 1, written
+    entry = written[0]
+    assert entry["provider"] == "chatgpt-plan"
+    assert (entry["tokens_in"], entry["tokens_out"], entry["tokens_cached"]) == (500, 120, 300)
+
+
 def test_api_key_is_never_sent(brain_env) -> None:
     install, _ = brain_env
     server = install([_completed()])

@@ -671,9 +671,18 @@ async def _generate(
                     provider,
                     prompt_chars=len(override.system_extra) + 16000,
                 )
-        task: asyncio.Task[str] = asyncio.create_task(
-            brain.generate(text, **kwargs), name=f"agent-chat-brain-{handle.turn_id[:8]}"
-        )
+        # Name this spend before the turn starts. ``BrainManager._generate``
+        # tags whatever reaches it ``voice-turn`` unless the caller already
+        # said who it is, and a typed turn counted as speech makes the Costs
+        # section unable to answer which surface spends the plan window.
+        # ``create_task`` copies the current context, so the tag travels with
+        # the turn even though it is awaited below.
+        from jarvis.costs.ledger import usage_context
+
+        with usage_context("jarvis-chat"):
+            task: asyncio.Task[str] = asyncio.create_task(
+                brain.generate(text, **kwargs), name=f"agent-chat-brain-{handle.turn_id[:8]}"
+            )
     waiter = asyncio.create_task(handle.cancel.wait())
     try:
         done, _ = await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)

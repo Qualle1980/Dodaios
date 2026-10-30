@@ -1924,6 +1924,14 @@ class BrainTurnCompleted(Event):
     # when the stream actually delivered tokens.
     provider: str = ""
     model: str = ""
+    #: The ledger caller that owned this turn (:mod:`jarvis.costs.ledger`).
+    #: Every caller of ``BrainManager.generate`` publishes this event and the
+    #: speech pipeline is only the biggest of them — the typed chat, the skill
+    #: finder and the CLI route come through the same method. The cost report
+    #: builds its VOICE entries from these rows, so without a name here a
+    #: typed turn was billed as speech. Empty means a turn recorded before
+    #: this field existed, and is read as voice exactly as it was then.
+    caller: str = ""
 
 
 @dataclass(frozen=True, slots=True)
