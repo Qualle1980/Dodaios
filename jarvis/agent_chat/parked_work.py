@@ -30,6 +30,7 @@ from typing import Any, Final
 from jarvis.core.delegated_work import collect_delegated_work
 from jarvis.core.protocols import current_chat_turn
 
+from .delegation_acceptance import gate_for
 from .delegation_wait import DelegationWait, continuation_prompt
 
 log = logging.getLogger(__name__)
@@ -217,6 +218,17 @@ class ParkedWorkBoard:
         from .service import NoSuchSession, SessionBusy
 
         prompt = continuation_prompt(rows, parked.original, later=True)
+        # The results arrive as a turn of their own, so the gate that the
+        # in-turn wave would have armed has to be handed over with them --
+        # otherwise the one path that answers LATE is the one path that can
+        # still publish an unverified PASS.
+        gate = gate_for(rows)
+        if gate is not None:
+            log.info(
+                "agent chat %s: background result of turn %s answers unverified coding "
+                "work %s and is held to its own evidence",
+                session_id, parked.turn_id, list(gate.work),
+            )
         while not parked.gate.stop.is_set():
             # The person's own waiting messages go first: they were typed
             # before this result existed.
@@ -225,7 +237,12 @@ class ParkedWorkBoard:
             ):
                 try:
                     await self._service.send(
-                        session_id, prompt, display_text=parked.request, background_result=True
+                        session_id,
+                        prompt,
+                        display_text=parked.request,
+                        background_result=True,
+                        acceptance_gate=gate,
+                        origin_turn_id=parked.turn_id,
                     )
                 except SessionBusy:
                     pass  # Another turn took the seat first; try again shortly.

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
 
 from jarvis.agent_chat.approval_bridge import ChatApprovalBridge, ChatGrant, approval_ref
+from jarvis.agent_chat.delegation_acceptance import EvidenceLedger, recording_filter
 from jarvis.agent_chat.effort import normalize_effort
 from jarvis.agent_chat.events import make_event
 from jarvis.agent_chat.folder_tools import PLAN_STANCE, folder_tools, plan_filter
@@ -44,6 +45,7 @@ from jarvis.agent_chat.tool_catalog import ToolChoice
 from jarvis.agent_chat.tools import summarize_call
 from jarvis.brain.turn_override import TurnOverride
 from jarvis.core.protocols import BrainMessage, ReasoningEffort, Tool
+from jarvis.core.turn_language import DEFAULT_LOCALE
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -428,6 +430,14 @@ async def run_brain_turn(
         await handle.emit(make_event(kind, payload))
 
     mirror = _StepMirror(emit, turn_id, handle.bus, handle.trace_id)
+    # Set when this wave answers a coding agent whose "done" nobody has
+    # checked: the turn may not call that work good without its own change
+    # and test evidence, bound to that job's own checkout
+    # (``delegation_acceptance``). Until the gate has judged, nothing of this
+    # answer is shown — a rewritten verdict must not arrive after the person
+    # has already read the claim.
+    gate = getattr(handle, "acceptance_gate", None)
+    ledger = EvidenceLedger() if gate is not None else None
     ref = approval_ref(session.session_id)
 
     async def finish(
@@ -518,6 +528,18 @@ async def run_brain_turn(
         kit_tools=kit_tools,
         system_extra=system_extra,
     )
+    if ledger is not None:
+        # Last in the chain, so it wraps the surface the model really gets:
+        # the folder tools AND the workspace tools, with their own tiers and
+        # read-only capabilities untouched (``RecordingTool`` forwards all of
+        # that). Receipts are what the gate judges — exact arguments, the real
+        # result and where it ran, instead of a capped bus preview.
+        override = replace(
+            override,
+            tool_filter=_compose_filters(
+                override.tool_filter, recording_filter(ledger, cwd=str(cwd))
+            ),
+        )
     if person_request:
         # Tools that check a call against what the person asked for (a task
         # unrelated to the turn, an authorized fan-out) read the request, not
@@ -561,6 +583,9 @@ async def run_brain_turn(
         if not chunk:
             return
         seen.append(chunk)
+        if gate is not None:
+            # Buffered, not streamed: see ``gate`` above.
+            return
         # The consumer is synchronous (the brain's contract); hand the emit
         # back to the loop rather than blocking the producer.
         asyncio.run_coroutine_threadsafe(
@@ -587,6 +612,21 @@ async def run_brain_turn(
         status = "cancelled"
     if status == "done":
         answer = (reply or "").strip() or "".join(seen).strip()
+        if answer and gate is not None and ledger is not None:
+            rewritten = gate.verdict(
+                answer, ledger, language=handle.output_language or DEFAULT_LOCALE
+            )
+            if rewritten is not None:
+                answer = rewritten
+                await emit(
+                    "notice",
+                    {
+                        "kind": "delegation_unverified",
+                        "turn_id": turn_id,
+                        "work": list(gate.work),
+                        "missing": list(gate.gaps(ledger)),
+                    },
+                )
         if answer:
             await emit(
                 "assistant_text", {"turn_id": turn_id, "message_id": message_id, "text": answer}
