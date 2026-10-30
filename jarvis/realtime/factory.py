@@ -279,6 +279,30 @@ def realtime_handshake_budget_s(cfg: Any) -> float:
     return max(declared)
 
 
+def subscription_live_pin(cfg: Any) -> str:
+    """The pinned provider id when it is a subscription-backed live transport.
+
+    Identified by capability, never by name (AP-21): the provider runs its own
+    client-managed delegation and authenticates with a ChatGPT login instead of
+    a project key. ``""`` when nothing is pinned, the pin is not installed, or
+    the pinned provider is a billed one.
+    """
+    realtime = getattr(getattr(cfg, "brain", None), "realtime", None)
+    primary_id = str(getattr(realtime, "provider", "") or "").strip()
+    if not primary_id or primary_id not in set(list_plugins(_GROUP)):
+        return ""
+    try:
+        provider_cls = load(_GROUP, primary_id, protocol=RealtimeProvider)
+    except Exception as exc:  # noqa: BLE001 - a broken selection stays unavailable
+        log.warning("Realtime pin %s could not load (%s)", primary_id, type(exc).__name__)
+        return ""
+    if not bool(getattr(provider_cls, "client_managed_delegation", False)):
+        return ""
+    if str(getattr(provider_cls, "external_credentials_kind", "") or "") != "chatgpt_oauth":
+        return ""
+    return primary_id
+
+
 def _realtime_is_the_configured_voice_mode(cfg: Any) -> bool:
     """Whether realtime voice is the mode this install actually runs.
 
@@ -296,9 +320,18 @@ def _realtime_is_the_configured_voice_mode(cfg: Any) -> bool:
         subscription_voice_selected,
     )
 
+    mode_is_realtime = (
+        getattr(getattr(cfg, "voice", None), "mode", "pipeline") == "realtime"
+    )
+    # A profile left over from the pipeline composition must not silently
+    # swallow a live transport the user pinned on purpose: the pin plus
+    # realtime mode is the more specific, more recent choice, and it reaches
+    # the same ChatGPT login rather than a billed one.
+    if mode_is_realtime and subscription_live_pin(cfg):
+        return True
     if subscription_voice_selected(cfg):
         return False
-    return getattr(getattr(cfg, "voice", None), "mode", "pipeline") == "realtime"
+    return mode_is_realtime
 
 
 def _warm_session_imports(provider: Any) -> None:

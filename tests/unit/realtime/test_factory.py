@@ -715,3 +715,138 @@ def test_a_metered_codex_brain_behind_subscription_voice_does_not_warn(
         )
 
     assert not [record for record in caplog.records if "AP-22" in record.message]
+
+# --- P5: the subscription live transport may never become a billed one ---
+
+
+def test_pinned_subscription_live_provider_excludes_every_billed_provider() -> None:
+    """The three flags that keep a subscription call off an API key.
+
+    A pinned subscription owns its access choice: it declares no credential
+    candidates, forbids provider fallback, and forbids the implicit classic
+    usage fallback. Flipping any of them would let a call that the user started
+    on their subscription silently continue on a paid key.
+    """
+    from jarvis.plugins.realtime.openai_subscription_live import (
+        OpenAISubscriptionLiveProvider,
+    )
+
+    provider = OpenAISubscriptionLiveProvider
+    assert provider.credential_candidates == ()
+    assert provider.provider_fallback_allowed is False
+    assert provider.implicit_usage_fallback_allowed is False
+    assert provider.external_credentials_kind == "chatgpt_oauth"
+
+
+def test_a_pinned_no_fallback_provider_is_the_only_candidate_id() -> None:
+    """An old API-key fallback setting must not survive a subscription pin."""
+    from types import SimpleNamespace
+
+    from jarvis.realtime.factory import _explicit_provider_ids
+
+    cfg = SimpleNamespace(
+        brain=SimpleNamespace(
+            realtime=SimpleNamespace(
+                provider="openai-live-subscription",
+                fallback_provider="openai-live",
+                fallback_provider_2="openai-live",
+            )
+        )
+    )
+
+    ids = _explicit_provider_ids(cfg)
+
+    assert ids == ["openai-live-subscription"] or ids == []
+    assert "openai-live" not in ids
+
+# --- P5: an explicit subscription-live pin outranks the pipeline profile ---
+
+
+class _SubscriptionLiveProvider(_BaseProvider):
+    """Mirrors the shipped adapter's capability flags, not its name."""
+
+    name = "openai-live-subscription"
+    credential_family = "openai-chatgpt-subscription"
+    credential_candidates = ()
+    browser_audio = True
+    client_managed_delegation = True
+    external_credentials_kind = "chatgpt_oauth"
+    implicit_usage_fallback_allowed = False
+    provider_fallback_allowed = False
+
+    def __init__(self):
+        super().__init__(api_key="external-login")
+
+
+def _fake_live_registry(monkeypatch) -> None:
+    import jarvis.realtime.factory as factory
+
+    plugins = {**_PLUGINS, "openai-live-subscription": _SubscriptionLiveProvider}
+    monkeypatch.setattr(factory, "list_plugins", lambda _group: list(plugins))
+    monkeypatch.setattr(factory, "load", lambda _group, name, protocol=None: plugins[name])
+
+
+def test_pinned_subscription_live_is_recognised_by_capability(monkeypatch) -> None:
+    from jarvis.realtime.factory import subscription_live_pin
+
+    _fake_live_registry(monkeypatch)
+
+    assert subscription_live_pin(_cfg(provider="openai-live-subscription")) == (
+        "openai-live-subscription"
+    )
+    # A billed provider is not a subscription pin, whatever it is called.
+    assert subscription_live_pin(_cfg(provider="openai-realtime")) == ""
+    # Neither is something that is not installed.
+    assert subscription_live_pin(_cfg(provider="not-installed")) == ""
+
+
+def test_explicit_live_pin_is_not_rerouted_into_the_pipeline(monkeypatch) -> None:
+    """The reported blocker: a leftover profile swallowed the chosen call."""
+    from jarvis.realtime.factory import _realtime_is_the_configured_voice_mode
+
+    _fake_live_registry(monkeypatch)
+    cfg = _cfg(
+        mode="realtime",
+        provider="openai-live-subscription",
+        profile="codex-subscription-voice",
+    )
+
+    assert _realtime_is_the_configured_voice_mode(cfg) is True
+
+
+def test_the_pipeline_profile_still_wins_without_a_live_pin(monkeypatch) -> None:
+    from jarvis.realtime.factory import _realtime_is_the_configured_voice_mode
+
+    _fake_live_registry(monkeypatch)
+    cfg = _cfg(mode="realtime", provider="openai-realtime", profile="codex-subscription-voice")
+
+    assert _realtime_is_the_configured_voice_mode(cfg) is False
+
+
+def test_a_live_pin_alone_does_not_switch_a_pipeline_install(monkeypatch) -> None:
+    """Mode stays the explicit switch; a pin is not a silent mode change."""
+    from jarvis.realtime.factory import _realtime_is_the_configured_voice_mode
+
+    _fake_live_registry(monkeypatch)
+    cfg = _cfg(mode="pipeline", provider="openai-live-subscription", profile="")
+
+    assert _realtime_is_the_configured_voice_mode(cfg) is False
+
+def test_subscription_live_selection_reads_no_api_key_at_all(monkeypatch) -> None:
+    """Cost safety: choosing the subscription call must not touch a key slot."""
+    import jarvis.realtime.factory as factory
+    from jarvis.realtime.factory import _explicit_provider_ids, subscription_live_pin
+
+    _fake_live_registry(monkeypatch)
+
+    def _no_credential_reads(_candidates):
+        raise AssertionError("the subscription selection must read no API key")
+
+    monkeypatch.setattr(factory, "get_secret_any", _no_credential_reads)
+
+    cfg = _cfg(mode="realtime", provider="openai-live-subscription")
+    cfg.brain.realtime.fallback_provider = "openai-realtime"
+
+    assert subscription_live_pin(cfg) == "openai-live-subscription"
+    # The pin forbids provider fallback, so the billed fallback slot is dropped.
+    assert _explicit_provider_ids(cfg) == ["openai-live-subscription"]
