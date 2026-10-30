@@ -1679,6 +1679,16 @@ export type ProviderTestStatus =
   | "unreachable"
   | "error";
 
+// Mirrors PROOF_STAGES in jarvis/brain/provider_test.py, weakest rung first
+// (anti-drift; a backend parity test guards this union against the Python SSOT).
+export type ProviderProofStage =
+  | "nothing"
+  | "reachable"
+  | "authenticated"
+  | "answered"
+  | "tool_call"
+  | "end_to_end";
+
 export interface ProviderTestResult {
   provider: string;
   status: ProviderTestStatus;
@@ -1690,6 +1700,12 @@ export interface ProviderTestResult {
    * blocker. False only for "unreachable" / "error".
    */
   integration_ok: boolean;
+  /**
+   * How DEEP the check got, which `status` cannot say: "ok" is reported both by
+   * a probe that ran a real turn and by one that only found a connected login.
+   * Never present "authenticated" as working turns or working tool calls.
+   */
+  proof: ProviderProofStage;
 }
 
 // The backend caps a test at 75 s (route-level wait_for); this client-side
@@ -1727,6 +1743,8 @@ export async function testProvider(providerId: string): Promise<ProviderTestResu
         detail: translate("apikeys_test.client_timeout"),
         latency_ms: PROVIDER_TEST_CLIENT_TIMEOUT_MS,
         integration_ok: false,
+        // A client-side abort learned nothing about the provider at all.
+        proof: "nothing",
       };
     }
     throw e;
