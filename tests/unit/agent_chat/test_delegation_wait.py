@@ -249,3 +249,38 @@ async def test_delayed_coding_dispatch_registers_jobs_before_wait_can_finish(mon
             await task
     finally:
         current_chat_turn.reset(token)
+
+
+def test_coding_result_returns_control_to_chatgpt_supervisor() -> None:
+    prompt = delegation_wait.continuation_prompt(
+        [{"task_id": "coding:pane-1:4:120", "agent": "T1",
+          "status": "completed", "report": "Implemented feature"}],
+        "Work on Bubble and only delegate what you cannot do.",
+    )
+    assert "You remain the supervisor" in prompt
+    assert "verify" in prompt
+    assert "independent evidence" in prompt
+    assert "Delegate only a specific remaining coding step" in prompt
+    assert "do not relay the whole original" in prompt
+    assert "Work on Bubble" in prompt
+
+
+def test_coding_permission_block_does_not_authorize_a_replacement_agent() -> None:
+    prompt = delegation_wait.continuation_prompt(
+        [{"task_id": "coding:pane-2:7:130", "agent": "T2",
+          "status": "needs_input", "report": "Edit permission needed"}],
+        "Work on Bubble.",
+    )
+    assert "permission-blocked result is a blocker" in prompt
+    assert "start a replacement agent automatically" in prompt
+
+
+def test_non_coding_delegation_keeps_its_existing_concise_handoff() -> None:
+    prompt = delegation_wait.continuation_prompt(
+        [{"task_id": "society:mail:1", "agent": "Mail", "status": "completed",
+          "report": "Message delivered"}],
+        "Summarize the email outcome.",
+    )
+    assert "You remain the supervisor" not in prompt
+    assert "These are external reports" in prompt
+    assert "Message delivered" in prompt

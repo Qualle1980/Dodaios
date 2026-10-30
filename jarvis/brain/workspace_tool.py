@@ -53,7 +53,15 @@ class WorkspaceOrchestrationTool:
     risk_tier = "monitor"
     is_action_tool = True
     description = (
-        "Route coding tasks to Projects > Workspaces > coding agents (the coding panes of "
+        "ChatGPT is the lead: for a general project goal (e.g. 'continue Bubble'), "
+        "first inspect and read the named project with Jarvis' existing tools, "
+        "identify unfinished work, and complete cheap simple steps directly. "
+        "Only delegate a specific remaining coding change that Jarvis cannot "
+        "efficiently do; provide that bounded change, files and acceptance tests, "
+        "NOT the entire user's original project goal. Once a coding result "
+        "returns, independently verify it and decide whether anything else is needed. "
+        "Explicit requests to start a named coding agent are exempt from this first-look "
+        "rule. Route coding tasks to Projects > Workspaces > coding agents (the coding panes of "
         "the Agentic IDE). The user's named Dodaios agents (their team, e.g. a Scout or a "
         "Gmail agent) are NOT panes: reach them with delegate_to_agent or message_agent. "
         "A resolve result carrying jarvis_agent means the name is such an agent. "
