@@ -591,7 +591,10 @@ def _completed() -> httpx.Response:
 
 
 def test_body_is_minimal_and_stateless() -> None:
-    assert chatgpt_plan.build_body(_req(), "gpt-a") == {
+    body = chatgpt_plan.build_body(_req(), "gpt-a")
+    # The cache key is asserted on its own below; it is derived, not content.
+    body.pop("prompt_cache_key")
+    assert body == {
         "model": "gpt-a",
         "input": [{"role": "user", "content": [
             {"type": "input_text", "text": "Antworte exakt: DODAIOS-SIWC-OK"},  # i18n-allow
@@ -897,3 +900,41 @@ def test_the_plan_brain_qualifies_as_a_structured_subscription_seat() -> None:
     brain = chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-a", structured_prompts=True)
     assert brain._model == "gpt-a"
     assert chatgpt_plan.ChatGPTPlanBrain.native_system_prompt is True
+
+
+def test_the_static_prefix_gets_a_stable_cache_key() -> None:
+    """The ~22k tokens of instructions + tool schemas are identical every turn.
+
+    Measured on the live install 2026-10-30: 24 voice turns, 712_650 input
+    tokens, 29_694 per turn, and ONE cache hit. OpenAI routes a request to a
+    cache by ``prompt_cache_key``; without one the stable prefix lands on a
+    different machine each turn and is paid in full. The key must therefore
+    depend on the prefix ONLY -- a key that moved with the user's question
+    would route every turn somewhere new again, which is today's behaviour.
+    """
+    first = chatgpt_plan.build_body(_req(), "gpt-a")
+    assert first["prompt_cache_key"]
+
+    later = BrainRequest(
+        system="Be brief.",
+        messages=[
+            BrainMessage(role="system", content="Extra rule."),
+            BrainMessage(role="user", content="Etwas voellig anderes."),  # i18n-allow
+        ],
+    )
+    assert chatgpt_plan.build_body(later, "gpt-a")["prompt_cache_key"] == first["prompt_cache_key"]
+
+    other_tools = BrainRequest(
+        system="Be brief.",
+        messages=[BrainMessage(role="system", content="Extra rule.")],
+        tools=({"name": "read_file", "description": "Read a file.", "input_schema": {}},),
+    )
+    assert (
+        chatgpt_plan.build_body(other_tools, "gpt-a")["prompt_cache_key"]
+        != first["prompt_cache_key"]
+    )
+
+    assert (
+        chatgpt_plan.build_body(_req(), "gpt-b")["prompt_cache_key"]
+        != first["prompt_cache_key"]
+    )

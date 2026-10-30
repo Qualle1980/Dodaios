@@ -26,6 +26,7 @@ request id, so the UI can explain them (usage limit, ineligible account, ...).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator, Mapping
@@ -96,6 +97,54 @@ def tool_name_map(req: BrainRequest) -> dict[str, str]:
     return _openai_tool_name_map(tuple(req.tools or ()))
 
 
+def _log_weight(body: dict[str, Any]) -> None:
+    """Record what each part of the request weighs, every turn.
+
+    The ledger says a turn cost 29_694 input tokens; it cannot say which part
+    of the request they were. Four characters are roughly one token, which is
+    accurate enough to tell a bloated tool catalogue from a long conversation
+    -- the question that decides where trimming pays.
+    """
+    def weight(value: Any) -> int:
+        if isinstance(value, str):
+            return len(value) // 4
+        return len(json.dumps(value, separators=(",", ":"))) // 4 if value else 0
+
+    instructions = weight(body.get("instructions"))
+    tools = weight(body.get("tools"))
+    conversation = weight(body.get("input"))
+    log.info(
+        "plan request ~%d tokens: instructions %d, tools %d (%d schemas), conversation %d",
+        instructions + tools + conversation,
+        instructions,
+        tools,
+        len(body.get("tools") or ()),
+        conversation,
+    )
+
+
+def _cache_key(model: str, instructions: str, tools: Any) -> str:
+    """A routing key for the part of the request that never changes.
+
+    Instructions and tool schemas are ~22k tokens and byte-identical from one
+    turn to the next, yet a stable prefix is only reused when the request
+    reaches the machine that holds it. OpenAI routes on ``prompt_cache_key``,
+    so the key is derived from the prefix ALONE: including the conversation
+    would send every turn to a fresh machine, which is the behaviour this
+    replaces (live install 2026-10-30: 29_694 input tokens per voice turn,
+    one cache hit in twenty-four).
+
+    The model is part of the key because a cache entry never crosses models.
+    """
+    digest = hashlib.sha256()
+    digest.update(model.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(instructions.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(json.dumps(tools or [], sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    return f"jarvis-{digest.hexdigest()[:32]}"
+
+
 def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
     """The Responses request: full history, instructions, tools, nothing optional.
 
@@ -116,6 +165,8 @@ def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
         body["instructions"] = instructions
     if req.tools:
         body["tools"] = _tools_responses_format(_tools_openai_format(tuple(req.tools), names))
+    body["prompt_cache_key"] = _cache_key(model, body.get("instructions", ""), body.get("tools"))
+    _log_weight(body)
     return body
 
 
