@@ -6344,12 +6344,14 @@
       "pipeline": "Pipeline brain",
       "agent": "Coding agent",
       "worker": "Mission worker",
+      "chat": "Chat brain",
       "stt": "Speech to text",
       "tts": "Text to speech"
     },
     "surface": {
       "background": "Behind the scenes",
       "voice": "Voice",
+      "jarvis_chat": "Chat",
       "agent_chat": "Agent chat",
       "mission": "Mission",
       "agentic_ide": "Agentic IDE",
