@@ -14992,6 +14992,12 @@ def _classify_provider_error(msg: str, *, default: str) -> str:
     if _is_context_overflow_exc(msg):
         return "context_overflow"
     m = msg.lower()
+    # The ChatGPT browser bridge speaks through a browser tab, so its failures
+    # are about that tab -- never about the network (live 2026-10-30: eleven
+    # "Netzwerk pruefen" for a bridge whose network was fine). Transient on
+    # purpose: reopening the tab fixes it, so the provider must not dead-list.
+    if "chatgpt bridge error" in m or "browser_stream_inconsistent" in m:
+        return "browser_bridge"
     # Code-first terminal fallback for a 401/402 that carries the numeric HTTP code
     # but NONE of the known wordings (a bare live "Error code: 401 - invalid x-api-key"
     # / "Error code: 402 - Payment Required"). A 401 = invalid/expired/wrong-account
@@ -15078,6 +15084,7 @@ def _format_provider_chain_error(
     vision_unsupported: list[str] = []
     invalid_models: list[str] = []
     context_overflow: list[str] = []
+    browser_bridge: list[str] = []
     local_context: list[str] = []
     rate_limited: list[str] = []
     empty_responses: list[str] = []
@@ -15102,6 +15109,8 @@ def _format_provider_chain_error(
             rate_limited.append(prov_name)
         elif kind == "empty_response":
             empty_responses.append(prov_name)
+        elif kind == "browser_bridge":
+            browser_bridge.append(prov_name)
         else:
             other_fails.append(prov_name)
 
@@ -15123,6 +15132,7 @@ def _format_provider_chain_error(
     context_overflow = _uniq(context_overflow)
     rate_limited = _uniq(rate_limited)
     empty_responses = _uniq(empty_responses)
+    browser_bridge = _uniq(browser_bridge)
     other_fails = _uniq(other_fails)
 
     parts: list[str] = []
@@ -15188,9 +15198,18 @@ def _format_provider_chain_error(
             "(vermutlich Safety-Filter). Anders formulieren oder anderen "
             "Provider per UI aktivieren."
         )
+    # 3b. The browser bridge failed: a named cause with a real action, never
+    # the network (live 2026-10-30, eleven times in one afternoon).
+    if browser_bridge:
+        parts.append(
+            f"Provider {', '.join(browser_bridge)} konnte die ChatGPT-Sitzung "
+            "nicht nutzen. Den ChatGPT-Tab im Browser oeffnen, anmelden und "  # i18n-allow
+            "die Frage erneut stellen -- oder unter API-Keys einen anderen "  # i18n-allow
+            "Provider aktivieren."  # i18n-allow
+        )
     # 4. Other failures only mentioned when there is no clear root cause
     if (not missing_keys and not invalid_models and not context_overflow
-            and not local_context
+            and not local_context and not browser_bridge
             and not rate_limited and not empty_responses and other_fails):
         parts.append(
             f"Provider {', '.join(other_fails)} unerreichbar. "
