@@ -154,13 +154,31 @@ class TestFitOnTheManager:
         m._skill_turn_match = None
         return m
 
-    def test_cloud_sized_window_keeps_the_whole_surface(self) -> None:
+    def test_cloud_sized_window_keeps_a_surface_worth_its_tokens(self) -> None:
+        """A roomy window spares a cheap surface -- not a large one.
+
+        A million-token window used to send all 221 tools every turn. Live
+        2026-10-30: ~15_000 of a 29_694-token request were tool schemas,
+        resent whole, for 101 tokens of answer. Cost is a trimming reason of
+        its own now; fitting was never the only thing that mattered.
+        """
         m = self._mgr()
-        tools = {f"t{i}": _tool(f"t{i}", size=10, mcp=i % 2 == 0) for i in range(221)}
+        tools = {f"t{i}": _tool(f"t{i}", size=10, mcp=i % 2 == 0) for i in range(8)}
         fitted, deferred = m._shortlist_tools(
             tools, _FakeBrain(1_048_576), system_prompt="x" * 40_000, history=None
         )
         assert fitted is tools and not deferred
+
+    def test_cloud_sized_window_still_trims_a_large_surface(self) -> None:
+        """The other half of the pair above: the catalogue is deferred, not
+        dropped, and every tool stays callable."""
+        m = self._mgr()
+        tools = {f"t{i}": _tool(f"t{i}", size=10, mcp=i % 2 == 0) for i in range(221)}
+        surface, deferred = m._shortlist_tools(
+            tools, _FakeBrain(1_048_576), system_prompt="x" * 40_000, history=None
+        )
+        assert deferred
+        assert set(tools) <= set(surface)
 
     def test_local_window_trims_the_live_shape(self) -> None:
         # 221 tools, a long system prompt, a 32k window: the surface shrinks
