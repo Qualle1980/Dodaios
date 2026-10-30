@@ -11631,11 +11631,21 @@ class BrainManager:
             _PUBLISH_RESPONSE_EVENT.reset(token)
 
     async def _generate(self, user_text: str, *args: Any, **kwargs: Any) -> str:
-        """A voice turn. Its spend is published on ``BrainTurnCompleted`` with
+        """One brain turn. Its spend is published on ``BrainTurnCompleted`` with
         the realtime/tool/pipeline split, so the ledger row the metered
-        provider writes underneath is tagged and not counted a second time."""
-        from jarvis.costs.ledger import usage_context
+        provider writes underneath is tagged and not counted a second time.
 
+        ``voice-turn`` is the DEFAULT tag, not a verdict: the speech pipeline is
+        the biggest caller of this method but not the only one — the typed chat
+        (``jarvis/agent_chat/runner_brain.py``), the skill finder and the CLI
+        route come through here too, and tagging those as speech made the
+        ledger answer "what does the voice cost?" with the sum of everything.
+        A caller that has already named itself therefore keeps its own name.
+        """
+        from jarvis.costs.ledger import current_caller, usage_context
+
+        if current_caller():
+            return await self._generate_untagged(user_text, *args, **kwargs)
         with usage_context("voice-turn"):
             return await self._generate_untagged(user_text, *args, **kwargs)
 

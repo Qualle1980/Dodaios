@@ -89,6 +89,46 @@ def test_the_caller_is_read_when_complete_is_called_not_when_consumed(
     assert [r.caller for r in ledger.read_usage(ledger_path, 0, 2**62)] == ["dictation"]
 
 
+class _TagSpy:
+    """Just enough of a brain manager to see which tag reaches the provider."""
+
+    def __init__(self) -> None:
+        self.seen: str | None = None
+
+    async def _generate_untagged(self, *_a: object, **_kw: object) -> str:
+        self.seen = ledger.current_caller()
+        return "ok"
+
+
+def test_a_brain_turn_that_named_itself_is_not_recounted_as_speech() -> None:
+    """``voice-turn`` is this method's default, never a verdict.
+
+    The speech pipeline is its biggest caller but not its only one: the typed
+    chat, the skill finder and the CLI route come through the same method.
+    Tagging those as speech made the ledger answer "what does the voice cost?"
+    with the sum of every surface.
+    """
+    from jarvis.brain.manager import BrainManager
+
+    spy = _TagSpy()
+
+    async def run() -> None:
+        with ledger.usage_context("jarvis-chat"):
+            await BrainManager._generate(spy, "hi")
+
+    asyncio.run(run())
+    assert spy.seen == "jarvis-chat"
+
+
+def test_an_unnamed_brain_turn_still_counts_as_speech() -> None:
+    """The default has to stay, or the voice's own spend loses its name."""
+    from jarvis.brain.manager import BrainManager
+
+    spy = _TagSpy()
+    asyncio.run(BrainManager._generate(spy, "hi"))
+    assert spy.seen == "voice-turn"
+
+
 def test_wrapping_twice_is_wrapping_once() -> None:
     inner = FakeBrain()
     once = meter_brain(inner, "x")
