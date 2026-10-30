@@ -166,6 +166,11 @@ class TurnHandle:
     control_service: Any = None
     #: A continuation keeps the turn's already resolved language and identity.
     continuation: bool = False
+    #: Set for the wave that answers an unverified coding completion: this
+    #: turn may not claim the delegated work is good without reading the diff
+    #: and running the tests itself
+    #: (:class:`jarvis.agent_chat.delegation_acceptance.AcceptanceGate`).
+    acceptance_gate: Any = None
 
 
 # ------------------------------------------------------------ history

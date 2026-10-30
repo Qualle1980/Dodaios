@@ -6418,6 +6418,8 @@ class Registry:
         agent: str | None = None,
         account: str | None = None,
         workspace_id: str | None = None,
+        model: str | None = None,
+        permission_mode: str | None = None,
     ) -> tuple[list[Terminal], bool]:
         """Open a batch in one pinned workspace, rejecting oversized requests.
 
@@ -6450,6 +6452,8 @@ class Registry:
                         agent=agent,
                         account=account,
                         workspace_id=selected.id,
+                        model=model,
+                        permission_mode=permission_mode,
                     )
                 )
             except SessionError as exc:

@@ -25,6 +25,23 @@ def pytest_configure(config) -> None:  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
+def _no_inherited_coding_agent_env(monkeypatch):
+    """Run every suite in the same environment CI has, not the shell's.
+
+    A suite started from inside a coding agent's own session inherits that
+    agent's markers. One of them decides real behaviour: with
+    ``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`` set, the Agentic IDE refuses to spawn
+    a Claude pane at all (a parent security environment would force the pane's
+    permission mode back to asking). Tests that create panes would then pass
+    on CI and fail on a maintainer's machine, or the reverse. A test that wants
+    the inherited-environment behaviour sets the variable itself, which beats
+    this fixture.
+    """
+    for name in ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _society_runtime_isolated():
     """Put the process-wide society runtime back after every test.
 

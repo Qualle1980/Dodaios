@@ -22,6 +22,7 @@ from typing import Any
 
 from jarvis.core.delegated_work import DelegatedWork, collect_delegated_work
 
+from .delegation_acceptance import gate_for
 from .events import make_event
 
 log = logging.getLogger(__name__)
@@ -307,6 +308,16 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 break
             prompt = continuation_prompt(rows, original)
             stored = service.store.get_session(handle.session.session_id)
+            # A coding agent's own "done" is delivery, never acceptance. The
+            # wave that answers one may not tell the person the work is good
+            # until it has read the diff and run the tests itself.
+            acceptance = gate_for(rows)
+            if acceptance is not None:
+                log.info(
+                    "agent chat %s: turn %s answers unverified coding work %s — an "
+                    "acceptance claim now needs its own git and test evidence",
+                    handle.session.session_id, handle.turn_id, list(acceptance.work),
+                )
             active = replace(
                 active,
                 session=replace(
@@ -314,6 +325,7 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 ),
                 history=service.store.list_events(handle.session.session_id),
                 continuation=True,
+                acceptance_gate=acceptance,
             )
         await gate.publish()
     if parked is not None:

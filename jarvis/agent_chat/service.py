@@ -1143,6 +1143,8 @@ class AgentChatService:
         routine_run: bool = False,
         author: dict[str, str] | None = None,
         background_result: bool = False,
+        acceptance_gate: Any = None,
+        origin_turn_id: str = "",
     ) -> str:
         """Persist the person's message and start the turn. Returns turn_id.
 
@@ -1151,6 +1153,14 @@ class AgentChatService:
         their own task, so the turn runs with their standing, but nothing was
         typed: no command parsing, no goal steering, and the timeline marks
         the message as that request's result instead of a new bubble.
+
+        ``origin_turn_id`` names the turn that first carried the request, so a
+        per-request limit is not reset by answering it in a later turn.
+
+        ``acceptance_gate`` travels with such a result: the coding work it
+        reports was never independently verified, and a NEW turn would
+        otherwise start with an empty gate and could publish an unearned
+        "PASS" (:mod:`jarvis.agent_chat.delegation_acceptance`).
 
         ``author`` marks a message another agent wrote on the person's behalf
         (``{"agent_id", "name"}``, a Jarvis agent steering a coding thread):
@@ -1472,6 +1482,11 @@ class AgentChatService:
                 output_language=output_language,
                 goal_turn=native_goal,
                 control_service=self,
+                # A background result carries the gate of the work it answers,
+                # so the FIRST wave of this new turn is already held to the
+                # same evidence. Supplied by the application, never by a tool
+                # argument or model text.
+                acceptance_gate=acceptance_gate,
             )
         except BaseException as exc:
             try:
@@ -1533,6 +1548,7 @@ class AgentChatService:
                 display_text if display_text is not None else text,
                 direct_user and incoming is None,
                 str(handle.trace_id),
+                origin_turn_id=origin_turn_id,
             )
             origin_token = current_chat_turn.set(origin)
             from jarvis.agent_chat.turn_completion import TurnCompletion

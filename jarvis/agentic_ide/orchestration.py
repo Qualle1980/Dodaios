@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
+import os
 import random
 import re
 import threading
@@ -138,6 +140,9 @@ def _coding_cli(spoken: str) -> str | None:
     return None
 
 
+log = logging.getLogger(__name__)
+
+
 def _default_cli() -> str | None:
     """The first installed coding CLI, for a request that names none."""
     from jarvis.workspace import agents as workspace_agents
@@ -148,6 +153,85 @@ def _default_cli() -> str | None:
         if accepts_prompts(info.name) and agent_argv(info.name) is not None:
             return info.name
     return None
+
+
+async def _chat_seat_quota(cli: str | None, account: str | None = None) -> tuple[str, str]:
+    """Whether the seat this dispatch would run on still has budget.
+
+    Read from :mod:`jarvis.agent_usage`, which answers per account without
+    spawning anything and says whether its numbers are live or cached. Only
+    the SELECTED seat decides: a nearly empty seat the work would not touch
+    must not block it, and a healthy one elsewhere must not clear it.
+
+    ``("blocked", reason)`` refuses the dispatch. ``("unknown", reason)`` lets
+    it proceed but has to be SAID -- a missing reading is not a clearance, and
+    several CLIs publish no usage at all, so refusing on absence would make
+    delegation impossible rather than safe.
+    """
+    if not cli:
+        return ("unknown", "no CLI was selected")
+    try:
+        from jarvis import agent_accounts, agent_usage
+        from jarvis.agent_chat.delegation_budget import verdict_for_seat
+
+        if not agent_usage.supports_usage(cli):
+            return ("unknown", f"{cli} publishes no plan usage this build can read")
+        accounts = await asyncio.to_thread(agent_accounts.list_accounts, cli)
+        seat = str(account or "") or await asyncio.to_thread(
+            lambda: agent_accounts.active_account(cli).id
+        )
+        readings = await asyncio.to_thread(agent_usage.collect, accounts)
+        verdict = verdict_for_seat(readings, seat)
+    except Exception:  # noqa: BLE001 - an unreadable budget is unknown, not empty
+        log.warning("chat dispatch: the seat's plan usage could not be read", exc_info=True)
+        return ("unknown", "the seat's plan usage could not be read")
+    if verdict.blocked:
+        return ("blocked", verdict.reason)
+    return ("allowed" if verdict.allowed else "unknown", verdict.reason)
+
+
+def _chat_pane_tier(requested: object) -> str:
+    """The Claude tier a chat-addressed pane may run on, or refuse.
+
+    The mission-worker model policy (#67) does not reach Agentic IDE panes,
+    and the vendor's interactive default is not stable, so a chat-created pane
+    pins a documented CLI alias instead of inheriting whatever the CLI picks.
+    """
+    chosen = str(requested or "sonnet").strip().lower()
+    if chosen not in {"sonnet", "haiku"}:
+        raise SessionError("Claude Code chat panes require sonnet or haiku, not Opus.")
+    from jarvis.workspace.launch_picks import normalize_model
+
+    if normalize_model("claude", chosen) != chosen:
+        raise SessionError("Claude Code cannot pin the requested model; nothing started.")
+    return chosen
+
+
+def _chat_pane_model(cli: str | None, requested: object = None) -> str:
+    """Fail closed before SPAWNING a chat-addressed Claude pane.
+
+    Two separate reasons to refuse: a tier we will not run on, and a parent
+    Claude security environment this process inherited. The second is not ours
+    to switch off -- a credential-scrubbing flag set by whoever started Dodaios
+    stays set, and the caller gets an honest refusal instead of a pane whose
+    permission mode was silently forced back to asking.
+    """
+    if cli != "claude":
+        return ""
+    if os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "").strip().lower() not in {
+        "", "0", "false",
+    }:
+        raise SessionError(
+            "A parent Claude security environment would force this pane's permission "
+            "mode back to default. Restart Dodaios from its ordinary desktop shortcut "
+            "or a clean shell; no coding prompt was sent."
+        )
+    return _chat_pane_tier(requested)
+
+
+def _chat_pane_permission(cli: str | None) -> str | None:
+    # acceptEdits may still request permission for shell commands. Never bypass.
+    return "acceptEdits" if cli == "claude" else None
 
 
 def _score(reference: str, ids: Iterable[str], names: Iterable[str]) -> int:
@@ -731,6 +815,10 @@ class WorkspaceOrchestrator:
             count = 1
         count = max(1, min(count, MAX_PANES_PER_REQUEST))
         name = str(args.get("name") or "").strip()
+        # A chat-created pane must never silently inherit the CLI's Opus default.
+        # Validate all groups before creating even the first pane.
+        if cli is None:
+            cli = _default_cli()
         created = []
         capped = False
         creation_error = ""
@@ -742,24 +830,63 @@ class WorkspaceOrchestrator:
                 return groups
             count = sum(n for _, n in groups)
         try:
+            choices = groups if isinstance(mixed, list) and mixed else [(cli, count)]
+            selected_models = {
+                selected: _chat_pane_model(selected, args.get("model"))
+                for selected, _ in choices
+            }
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
+            return {"status": "not_accepted", "success": False, "reason": str(exc)}
+        # The seat this would run on, before it runs. A plan window at or
+        # below ten percent starts nothing new; an unreadable one proceeds but
+        # is named in the receipt, because "no reading" is not "fine".
+        quota_note = ""
+        for selected, _count in choices:
+            state, reason = await _chat_seat_quota(selected, args.get("account"))
+            if state == "blocked":
+                log.info("chat dispatch refused on quota: %s", reason)
+                return {
+                    "status": "not_accepted",
+                    "success": False,
+                    "quota": "low",
+                    "reason": (
+                        f"{reason}. Nothing was started. Say so and let the person decide "
+                        "whether to spend the rest of this window."
+                    ),
+                }
+            if state == "unknown" and not quota_note:
+                quota_note = reason
+        try:
             if isinstance(mixed, list) and mixed:
                 created, capped = [], False
                 for group_cli, group_count in groups:
                     made, cut = await self.registry.add_terminals(
-                        group_count, agent=group_cli, workspace_id=workspace["id"]
+                        group_count,
+                        agent=group_cli,
+                        workspace_id=workspace["id"],
+                        model=selected_models[group_cli],
+                        permission_mode=_chat_pane_permission(group_cli),
                     )
                     created.extend(made)
                     capped = capped or cut
             elif count == 1 and name:
                 created = [
                     await self.registry.add_terminal(
-                        workspace_id=workspace["id"], agent=cli, name=name
+                        workspace_id=workspace["id"],
+                        agent=cli,
+                        name=name,
+                        model=selected_models[cli],
+                        permission_mode=_chat_pane_permission(cli),
                     )
                 ]
                 capped = False
             else:
                 created, capped = await self.registry.add_terminals(
-                    count, agent=cli, workspace_id=workspace["id"]
+                    count,
+                    agent=cli,
+                    workspace_id=workspace["id"],
+                    model=selected_models[cli],
+                    permission_mode=_chat_pane_permission(cli),
                 )
         except SessionError as exc:  # Return the refusal or partial creation receipt to the caller.
             if not created:
@@ -782,6 +909,8 @@ class WorkspaceOrchestrator:
         ]
         delivery_ids = [self._issue(target) for target in targets]
         result: dict[str, Any] = {
+            # A budget nobody could read is reported, not assumed away.
+            **({"quota": "unknown", "quota_detail": quota_note} if quota_note else {}),
             "status": "created",
             "project": project["name"],
             "workspace": workspace["name"],
@@ -1023,6 +1152,13 @@ class WorkspaceOrchestrator:
         its own request_id.
         """
         before = term.status
+        if term.agent == "claude" and not str(term.model or "").strip():
+            # A pane opened before the tier guard existed (or by hand in the
+            # IDE) carries no model, so its next launch would take the CLI's
+            # own default. A restart asked for THROUGH the chat is the one
+            # moment this can be corrected without touching anyone's running
+            # work; the IDE's own restart path is left alone.
+            term.model = _chat_pane_tier(None)
         term, started = await self.registry.restart_terminal(
             target["terminal_id"], owner.id
         )
@@ -1149,7 +1285,17 @@ class WorkspaceOrchestrator:
         groups = self._groups(args)
         if isinstance(groups, dict):
             return groups
-        requested = [{"agent": cli} for cli, count in groups for _ in range(count)]
+        try:
+            requested = [
+                {
+                    "agent": cli,
+                    "model": _chat_pane_model(cli, args.get("model")),
+                    **({"permission_mode": _chat_pane_permission(cli)} if cli == "claude" else {}),
+                }
+                for cli, count in groups for _ in range(count)
+            ]
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
+            return {"status": "not_accepted", "success": False, "reason": str(exc)}
         if len(requested) > MAX_PANES_PER_REQUEST:
             return {
                 "status": "not_accepted",
@@ -1648,6 +1794,39 @@ class WorkspaceOrchestrator:
                         "continues the agent's own conversation and stops nothing), then "
                         "resend this request with the same request_id and prompt.",
             }
+        if action == "send":
+            # An existing pane runs on the seat it was opened with.
+            state, reason = await _chat_seat_quota(found[1].agent, found[1].account)
+            if state == "blocked":
+                log.info("chat send refused on quota: %s", reason)
+                return {
+                    "status": "not_accepted",
+                    "success": False,
+                    "target": target,
+                    "completed": False,
+                    "input_written": False,
+                    "quota": "low",
+                    "reason": (
+                        f"{reason}. Nothing was sent. Say so and let the person decide "
+                        "whether to spend the rest of this window."
+                    ),
+                }
+        if action == "send" and found[1].agent == "claude":
+            # Previously opened panes too: otherwise a chat send silently
+            # reuses a session running on the CLI's own (Opus) default. A
+            # stopped pane is refused ABOVE this, with its restart receipt --
+            # that refusal is the one the caller can act on, and ``_restart``
+            # pins the tier on the way back up, so recovery converges here
+            # instead of dead-ending.
+            selected = str(found[1].model or "").lower()
+            if "sonnet" not in selected and "haiku" not in selected:
+                return {
+                    "status": "not_accepted", "success": False,
+                    "target": target, "completed": False, "input_written": False,
+                    "reason": "Claude pane model is not pinned to Sonnet/Haiku. "
+                              "Restart this pane or open a new one with model='sonnet'; "
+                              "nothing was sent.",
+                }
         # The low-level gateway enforces idle/asking state and refuses exited
         # agents. It never falls through to a shell or a different pane.
         try:
