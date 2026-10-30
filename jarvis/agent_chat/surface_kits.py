@@ -169,7 +169,14 @@ def _jarvis_tools(_cfg: Any, _brain: Any, session: Any) -> dict[str, Tool]:
     from jarvis.society.browser.tool import lead_browser_tools
 
     stance = "plan" if getattr(session, "permission_mode", "") == "plan" else "ask"
-    tools = folder_tools(Path(getattr(session, "cwd", "") or _chat_workspace()), stance=stance)
+    # Where the chat STARTS when it was given no folder. The scratch workspace
+    # under AppData holds nothing the person put there, so "list this folder",
+    # every relative path and every glob described an empty directory and the
+    # model concluded it could not reach the person's files -- while the same
+    # question spoken was answered, because run-shell inherits the app's own
+    # working directory (live 2026-10-30). This is not a permission change:
+    # agent_chat.tools.resolve_path always passed an absolute path through.
+    tools = folder_tools(Path(getattr(session, "cwd", "") or Path.home()), stance=stance)
     tools.update(lead_browser_tools(session))
     return tools
 
