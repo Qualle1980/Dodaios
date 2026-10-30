@@ -34,6 +34,13 @@ from typing import Any, Literal
 # ---------------------------------------------------------------------------
 
 SURFACE_VOICE = "voice"
+#: The typed Jarvis chat — Jarvis' own brain answering a keyboard, not a
+#: coding agent (that is :data:`SURFACE_AGENT_CHAT`). Its own surface because
+#: it is the other half of the question this section exists to answer: what
+#: does speaking cost, and what does typing cost? Folded into ``background``
+#: it sat with the wiki curator and dictation polish, which is not where a
+#: foreground turn the person waited for belongs.
+SURFACE_JARVIS_CHAT = "jarvis-chat"
 SURFACE_AGENT_CHAT = "agent-chat"
 SURFACE_MISSION = "mission"
 #: The speech layer. Its own surface because it does not bill by token:
@@ -60,6 +67,8 @@ ROLE_AGENT = "agent"
 
 ROLE_WORKER = "worker"
 """An autonomous mission worker."""
+ROLE_CHAT = "chat"
+"""Jarvis' brain answering a typed turn on its own chat surface."""
 ROLE_STT = "stt"
 ROLE_TTS = "tts"
 ROLE_BACKGROUND = "background"

@@ -16,11 +16,13 @@ from __future__ import annotations
 from .aggregate import CostReport, build_report
 from .model import (
     ROLE_AGENT,
+    ROLE_CHAT,
     ROLE_PIPELINE,
     ROLE_REALTIME,
     ROLE_TOOL,
     ROLE_WORKER,
     SURFACE_AGENT_CHAT,
+    SURFACE_JARVIS_CHAT,
     SURFACE_MISSION,
     SURFACE_VOICE,
     CostEntry,
@@ -29,11 +31,13 @@ from .sources import CostSources, collect_entries, default_sources
 
 __all__ = [
     "ROLE_AGENT",
+    "ROLE_CHAT",
     "ROLE_PIPELINE",
     "ROLE_REALTIME",
     "ROLE_TOOL",
     "ROLE_WORKER",
     "SURFACE_AGENT_CHAT",
+    "SURFACE_JARVIS_CHAT",
     "SURFACE_MISSION",
     "SURFACE_VOICE",
     "CostEntry",
