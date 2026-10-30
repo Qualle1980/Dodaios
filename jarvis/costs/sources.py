@@ -56,6 +56,12 @@ _REALTIME_FINISH = "realtime_usage"
 # Voice tiers that are not realtime run the classic pipeline.
 _REALTIME_TIER = "realtime"
 
+#: The ledger caller a voice turn carries (``BrainManager._generate``'s
+#: default). It is what tells a ``BrainTurnCompleted`` row published by the
+#: speech pipeline apart from one published by another surface on the same
+#: method.
+VOICE_CALLER = "voice-turn"
+
 
 @dataclass(frozen=True, slots=True)
 class CostSources:
@@ -208,6 +214,16 @@ def _voice_entries(path: Path | None, since_ms: int, until_ms: int) -> Iterator[
                     log.debug("cost read model: unparsable voice event payload (%s)", exc)
                     continue
                 if not isinstance(payload, dict):
+                    continue
+                # Every caller of ``BrainManager.generate`` publishes this
+                # event, not only the speech pipeline. A turn that named
+                # itself something else is not voice spend: its ledger row
+                # already reports it under its own caller, so billing it here
+                # too would count it twice. An unnamed turn is a voice turn —
+                # which is also what a row recorded before the field existed
+                # means, so nothing already written changes meaning.
+                owner = str(payload.get("caller") or "")
+                if owner and owner != VOICE_CALLER:
                     continue
                 turn_id = str(row["turn_id"] or "")
                 turn = turns.get(turn_id)
@@ -712,7 +728,7 @@ def _cli_entries(
 # the audit trail, not a second bill: a voice turn is on BrainTurnCompleted
 # with its role split, a chat turn on turn_finished, a mission worker on its
 # draft.
-COVERED_ELSEWHERE: frozenset[str] = frozenset({"voice-turn", "agent-chat", "mission-worker"})
+COVERED_ELSEWHERE: frozenset[str] = frozenset({VOICE_CALLER, "agent-chat", "mission-worker"})
 
 
 def _ledger_entries(path: Path | None, since_ms: int, until_ms: int) -> Iterator[CostEntry]:

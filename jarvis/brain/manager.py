@@ -13166,6 +13166,8 @@ class BrainManager:
                     model=model,
                     intent_level=decision.level,
                 ))
+                from jarvis.costs.ledger import current_caller as _usage_caller
+
                 await self._bus.publish(BrainTurnCompleted(
                     provider=prov_name,
                     model=model,
@@ -13175,6 +13177,9 @@ class BrainManager:
                     cost_usd=cost_usd_total,
                     text_len=len(response_text or ""),
                     finish_reason=str(getattr(agg, "finish_reason", "ok") or "ok"),
+                    # Who this turn belonged to, so the cost report does not
+                    # bill a typed chat turn as speech.
+                    caller=_usage_caller(),
                 ))
                 if turn_override is not None:
                     turn_override.receipt.record(
