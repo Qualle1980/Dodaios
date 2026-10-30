@@ -82,6 +82,7 @@ ROLES: tuple[str, ...] = (
     ROLE_REALTIME,
     ROLE_TOOL,
     ROLE_PIPELINE,
+    ROLE_CHAT,
     ROLE_AGENT,
     ROLE_WORKER,
     ROLE_STT,
@@ -90,6 +91,7 @@ ROLES: tuple[str, ...] = (
 )
 SURFACES: tuple[str, ...] = (
     SURFACE_VOICE,
+    SURFACE_JARVIS_CHAT,
     SURFACE_AGENT_CHAT,
     SURFACE_MISSION,
     SURFACE_AGENTIC_IDE,

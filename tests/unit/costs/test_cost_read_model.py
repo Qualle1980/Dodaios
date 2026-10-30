@@ -875,3 +875,70 @@ def test_the_chat_caller_the_runner_sets_is_the_one_the_report_reads() -> None:
 
     source = inspect.getsource(runner_brain)
     assert f'usage_context("{CHAT_CALLER}")' in source
+
+
+# ---------------------------------------------------------------- vocabulary
+
+
+def _ts_array(source: str, name: str) -> list[str]:
+    """The string literals of one exported TypeScript array, in order."""
+    import re
+
+    start = source.index(f"export const {name}")
+    # The declaration carries its own brackets ("CostSurface[]"), so the
+    # array starts at the assignment, not at the first bracket.
+    open_at = source.index("[", source.index("=", start))
+    body = source[open_at : source.index("]", open_at)]
+    return re.findall(r'"([^"]+)"', body)
+
+
+def _ts_union(source: str, name: str) -> list[str]:
+    """The string members of one exported TypeScript union type, in order."""
+    import re
+
+    start = source.index(f"export type {name} =")
+    body = source[start : source.index(";", start)]
+    return re.findall(r'"([^"]+)"', body)
+
+
+def _frontend(path: str) -> str:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3] / "jarvis/ui/web/frontend/src"
+    return (root / path).read_text(encoding="utf-8")
+
+
+def test_the_api_vocabulary_and_the_ui_agree_on_every_surface_and_role() -> None:
+    """The one check that would have caught a surface added in four places.
+
+    ``SURFACES`` / ``ROLES`` are what the facets endpoint offers as filters,
+    and the UI's own lists are what it can render and colour. A value present
+    in the read model but missing from either is invisible: entries carry it,
+    the filter never offers it, and nothing says so. ORDER matters too — both
+    sides drive how the section is read.
+    """
+    from jarvis.costs.model import ROLES, SURFACES
+
+    fmt = _frontend("components/costs/costFormat.ts")
+    hooks = _frontend("hooks/useCosts.ts")
+
+    assert list(SURFACES) == _ts_array(fmt, "ALL_SURFACES")
+    assert list(ROLES) == _ts_array(fmt, "ROLE_ORDER")
+    assert sorted(SURFACES) == sorted(_ts_union(hooks, "CostSurface"))
+    assert sorted(ROLES) == sorted(_ts_union(hooks, "CostRole"))
+
+
+def test_every_surface_and_role_has_a_label_in_every_locale() -> None:
+    """A missing label renders the raw key, which is how a person finds out."""
+    import json
+    from pathlib import Path
+
+    from jarvis.costs.model import ROLES, SURFACES
+
+    locales = Path(__file__).resolve().parents[3] / "jarvis/ui/web/frontend/src/i18n/locales"
+    for path in sorted(locales.glob("*.json")):
+        view = json.loads(path.read_text(encoding="utf-8"))["costs_view"]
+        for role in ROLES:
+            assert role.replace("-", "_") in view["role"], (path.name, role)
+        for surface in SURFACES:
+            assert surface.replace("-", "_") in view["surface"], (path.name, surface)
