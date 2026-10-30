@@ -25,6 +25,7 @@ from .model import (
     OPENAI_CONVENTION_RUNNERS,
     ROLE_AGENT,
     ROLE_BACKGROUND,
+    ROLE_CHAT,
     ROLE_PIPELINE,
     ROLE_REALTIME,
     ROLE_STT,
@@ -37,6 +38,7 @@ from .model import (
     SURFACE_AGENT_CHAT,
     SURFACE_AGENTIC_IDE,
     SURFACE_BACKGROUND,
+    SURFACE_JARVIS_CHAT,
     SURFACE_JARVIS_VOICE,
     SURFACE_MISSION,
     SURFACE_VOICE,
@@ -61,6 +63,12 @@ _REALTIME_TIER = "realtime"
 #: speech pipeline apart from one published by another surface on the same
 #: method.
 VOICE_CALLER = "voice-turn"
+
+#: The ledger caller a typed turn on Jarvis' own chat surface carries
+#: (``jarvis/agent_chat/runner_brain.py``). It must stay OUT of
+#: :data:`COVERED_ELSEWHERE`: no richer source reports this surface, so the
+#: ledger row is the only record of it.
+CHAT_CALLER = "jarvis-chat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -748,10 +756,20 @@ def _ledger_entries(path: Path | None, since_ms: int, until_ms: int) -> Iterator
         )
         # A Hermes / OpenClaw agent's model call is agent work, not background.
         runtime = row.caller == RUNTIME_CALLER
+        # A typed turn on Jarvis' own chat is foreground work the person sat
+        # and waited for, not a background job. Reading it as "background"
+        # put it in with the wiki curator and dictation polish and left the
+        # section unable to say what typing costs next to speaking.
+        if runtime:
+            surface, role = SURFACE_AGENT_CHAT, ROLE_AGENT
+        elif row.caller == CHAT_CALLER:
+            surface, role = SURFACE_JARVIS_CHAT, ROLE_CHAT
+        else:
+            surface, role = SURFACE_BACKGROUND, ROLE_BACKGROUND
         yield CostEntry(
             ts_ms=row.ts_ms,
-            surface=SURFACE_AGENT_CHAT if runtime else SURFACE_BACKGROUND,
-            role=ROLE_AGENT if runtime else ROLE_BACKGROUND,
+            surface=surface,
+            role=role,
             provider=row.provider or "unknown",
             model=row.model,
             tokens_in=row.tokens_in,

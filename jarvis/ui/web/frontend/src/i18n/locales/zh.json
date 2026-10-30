@@ -6344,12 +6344,14 @@
       "pipeline": "流水线大脑",
       "agent": "编程智能体",
       "worker": "行动执行者",
+      "chat": "对话大脑",
       "stt": "语音转文字",
       "tts": "文字转语音"
     },
     "surface": {
       "background": "后台",
       "voice": "语音",
+      "jarvis_chat": "对话",
       "agent_chat": "智能体对话",
       "mission": "行动",
       "agentic_ide": "Agentic IDE",

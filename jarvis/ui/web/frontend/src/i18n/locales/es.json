@@ -6344,12 +6344,14 @@
       "pipeline": "Cerebro de la cadena",
       "agent": "Agente de código",
       "worker": "Trabajador de misión",
+      "chat": "Cerebro del chat",
       "stt": "Voz a texto",
       "tts": "Texto a voz"
     },
     "surface": {
       "background": "En segundo plano",
       "voice": "Voz",
+      "jarvis_chat": "Chat",
       "agent_chat": "Chat de agentes",
       "mission": "Misión",
       "agentic_ide": "Agentic IDE",

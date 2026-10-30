@@ -22,6 +22,7 @@ export const ROLE_COLORS: Record<CostRole, string> = {
   realtime: "hsl(199 90% 62%)", // sky — the voice you talk to
   tool: "hsl(228 72% 68%)", // indigo — one call, one answer
   pipeline: "hsl(268 72% 68%)", // violet — the classic brain path
+  chat: "hsl(178 55% 48%)", // teal — the same brain, asked by keyboard
   agent: "hsl(152 58% 52%)", // green — coding agents
   worker: "hsl(18 88% 62%)", // orange — autonomous missions
   stt: "hsl(340 75% 65%)", // rose — the ear
@@ -33,6 +34,7 @@ export const ROLE_ORDER: CostRole[] = [
   "realtime",
   "tool",
   "pipeline",
+  "chat",
   "agent",
   "worker",
   "stt",
@@ -241,6 +243,7 @@ export function priceSourceTone(source: PriceSource): "ok" | "warn" | "off" | "e
 
 export const ALL_SURFACES: CostSurface[] = [
   "voice",
+  "jarvis-chat",
   "agent-chat",
   "mission",
   "agentic-ide",
@@ -273,8 +276,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
   // named after it (maintainer decision 2026-08-24).
   {
     id: "jarvis",
-    surfaces: ["voice", "agent-chat", "mission", "background"],
-    roles: ["realtime", "tool", "pipeline", "agent", "worker", "background"],
+    surfaces: ["voice", "jarvis-chat", "agent-chat", "mission", "background"],
+    roles: ["realtime", "tool", "pipeline", "chat", "agent", "worker", "background"],
   },
   // The assistant's voice — the speech layer built around the brain: the
   // ears (speech to text) and the mouth (text to speech). Bills by audio

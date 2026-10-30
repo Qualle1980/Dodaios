@@ -18,6 +18,8 @@ export type CostRole =
   | "pipeline"
   | "agent"
   | "worker"
+  // Jarvis' own brain answering a typed turn on its chat surface.
+  | "chat"
   // The speech layer bills by audio second and by character, not by token —
   // its own two roles rather than a shape forced onto the token vocabulary.
   | "stt"
@@ -28,6 +30,8 @@ export type CostRole =
 /** Which part of the app it was spent in. */
 export type CostSurface =
   | "voice"
+  // The typed Jarvis chat — Jarvis' brain at a keyboard, not a coding agent.
+  | "jarvis-chat"
   | "agent-chat"
   | "mission"
   | "agentic-ide"

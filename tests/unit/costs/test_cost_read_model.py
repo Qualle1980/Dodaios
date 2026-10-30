@@ -838,3 +838,40 @@ def test_the_typed_chat_caller_is_reported_from_the_ledger() -> None:
 
     assert "jarvis-chat" not in COVERED_ELSEWHERE
     assert VOICE_CALLER in COVERED_ELSEWHERE
+
+
+def test_a_typed_chat_turn_is_its_own_surface_not_a_background_job(tmp_path: Path) -> None:
+    """A turn the person sat and waited for is foreground spend.
+
+    Read as ``background`` it sat with the wiki curator and dictation polish,
+    and the section could not say what typing costs next to speaking — which
+    is the question it exists to answer.
+    """
+    from jarvis.costs import ledger
+
+    path = tmp_path / "llm_usage.db"
+    ledger.set_ledger_path(path)
+    try:
+        for caller in ("jarvis-chat", "wiki"):
+            ledger.record_usage(
+                provider="chatgpt-plan", model="gpt-x",
+                tokens_in=500, tokens_out=50, caller=caller, ts_ms=T0 + 1_000,
+            )
+        ledger.flush()
+        rows = {e.surface: e for e in collect_entries(CostSources(ledger_db=path))}
+    finally:
+        ledger.set_ledger_path(None)
+    assert set(rows) == {"jarvis-chat", "background"}
+    assert rows["jarvis-chat"].role == "chat"
+    assert rows["background"].role == "background"
+
+
+def test_the_chat_caller_the_runner_sets_is_the_one_the_report_reads() -> None:
+    """Two files have to agree on this string, and neither can see the other."""
+    import inspect
+
+    from jarvis.agent_chat import runner_brain
+    from jarvis.costs.sources import CHAT_CALLER
+
+    source = inspect.getsource(runner_brain)
+    assert f'usage_context("{CHAT_CALLER}")' in source
