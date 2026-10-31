@@ -64,6 +64,7 @@ const OK_TEST: ProviderTestResult = {
   detail: "Answered in 300 ms.",
   latency_ms: 300,
   integration_ok: true,
+  proof: "answered",
 };
 
 function installFetchMock(testResult: ProviderTestResult = OK_TEST, status = 200): Call[] {
@@ -352,6 +353,7 @@ describe("ProviderCard — a switched-to polish provider proves it works", () =>
       detail: "OpenAI polish request returned HTTP 429: you exceeded your quota",
       latency_ms: 235,
       integration_ok: true,
+      proof: "authenticated",
     });
 
     renderCard(dictationCard());
