@@ -743,6 +743,34 @@ describe("ChatStage (agent chat)", () => {
     expect(screen.queryByTestId("composer-send")).toBeNull();
   });
 
+  /*
+   * The in-process routes report per turn, so their input side is the bill.
+   *
+   * Measured live 2026-10-31 on a plan seat: twelve chat turns ran
+   * 16_356-17_156 input tokens against 68-179 output, and `cost_usd` was
+   * 0.0000 throughout. The receipt showed the output alone and no price, so
+   * the surface spending the plan window was the only one that never said so.
+   *
+   * The sibling test below keeps the opposite true for a vendor CLI, whose
+   * input figure re-counts the whole conversation on every step. The gate is
+   * positive on purpose -- a runner nobody knows keeps the output-only
+   * receipt instead of inheriting a number that would mislead.
+   */
+  it("shows what an in-process turn SENT, because that is what it costs", () => {
+    const started = Date.now();
+    const timeline = reduceEvents(EMPTY_TIMELINE, [
+      ev("user_message", { text: "welche termine habe ich morgen" }),
+      { seq: 2, ts_ms: started, kind: "turn_started", payload: { turn_id: "t1", provider: "chatgpt-plan", model: "gpt-6.1-sol", runner: "api" } },
+      { seq: 3, ts_ms: started, kind: "usage_delta", payload: { turn_id: "t1", usage: { input_tokens: 16356, output_tokens: 179, cache_hit_tokens: 33536 } } },
+    ]);
+    useAgentChatStore.setState({ activeSessionId: "s1", timeline });
+    render(<ChatStage />);
+    const live = within(screen.getByTestId("work-trace")).getByRole("status");
+    expect(live.textContent).toMatch(/16\.4k/);
+    expect(live.textContent).toMatch(/179/);
+    expect(live.textContent).toMatch(/33\.5k/);
+  });
+
   it("always shows that the turn is alive: the core, a word, the clock and the tokens", () => {
     vi.useFakeTimers();
     try {

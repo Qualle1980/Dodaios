@@ -797,11 +797,22 @@ export function TurnTrace({ turn, ...props }: { turn: TurnItem; onDecide?: Decid
   const t = useT();
   const usage = turn.usage ?? turn.liveUsage;
   const tokens = outputTokens(usage);
-  // Input first, because input is the bill. A plan seat prices at $0, so a
-  // receipt gated on `costUsd > 0` shows nothing at all; tokens are the real
-  // currency there and the only one the person can act on.
-  const sent = inputTokens(usage);
-  const cached = cachedTokens(usage);
+  // Input is the bill on an in-process route -- a plan seat prices at $0, so a
+  // receipt gated on `costUsd > 0` shows nothing at all, and tokens are the
+  // only currency the person can act on there.
+  //
+  // But NOT on a vendor CLI: it re-counts the whole conversation on every
+  // step, so its input figure is cumulative and reads as an absurd number for
+  // one question. That is why this receipt was output-only, and the reason
+  // still holds for those rows.
+  //
+  // So the test is positive, never a name list: the in-process routes are the
+  // ones that report per turn (`api`, `voice`, or no runner at all -- a vendor
+  // CLI always names itself). A runner nobody here knows keeps the safe,
+  // output-only receipt rather than inheriting a number that would mislead.
+  const perTurn = ["", "api", "voice"].includes(turn.runner.trim());
+  const sent = perTurn ? inputTokens(usage) : null;
+  const cached = perTurn ? cachedTokens(usage) : null;
   const answered = turn.blocks.some(block => block.kind === "text" && block.text.trim());
   return <WorkTrace {...props} blocks={turn.blocks} status={turn.status} startedMs={turn.startedMs} durationMs={turn.durationMs} error={turn.error}
     completionLabel={!answered ? t("agent_chat.turn_no_answer") : undefined}
