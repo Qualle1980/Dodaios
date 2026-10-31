@@ -64,7 +64,12 @@ async def test_claude_cache_preserves_oauth_header_and_stream_usage(
     monkeypatch.setenv("JARVIS_ANTHROPIC_PROMPT_CACHE", "1")
     wire = AnthropicWire()
     wire.intermediate_usage = intermediate_usage
-    async with AsyncAnthropic(api_key="", auth_token="test-only",  # noqa: S106 - local fake
+    # auth_token ALONE, exactly as ClaudeApiBrain._ensure_client builds the OAuth
+    # client. Passing api_key="" beside it used to be tolerated; anthropic 2.x
+    # rejects any two credential arguments outright ("Pass at most one of
+    # `api_key=`, `auth_token=`, ..."), so the empty string was both a lie about
+    # what production sends and a break waiting for the next SDK release (AP-28).
+    async with AsyncAnthropic(auth_token="test-only",  # noqa: S106 - local fake
         default_headers={"anthropic-beta": "oauth-2025-04-20"},
         http_client=wire.client(),
     ) as client:
