@@ -33,6 +33,7 @@ from jarvis.brain import provider_health_ledger as _health_ledger
 from jarvis.brain import provider_test as _provider_test
 from jarvis.brain import section_health as _section_health
 from jarvis.brain.model_catalog import ModelInfo, catalog_spec, classify_model
+from jarvis.brain.provider_test import PROVEN_NOTHING
 from jarvis.codex_auth import CodexAuthService
 from jarvis.core import config as cfg_mod
 from jarvis.core.events import SecretConfigured
@@ -155,6 +156,11 @@ class ProviderTestResponse(BaseModel):
     # is the blocker (ok / bad_key / no_credits / rate_limited / model_unavailable
     # / not_configured). False only for ``unreachable`` / ``error``.
     integration_ok: bool = True
+    # How DEEP the check got, which ``status`` cannot say: "ok" is reported both
+    # by a probe that ran a real turn and by one that only found a connected
+    # login. One of ``jarvis.brain.provider_test.PROOF_STAGES``; a reader must
+    # not treat ``authenticated`` as working turns or working tool calls.
+    proof: str = PROVEN_NOTHING
 
 
 # Per-provider model picker. ``CatalogSourceLiteral`` is the honest provenance of
@@ -1447,6 +1453,7 @@ async def test_provider_connection(provider_id: str, request: Request) -> Provid
         detail=_human_detail(result),
         latency_ms=round(result.latency_ms, 1),
         integration_ok=result.status in _provider_test.INTEGRATION_OK_STATUSES,
+        proof=result.proof,
     )
 
 
