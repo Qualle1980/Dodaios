@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from jarvis.brain.healthcheck import HealthResult
-from jarvis.brain.provider_test import ProviderTestResult, run_provider_test
+from jarvis.brain.provider_test import ProviderTestResult, at_least, run_provider_test
 from jarvis.ui.web.provider_spec import get_spec
 
 
@@ -316,3 +316,44 @@ def test_a_dictation_card_is_refused_instead_of_probed_as_a_recognizer() -> None
     assert built is False
     assert res.status == "error"
     assert "dictation layer" in res.detail
+def test_an_inconclusive_brain_probe_keeps_the_login_depth() -> None:
+    """A probe our own budget cut short may not be credited as a turn.
+
+    The credential WAS accepted and the model DID run, so the honest depth is
+    ``authenticated`` -- not ``answered``, and not ``nothing`` either. The
+    status stays ``error`` because the defect is in the probe, and the detail
+    is passed through verbatim rather than through the provider-error
+    classifier, which would read the wording as a verdict about the provider.
+    """
+    async def probe(_p, _m):
+        return HealthResult(
+            provider="gemini",
+            model="m",
+            ok=False,
+            error="the probe's token budget was spent before the first visible token",
+            duration_ms=77.0,
+            inconclusive=True,
+        )
+
+    res = _run(run_provider_test(get_spec("gemini"), _cfg(), present=True, brain_probe=probe))
+    assert res.status == "error"
+    assert res.proof == "authenticated"
+    assert not at_least(res.proof, "answered"), "an inconclusive probe never proves a turn"
+    assert "token budget" in res.detail
+    assert res.latency_ms == pytest.approx(77.0)
+
+
+def test_a_conclusive_brain_failure_still_classifies_normally() -> None:
+    """The regression guard: a real provider failure keeps its own status."""
+    async def probe(_p, _m):
+        return HealthResult(
+            provider="gemini",
+            model="m",
+            ok=False,
+            error="the provider closed the stream without answering",
+            duration_ms=12.0,
+        )
+
+    res = _run(run_provider_test(get_spec("gemini"), _cfg(), present=True, brain_probe=probe))
+    assert res.status != "ok"
+    assert not at_least(res.proof, "answered")

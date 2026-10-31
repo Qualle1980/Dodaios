@@ -25,6 +25,7 @@ fixed.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -208,3 +209,91 @@ def test_a_connected_login_does_not_prove_a_turn() -> None:
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_ANSWERED) is False
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_TOOL_CALL) is False
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_END_TO_END) is False
+# -- 4. Five outcomes, told apart ---------------------------------------------
+# A probe that cannot read an answer is not the same event as a provider that
+# cannot produce one, and a 2026-10-31 review found the repair collapsing both
+# into ok=False: a reasoning model spends this probe's 8-token budget on hidden
+# thought and closes the stream with no visible token, which would have turned
+# a healthy provider red. _openai_base documents that exact mode and floors the
+# budget to 4096 -- but only on the Responses transport, so the Chat path still
+# forwards the 8 (as max_completion_tokens, for precisely this model class).
+#
+# Each shape is pinned separately below, because the whole point is that they
+# must not be read off one flag.
+
+
+class _SlowBrain(_Brain):
+    """A brain whose stream never produces anything, for the timeout path."""
+
+    async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
+        await asyncio.sleep(30)
+        yield BrainDelta(content="too late")  # pragma: no cover
+
+
+class _SlowRegistry:
+    def instantiate(self, name: str, **kwargs: Any) -> Any:
+        return _SlowBrain((), **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["length", "max_tokens", "max_output_tokens", "LENGTH"])
+async def test_a_spent_token_budget_is_inconclusive_not_a_provider_fault(
+    reason: str,
+) -> None:
+    """The model ran; our own budget ended it. Neither a pass nor a defect."""
+    result = await _probe((BrainDelta(finish_reason=reason),))
+    assert not result.ok, "no answer came back, so nothing may claim a turn"
+    assert result.inconclusive, "the provider must not be blamed for our budget"
+    assert result.error and "inconclusive" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_spent_budget_after_empty_acknowledgements_is_still_inconclusive() -> None:
+    """The reason arrives on a later chunk than the keep-alives."""
+    result = await _probe(
+        (
+            BrainDelta(content=""),
+            BrainDelta(content=None),
+            BrainDelta(finish_reason="length"),
+        )
+    )
+    assert not result.ok
+    assert result.inconclusive
+
+
+@pytest.mark.asyncio
+async def test_silence_stays_a_failure_and_is_never_inconclusive() -> None:
+    """The 2026-10-30 bridge shape must not drift into the inconclusive bucket."""
+    result = await _probe(())
+    assert not result.ok
+    assert not result.inconclusive, "an empty stream is a real failure, not a maybe"
+
+
+@pytest.mark.asyncio
+async def test_empty_acknowledgements_ending_in_stop_stay_a_failure() -> None:
+    """``stop`` means the model chose to end: it had the budget and said nothing."""
+    result = await _probe(
+        (BrainDelta(content=""), BrainDelta(content=None), BrainDelta(finish_reason="stop"))
+    )
+    assert not result.ok
+    assert not result.inconclusive
+
+
+@pytest.mark.asyncio
+async def test_an_answer_outranks_a_later_token_limit() -> None:
+    """Truncation after real content is still a working provider."""
+    result = await _probe(
+        (BrainDelta(content="hi"), BrainDelta(finish_reason="length"))
+    )
+    assert result.ok
+    assert not result.inconclusive
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_stays_a_failure_and_is_never_inconclusive() -> None:
+    """A dead stream is a verdict about the provider, unlike a spent budget."""
+    checker = BrainHealthChecker(_SlowRegistry())  # type: ignore[arg-type]
+    result = await checker.probe("fake", "m", timeout_s=0.05)
+    assert not result.ok
+    assert not result.inconclusive
+    assert result.error and "timeout" in result.error

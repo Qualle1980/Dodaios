@@ -731,6 +731,25 @@ async def run_provider_test(
         if getattr(hr, "ok", False):
             return ProviderTestResult(provider, OK, "", getattr(hr, "duration_ms", 0.0))
         err = getattr(hr, "error", None)
+        if getattr(hr, "inconclusive", False):
+            # The probe could not read this provider's answer, and said so
+            # instead of guessing. The credential WAS accepted and the model
+            # DID run, so the depth is real and stops at the login -- it may
+            # never be credited as a turn.
+            #
+            # The status stays ERROR on purpose, and the error text carries the
+            # reason: ERROR is documented as "a possible integration bug", and
+            # here the bug really is ours -- a probe whose own token budget
+            # cannot survive a reasoning model. Routing it through
+            # classify_provider_error instead would read the wording as a
+            # verdict about the provider and could dead-list a healthy one.
+            return ProviderTestResult(
+                provider,
+                ERROR,
+                err or "inconclusive probe",
+                getattr(hr, "duration_ms", 0.0),
+                proven=PROVEN_AUTHENTICATED,
+            )
         return ProviderTestResult(
             provider, classify_provider_error(err), err or "", getattr(hr, "duration_ms", 0.0),
         )
