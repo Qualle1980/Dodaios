@@ -13,7 +13,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { CredentialCard } from "./CredentialCard";
 import { QuestionCard } from "./QuestionCard";
 import { toolDiff } from "./toolDiff";
-import { formatTokens, outputTokens } from "./toolView";
+import { cachedTokens, formatTokens, inputTokens, outputTokens } from "./toolView";
 import { activityParts, traceToolIdentity, traceToolName } from "./traceActivity";
 import { ToolChoiceIcon } from "./ToolChoiceChips";
 import { toolIdentityStyle } from "./toolIdentity";
@@ -795,12 +795,24 @@ function WorkTraceBody({ blocks: rawBlocks, status, startedMs, durationMs, error
 
 export function TurnTrace({ turn, ...props }: { turn: TurnItem; onDecide?: Decide; renderText?: (text: string, id: string) => ReactNode; conversation?: boolean; look?: TraceLook; companion?: boolean; face?: ReactNode; extras?: WorkTraceProps["extras"] }) {
   const t = useT();
-  const tokens = outputTokens(turn.usage ?? turn.liveUsage);
+  const usage = turn.usage ?? turn.liveUsage;
+  const tokens = outputTokens(usage);
+  // Input first, because input is the bill. A plan seat prices at $0, so a
+  // receipt gated on `costUsd > 0` shows nothing at all; tokens are the real
+  // currency there and the only one the person can act on.
+  const sent = inputTokens(usage);
+  const cached = cachedTokens(usage);
   const answered = turn.blocks.some(block => block.kind === "text" && block.text.trim());
   return <WorkTrace {...props} blocks={turn.blocks} status={turn.status} startedMs={turn.startedMs} durationMs={turn.durationMs} error={turn.error}
     completionLabel={!answered ? t("agent_chat.turn_no_answer") : undefined}
-    receipt={tokens !== null && tokens > 0 || turn.costUsd !== null && turn.costUsd > 0 ? <>
-      {tokens !== null && tokens > 0 ? <span aria-live="off" className="tabular-nums">{formatTokens(tokens)} {t("agent_chat.tokens")}</span> : null}
+    receipt={(sent !== null && sent > 0) || (tokens !== null && tokens > 0)
+      || (turn.costUsd !== null && turn.costUsd > 0) ? <>
+      {sent !== null && sent > 0 ? <span aria-live="off" className="tabular-nums"
+        title={`${sent.toLocaleString()} ${t("agent_chat.tokens")}`}>&#8593;&#8201;{formatTokens(sent)}</span> : null}
+      {tokens !== null && tokens > 0 ? <span aria-live="off" className="tabular-nums"
+        title={`${tokens.toLocaleString()} ${t("agent_chat.tokens")}`}>&#8595;&#8201;{formatTokens(tokens)}</span> : null}
+      {cached !== null && cached > 0 ? <span className="tabular-nums"
+        title={`${cached.toLocaleString()} ${t("agent_chat.tokens")}`}>&#9211;&#8201;{formatTokens(cached)}</span> : null}
       {turn.costUsd !== null && turn.costUsd > 0 ? <span className="tabular-nums">${turn.costUsd.toFixed(4)}</span> : null}
     </> : undefined} />;
 }
