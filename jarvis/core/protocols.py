@@ -161,6 +161,16 @@ class BrainRequest:
     # person picks the level by hand; a provider that does not know a level
     # treats it like the nearest one it does (see jarvis.agent_chat.effort).
     reasoning_effort: ReasoningEffort | None = None
+    #: Names from ``tools`` the model may call THIS request; empty = all of them.
+    #:
+    #: Tool schemas are part of a provider's cached prompt prefix, so a tool
+    #: list that changes between turns can never produce a cache hit. Sending
+    #: the full list every time and narrowing it here keeps the prefix
+    #: byte-stable while still putting only the relevant hands in front of the
+    #: model. A provider that cannot express the restriction ignores this field
+    #: and is handed a pre-filtered ``tools`` instead (capability, never a
+    #: provider name -- AP-21).
+    allowed_tools: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
