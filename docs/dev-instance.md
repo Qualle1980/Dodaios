@@ -69,6 +69,39 @@ recorder, the wiki curator lock (a cross-process lock, so this is correct), the
 review / self-mod audit logs, computer-use blobs. They are logs and locks, not
 stores; none of them makes the two apps answer for each other.
 
+## Running it from a linked worktree
+
+A linked `git worktree` is the natural home for the dev instance: a second
+checkout the default app never reads. Three things differ from the main
+checkout, and each one bites once.
+
+**The interpreter.** A worktree has no `.venv` of its own, so the launchers
+fall back to the main checkout's through `git rev-parse --git-common-dir`.
+Activating it re-pins nothing — the working directory still wins on import, so
+the code that runs is the worktree's own, which `scripts/preflight.ps1`
+asserts and reports as `jarvis imports from worktree`. Never `pip install -e`
+from a worktree: that pin is the user's desktop app (AP-8 / BUG-219). The same
+trap makes *test results* lie — a suite run on a bare PATH interpreter fails by
+the dozen on missing optional dependencies, and those failures read exactly
+like real regressions.
+
+**The data directory.** `ensure_instance_data_dir` seeds `data-dev/` from
+`<repo_root>/data`, and a worktree has none, so the instance comes up as a
+blank install: first-run guide, no identity, no chats. Pass the main
+checkout's data directory as `default_data_dir` once and it looks like the
+product it is a second window of.
+
+**The vault and the config.** `vault_root` is relative, so `/api/wiki/health`
+reports `vault_root_source: repo_root` and the worktree's wiki starts nearly
+empty; the configured read-only external sources are unaffected and still
+answer recall. Give the worktree its own copy of `jarvis.toml` rather than
+pointing `JARVIS_CONFIG` at the live one — the dev app writes settings, and
+both instances otherwise share a single file.
+
+A workspace needs at least one agent pane; a request with an empty terminal
+list is refused. A freshly opened pane stays `pending` until the UI attaches,
+so a pane in the API is not yet a running CLI.
+
 ## Cross-platform
 
 Built OS-neutral; the Windows identity layer is the one verified live. See
