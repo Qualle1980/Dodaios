@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import random
 import re
 import threading
@@ -148,6 +149,50 @@ def _default_cli() -> str | None:
         if accepts_prompts(info.name) and agent_argv(info.name) is not None:
             return info.name
     return None
+
+
+def _chat_pane_tier(requested: object) -> str:
+    """The Claude tier a chat-addressed pane may run on, or refuse.
+
+    The mission-worker model policy (#67) does not reach Agentic IDE panes,
+    and the vendor's interactive default is not stable, so a chat-created pane
+    pins a documented CLI alias instead of inheriting whatever the CLI picks.
+    """
+    chosen = str(requested or "sonnet").strip().lower()
+    if chosen not in {"sonnet", "haiku"}:
+        raise SessionError("Claude Code chat panes require sonnet or haiku, not Opus.")
+    from jarvis.workspace.launch_picks import normalize_model
+
+    if normalize_model("claude", chosen) != chosen:
+        raise SessionError("Claude Code cannot pin the requested model; nothing started.")
+    return chosen
+
+
+def _chat_pane_model(cli: str | None, requested: object = None) -> str:
+    """Fail closed before SPAWNING a chat-addressed Claude pane.
+
+    Two separate reasons to refuse: a tier we will not run on, and a parent
+    Claude security environment this process inherited. The second is not ours
+    to switch off -- a credential-scrubbing flag set by whoever started Dodaios
+    stays set, and the caller gets an honest refusal instead of a pane whose
+    permission mode was silently forced back to asking.
+    """
+    if cli != "claude":
+        return ""
+    if os.environ.get("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "").strip().lower() not in {
+        "", "0", "false",
+    }:
+        raise SessionError(
+            "A parent Claude security environment would force this pane's permission "
+            "mode back to default. Restart Dodaios from its ordinary desktop shortcut "
+            "or a clean shell; no coding prompt was sent."
+        )
+    return _chat_pane_tier(requested)
+
+
+def _chat_pane_permission(cli: str | None) -> str | None:
+    # acceptEdits may still request permission for shell commands. Never bypass.
+    return "acceptEdits" if cli == "claude" else None
 
 
 def _score(reference: str, ids: Iterable[str], names: Iterable[str]) -> int:
@@ -731,6 +776,10 @@ class WorkspaceOrchestrator:
             count = 1
         count = max(1, min(count, MAX_PANES_PER_REQUEST))
         name = str(args.get("name") or "").strip()
+        # A chat-created pane must never silently inherit the CLI's Opus default.
+        # Validate all groups before creating even the first pane.
+        if cli is None:
+            cli = _default_cli()
         created = []
         capped = False
         creation_error = ""
@@ -742,24 +791,44 @@ class WorkspaceOrchestrator:
                 return groups
             count = sum(n for _, n in groups)
         try:
+            choices = groups if isinstance(mixed, list) and mixed else [(cli, count)]
+            selected_models = {
+                selected: _chat_pane_model(selected, args.get("model"))
+                for selected, _ in choices
+            }
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
+            return {"status": "not_accepted", "success": False, "reason": str(exc)}
+        try:
             if isinstance(mixed, list) and mixed:
                 created, capped = [], False
                 for group_cli, group_count in groups:
                     made, cut = await self.registry.add_terminals(
-                        group_count, agent=group_cli, workspace_id=workspace["id"]
+                        group_count,
+                        agent=group_cli,
+                        workspace_id=workspace["id"],
+                        model=selected_models[group_cli],
+                        permission_mode=_chat_pane_permission(group_cli),
                     )
                     created.extend(made)
                     capped = capped or cut
             elif count == 1 and name:
                 created = [
                     await self.registry.add_terminal(
-                        workspace_id=workspace["id"], agent=cli, name=name
+                        workspace_id=workspace["id"],
+                        agent=cli,
+                        name=name,
+                        model=selected_models[cli],
+                        permission_mode=_chat_pane_permission(cli),
                     )
                 ]
                 capped = False
             else:
                 created, capped = await self.registry.add_terminals(
-                    count, agent=cli, workspace_id=workspace["id"]
+                    count,
+                    agent=cli,
+                    workspace_id=workspace["id"],
+                    model=selected_models[cli],
+                    permission_mode=_chat_pane_permission(cli),
                 )
         except SessionError as exc:  # Return the refusal or partial creation receipt to the caller.
             if not created:
@@ -1023,6 +1092,13 @@ class WorkspaceOrchestrator:
         its own request_id.
         """
         before = term.status
+        if term.agent == "claude" and not str(term.model or "").strip():
+            # A pane opened before the tier guard existed (or by hand in the
+            # IDE) carries no model, so its next launch would take the CLI's
+            # own default. A restart asked for THROUGH the chat is the one
+            # moment this can be corrected without touching anyone's running
+            # work; the IDE's own restart path is left alone.
+            term.model = _chat_pane_tier(None)
         term, started = await self.registry.restart_terminal(
             target["terminal_id"], owner.id
         )
@@ -1149,7 +1225,17 @@ class WorkspaceOrchestrator:
         groups = self._groups(args)
         if isinstance(groups, dict):
             return groups
-        requested = [{"agent": cli} for cli, count in groups for _ in range(count)]
+        try:
+            requested = [
+                {
+                    "agent": cli,
+                    "model": _chat_pane_model(cli, args.get("model")),
+                    **({"permission_mode": _chat_pane_permission(cli)} if cli == "claude" else {}),
+                }
+                for cli, count in groups for _ in range(count)
+            ]
+        except SessionError as exc:  # the refusal IS this receipt: the reason goes to the caller
+            return {"status": "not_accepted", "success": False, "reason": str(exc)}
         if len(requested) > MAX_PANES_PER_REQUEST:
             return {
                 "status": "not_accepted",
@@ -1648,6 +1734,22 @@ class WorkspaceOrchestrator:
                         "continues the agent's own conversation and stops nothing), then "
                         "resend this request with the same request_id and prompt.",
             }
+        if action == "send" and found[1].agent == "claude":
+            # Previously opened panes too: otherwise a chat send silently
+            # reuses a session running on the CLI's own (Opus) default. A
+            # stopped pane is refused ABOVE this, with its restart receipt --
+            # that refusal is the one the caller can act on, and ``_restart``
+            # pins the tier on the way back up, so recovery converges here
+            # instead of dead-ending.
+            selected = str(found[1].model or "").lower()
+            if "sonnet" not in selected and "haiku" not in selected:
+                return {
+                    "status": "not_accepted", "success": False,
+                    "target": target, "completed": False, "input_written": False,
+                    "reason": "Claude pane model is not pinned to Sonnet/Haiku. "
+                              "Restart this pane or open a new one with model='sonnet'; "
+                              "nothing was sent.",
+                }
         # The low-level gateway enforces idle/asking state and refuses exited
         # agents. It never falls through to a shell or a different pane.
         try:

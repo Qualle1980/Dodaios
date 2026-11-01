@@ -211,6 +211,15 @@ class WorkspaceOrchestrationTool:
                     "'Codex'; omitted, the workspace's usual CLI."
                 ),
             },
+            "model": {
+                "type": "string",
+                "enum": ["sonnet", "haiku"],
+                "description": (
+                    "create/open_workspace: explicit Claude Code model tier. "
+                    "When Claude Code is selected and this is omitted, Sonnet is "
+                    "pinned before starting the pane. Opus is not permitted here."
+                ),
+            },
             "count": {
                 "type": "integer",
                 "minimum": 1,
