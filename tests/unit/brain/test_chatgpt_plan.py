@@ -874,6 +874,59 @@ def test_a_metered_plan_turn_reaches_the_usage_ledger(brain_env, monkeypatch) ->
     assert entry["provider"] == "chatgpt-plan"
     assert (entry["tokens_in"], entry["tokens_out"], entry["tokens_cached"]) == (500, 120, 300)
 
+# -- the ledger must also know WHICH model spent it -------------------------
+# Measured on the live install 2026-10-31: twelve plan turns, 197_807 input
+# tokens, and the ledger's model column empty on every one. The route resolves
+# its model DURING the call (nothing is pinned, so _prepare falls through to
+# the account's model and then to its first listed one), so the name
+# MeteredBrain knew before the call was "". The meter already had a contract
+# for that case -- it reads ``last_model`` off the plugin, and its comment
+# names this very incident -- but no plugin had ever published it. Without the
+# model, the most expensive route the product has is also the only one whose
+# spending cannot be priced.
+
+
+def _ledger_entry(brain_env, monkeypatch, brain: Any) -> dict[str, Any]:
+    from jarvis.brain.usage_meter import meter_brain
+
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "jarvis.brain.usage_meter.record_usage", lambda **kw: written.append(kw)
+    )
+    install, _ = brain_env
+    install([httpx.Response(200, content=_sse(
+        {"type": "response.completed", "response": {"usage": {
+            "input_tokens": 800, "output_tokens": 120,
+            "input_tokens_details": {"cached_tokens": 300},
+        }}},
+    ))])
+    metered = meter_brain(brain, "chatgpt-plan")
+
+    async def drain() -> None:
+        async for _ in metered.complete(_req()):
+            pass
+
+    asyncio.run(drain())
+    assert len(written) == 1, written
+    return written[0]
+
+
+def test_an_unpinned_plan_turn_still_records_its_model(brain_env, monkeypatch) -> None:
+    """The live shape: no model pinned, so the name exists only after _prepare."""
+    brain = chatgpt_plan.ChatGPTPlanBrain()
+    assert not getattr(brain, "last_model", ""), "nothing is known before the call"
+    entry = _ledger_entry(brain_env, monkeypatch, brain)
+    assert entry["model"] == "gpt-a", entry
+    assert brain.last_model == "gpt-a"
+
+
+def test_a_pinned_plan_turn_records_the_pin(brain_env, monkeypatch) -> None:
+    """A pin must win over the account default, in the ledger as in the call."""
+    entry = _ledger_entry(
+        brain_env, monkeypatch, chatgpt_plan.ChatGPTPlanBrain("chatgpt-plan/gpt-pinned")
+    )
+    assert entry["model"] == "gpt-pinned", entry
+
 
 def test_api_key_is_never_sent(brain_env) -> None:
     install, _ = brain_env
@@ -938,3 +991,87 @@ def test_the_static_prefix_gets_a_stable_cache_key() -> None:
         chatgpt_plan.build_body(_req(), "gpt-b")["prompt_cache_key"]
         != first["prompt_cache_key"]
     )
+# -- the prefix must not move between turns ---------------------------------
+# Live 2026-10-31: twelve plan turns, 197_807 input tokens, ZERO cached. The
+# log showed why -- instructions were byte-stable at 13_720 tokens while the
+# tool array changed every single turn (22, 23, 24 schemas; 4_845-5_114
+# tokens), because the shortlist adds "the tool a turn mandated" and reveals
+# deferred ones from the next round on. OpenAI's prompt-caching guide:
+# "Cache hits are only possible for exact prefix matches within a prompt. This
+# also applies to images and tools, which must be identical between requests."
+# Its documented remedy is `allowed_tools`, which narrows what may be CALLED
+# without shortening what is SENT. These tests hold that line, because a
+# plausible-looking refactor can quietly cost 79% of the input bill.
+
+
+def _tool(name: str) -> dict[str, Any]:
+    return {"name": name, "description": f"does {name}", "input_schema": {"type": "object"}}
+
+
+_SURFACE = tuple(_tool(n) for n in ("run-shell", "screen-snapshot", "spawn-worker", "find_tools"))
+
+
+def _body(allowed: tuple[str, ...]) -> dict[str, Any]:
+    return chatgpt_plan.build_body(
+        BrainRequest(
+            messages=(BrainMessage(role="user", content="hi"),),
+            tools=_SURFACE,
+            allowed_tools=allowed,
+            system="Be brief.",
+        ),
+        "gpt-6.1-sol",
+    )
+
+
+def test_the_tool_array_is_identical_whatever_is_allowed() -> None:
+    """Two turns, two allow-lists, one byte-identical prefix."""
+    first = _body(("run-shell", "find_tools"))
+    second = _body(("screen-snapshot", "spawn-worker", "find_tools"))
+    assert first["tools"] == second["tools"], "the cached prefix moved"
+    assert first["instructions"] == second["instructions"]
+    assert first["prompt_cache_key"] == second["prompt_cache_key"], (
+        "a key that changes routes every turn to a cold machine"
+    )
+
+
+def test_the_allow_list_is_what_changes() -> None:
+    narrow = _body(("run-shell",))
+    wide = _body(("run-shell", "spawn-worker"))
+    assert narrow["tool_choice"]["type"] == "allowed_tools"
+    assert [t["name"] for t in narrow["tool_choice"]["tools"]] == ["run-shell"]
+    assert [t["name"] for t in wide["tool_choice"]["tools"]] == ["run-shell", "spawn-worker"]
+    assert narrow["tools"] == wide["tools"]
+
+
+def test_no_restriction_sends_no_tool_choice() -> None:
+    """Allowing everything is not a restriction, and must not look like one."""
+    assert "tool_choice" not in _body(tuple(t["name"] for t in _SURFACE))
+    assert "tool_choice" not in _body(()), "an empty allow-list means no restriction"
+
+
+def test_a_brain_without_the_capability_keeps_a_filtered_list() -> None:
+    """The 67_852-token refusal must stay prevented for everyone else."""
+    from jarvis.brain.tool_use_loop import ToolUseLoop
+
+    class _Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.description = f"does {name}"
+            self.schema = {"type": "object"}
+
+    loop = ToolUseLoop.__new__(ToolUseLoop)
+    loop._tools = {n: _Tool(n) for n in ("a", "b", "c")}
+    loop._hidden = {"c"}
+
+    loop._brain = object()                      # declares nothing
+    schemas, allowed = loop._tool_surface()
+    assert [s["name"] for s in schemas] == ["a", "b"], "a plain brain must stay filtered"
+    assert allowed == ()
+
+    class _Capable:
+        supports_allowed_tools = True
+
+    loop._brain = _Capable()
+    schemas, allowed = loop._tool_surface()
+    assert [s["name"] for s in schemas] == ["a", "b", "c"], "the full list is the stable one"
+    assert allowed == ("a", "b")

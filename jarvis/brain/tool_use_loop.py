@@ -825,6 +825,28 @@ class ToolUseLoop:
             if name not in self._hidden
         ]
 
+    def _tool_surface(self) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+        """``(schemas, allowed names)`` for this round.
+
+        A brain that can restrict the callable set per request gets the FULL
+        schema list -- unchanged from turn to turn, therefore cacheable -- plus
+        the names it may call now. Every other brain keeps the pre-filtered
+        list, because handing it everything is the 67_852-token refusal
+        ``_shortlist_tools`` exists to prevent.
+        """
+        if not getattr(self._brain, "supports_allowed_tools", False):
+            return self._tool_schemas(), ()
+        schemas = [
+            {
+                "name": tool.name,
+                "description": getattr(tool, "description", ""),
+                "input_schema": tool.schema,
+            }
+            for tool in self._tools.values()
+        ]
+        allowed = tuple(name for name in self._tools if name not in self._hidden)
+        return schemas, allowed
+
     def _reveal_tools(self, names: Iterable[str]) -> None:
         """Show the schemas of deferred tools from the next round on."""
         found = {name for name in names if name in self._hidden}
@@ -966,7 +988,7 @@ class ToolUseLoop:
         """
         tid = trace_id or uuid4()
         current_messages = list(messages)
-        tools_payload = self._tool_schemas()
+        tools_payload, allowed_tools = self._tool_surface()
         final_agg = StreamingAggregate()
         ack_attempted = False
         loop_started = time.monotonic()
@@ -1003,11 +1025,14 @@ class ToolUseLoop:
                 # Only while tools are still on offer: a round that was forced
                 # tool-less (deadline, final answer) must stay that way.
                 if tools_payload:
-                    tools_payload = self._tool_schemas()
+                    tools_payload, allowed_tools = self._tool_surface()
 
             req = BrainRequest(
                 messages=tuple(current_messages),
                 tools=tuple(tools_payload),
+                # A tool-less round (deadline, forced synthesis) empties the
+                # list; an allow-list without tools would name nothing.
+                allowed_tools=allowed_tools if tools_payload else (),
                 system=self._system_prompt,
                 max_tokens=self._max_tokens,
                 stream=True,

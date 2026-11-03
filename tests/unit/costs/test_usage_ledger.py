@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -190,9 +191,12 @@ class _SelfResolvingBrain(FakeBrain):
         self.last_model: str | None = None
 
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
-        self.last_model = "gpt-6.1-sol"
-        async for delta in super().complete(req):
-            yield delta
+        self.last_model = "wrong-shared-model"
+        yield BrainDelta(
+            finish_reason="stop",
+            usage={"input_tokens": 1, "output_tokens": 1},
+            model="gpt-6.1-sol",
+        )
 
 
 def test_a_model_resolved_during_the_call_is_recorded(ledger_path: Path) -> None:
@@ -203,3 +207,44 @@ def test_a_model_resolved_during_the_call_is_recorded(ledger_path: Path) -> None
 
     rows = list(ledger.read_usage(ledger_path, 0, 2**62))
     assert [row.model for row in rows] == ["gpt-6.1-sol"]
+
+
+class _OverlappingBrain:
+    """A fake provider whose shared legacy state is unsafe under overlap."""
+
+    name = "overlap-fake"
+    model = ""
+
+    def __init__(self) -> None:
+        self.last_model: str | None = None
+        self._ready = 0
+        self.both_ready = asyncio.Event()
+
+    async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
+        model = req.model or ""
+        self.last_model = model
+        self._ready += 1
+        if self._ready == 2:
+            self.both_ready.set()
+        await self.both_ready.wait()
+        yield BrainDelta(
+            finish_reason="stop",
+            usage={"input_tokens": 1, "output_tokens": 1},
+            model=model,
+        )
+
+
+def test_overlapping_requests_keep_their_model_for_usage(ledger_path: Path) -> None:
+    brain = meter_brain(_OverlappingBrain(), "overlap-fake")
+
+    async def run() -> None:
+        await asyncio.gather(
+            _drain(brain.complete(replace(_request(), model="model-A"))),
+            _drain(brain.complete(replace(_request(), model="model-B"))),
+        )
+
+    asyncio.run(run())
+    ledger.flush()
+
+    rows = list(ledger.read_usage(ledger_path, 0, 2**62))
+    assert sorted(row.model for row in rows) == ["model-A", "model-B"]

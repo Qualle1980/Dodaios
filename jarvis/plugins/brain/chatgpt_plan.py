@@ -165,6 +165,21 @@ def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
         body["instructions"] = instructions
     if req.tools:
         body["tools"] = _tools_responses_format(_tools_openai_format(tuple(req.tools), names))
+        # The caller narrows the callable set instead of shortening the list:
+        # `tools` stays byte-identical from turn to turn, which is the only way
+        # the ~18k-token prefix is ever a cache hit (live 2026-10-31: twelve
+        # turns, 197_807 input tokens, zero cached, because a per-turn
+        # shortlist changed the array on every request).
+        allowed = tuple(dict.fromkeys(req.allowed_tools or ()))
+        if allowed and len(allowed) < len(req.tools):
+            body["tool_choice"] = {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [
+                    {"type": "function", "name": names.get(name, name)}
+                    for name in allowed
+                ],
+            }
     body["prompt_cache_key"] = _cache_key(model, body.get("instructions", ""), body.get("tools"))
     _log_weight(body)
     return body
@@ -214,8 +229,23 @@ class ChatGPTPlanBrain:
     context_window: int = 128_000
     supports_tools: bool = True
     supports_vision: bool = True
+    #: ``tool_choice.allowed_tools`` can narrow the callable set per request,
+    #: so this route is handed the FULL tool list and keeps a cacheable prefix.
+    supports_allowed_tools: bool = True
     #: The caller's system prompt goes in ``instructions``, a real channel.
     native_system_prompt: bool = True
+    #: The model the last call actually ran on, for the usage ledger.
+    #:
+    #: This route resolves its model DURING the call (nothing is pinned, so
+    #: ``_prepare`` falls through to the account's first listed model), which
+    #: left ``MeteredBrain`` with an empty name to write down: it reads this
+    #: attribute for exactly that case and its comment names the incident
+    #: ("live 2026-10-23: a chatgpt-plan turn on gpt-6.1-sol was recorded with
+    #: no model"). The contract existed; no plugin had ever filled it, so the
+    #: most expensive route the product has was also the only one whose
+    #: spending could not be attributed to a model. Measured again on
+    #: 2026-10-31: twelve turns, 197_807 input tokens, model column empty.
+    last_model: str = ""
 
     def __init__(self, model: str | None = None, structured_prompts: bool = True) -> None:
         # ``structured_prompts`` is accepted for resolve_subscription_brain: an
@@ -258,6 +288,10 @@ class ChatGPTPlanBrain:
                     "no_models", "Your ChatGPT plan lists no models for Dodaios."
                 )
             model = models[0]["slug"]
+        # Publish before returning: the meter reads it in a ``finally``, so a
+        # call that fails after this point is still attributed to the model it
+        # was made against.
+        self.last_model = model
         return token, model
 
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
@@ -296,7 +330,7 @@ class ChatGPTPlanBrain:
                                 continue
                             raise exc
                         admitted = True
-                        async for delta in _events(resp, reverse_names):
+                        async for delta in _events(resp, reverse_names, model):
                             if delta.finish_reason:
                                 finished = True
                             yield delta
@@ -380,7 +414,9 @@ def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:
 
 
 async def _events(
-    resp: httpx.Response, reverse_names: dict[str, str] | None = None
+    resp: httpx.Response,
+    reverse_names: dict[str, str] | None = None,
+    model: str | None = None,
 ) -> AsyncIterator[BrainDelta]:
     """Stream deltas; tool calls are collected and handed out before the finish,
     like the OpenAI brain's Responses path, so the tool loop sees one shape."""
@@ -405,29 +441,29 @@ async def _events(
         if kind == "response.output_text.delta":
             text = payload.get("delta")
             if isinstance(text, str) and text:
-                yield BrainDelta(content=text)
+                yield BrainDelta(content=text, model=model)
         elif kind == "response.output_item.done":
             item = payload.get("item") or {}
             if isinstance(item, dict) and item.get("type") == "function_call":
                 calls.append(_tool_call(item, reverse_names, len(calls)))
         elif kind == "response.completed":
             for call in calls:
-                yield BrainDelta(tool_call=call)
-            yield BrainDelta(finish_reason="tool_calls" if calls else "stop")
+                yield BrainDelta(tool_call=call, model=model)
+            yield BrainDelta(finish_reason="tool_calls" if calls else "stop", model=model)
             # Usage last, after the finish reason, as the OpenAI brain's
             # Responses path yields it: the meter reads it from the stream.
             spent = _usage_of(payload)
             if spent is not None:
-                yield BrainDelta(usage=spent)
+                yield BrainDelta(usage=spent, model=model)
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
             if reason == "max_output_tokens":
-                yield BrainDelta(finish_reason="length")
+                yield BrainDelta(finish_reason="length", model=model)
                 # A truncated answer was paid for in full; it is still spend.
                 spent = _usage_of(payload)
                 if spent is not None:
-                    yield BrainDelta(usage=spent)
+                    yield BrainDelta(usage=spent, model=model)
                 return
             raise ChatGPTPlanError(
                 "incomplete", f"ChatGPT stopped the answer early ({reason or 'unknown'})."
