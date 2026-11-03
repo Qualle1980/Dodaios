@@ -114,8 +114,12 @@ class MeteredBrain:
     ) -> AsyncIterator[BrainDelta]:
         tokens_in = tokens_out = tokens_cached = 0
         seen = False
+        resolved_model = model
         try:
             async for delta in stream:
+                delta_model = getattr(delta, "model", None)
+                if isinstance(delta_model, str) and delta_model:
+                    resolved_model = delta_model
                 usage = getattr(delta, "usage", None)
                 if isinstance(usage, dict) and usage:
                     # One call reports its usage once, on its last chunk; a
@@ -126,16 +130,9 @@ class MeteredBrain:
                 yield delta
         finally:
             if seen:
-                # A plugin that resolves its default model during the call
-                # publishes it as ``last_model``; the pre-call name is empty
-                # then (live 2026-10-23: a chatgpt-plan turn on gpt-6.1-sol
-                # was recorded with no model).
-                resolved = getattr(self._inner, "last_model", None)
-                if isinstance(resolved, str) and resolved:
-                    model = resolved
                 record_usage(
                     provider=self._provider_name,
-                    model=model,
+                    model=resolved_model,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     tokens_cached=tokens_cached,
