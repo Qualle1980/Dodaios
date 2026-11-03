@@ -171,6 +171,7 @@ class BrainRequest:
     #: and is handed a pre-filtered ``tools`` instead (capability, never a
     #: provider name -- AP-21).
     allowed_tools: tuple[str, ...] = field(default_factory=tuple)
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +182,7 @@ class BrainDelta:
     tool_call: dict[str, Any] | None = None
     finish_reason: str | None = None
     usage: dict[str, int] | None = None  # input_tokens, output_tokens, cache_hit_tokens
+    model: str | None = None
 
 
 # ----------------------------------------------------------------------
