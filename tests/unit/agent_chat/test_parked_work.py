@@ -17,6 +17,7 @@ from jarvis.agent_chat.service import AgentChatService
 from jarvis.agent_chat.store import AgentChatStore
 from jarvis.core.delegated_work import DelegatedWork, register_delegated_work
 
+_CODING_KEY = "coding:t2-history:1:1.0"
 _FIRST = "Brief the agent in terminal two about the login bug."
 _SECOND = "And create a new agent for the documentation."
 _REPO = Path(__file__).resolve().parents[3]
@@ -34,6 +35,7 @@ class Chat:
     """The real chat service with a scripted model in place of a provider."""
 
     def __init__(self, tmp_path, monkeypatch) -> None:
+        self.root = tmp_path
         monkeypatch.setattr(delegation_wait, "POLL_SECONDS", 0.005)
         monkeypatch.setattr(parked_work, "_POLL_S", 0.005)
         monkeypatch.setattr(send_queue, "_POLL_S", 0.005)
@@ -43,6 +45,9 @@ class Chat:
             provider="openai", model="", effort="", surface="jarvis", cwd=str(tmp_path)
         ).session_id
         self.prompts: list[tuple[str, str]] = []
+        #: The acceptance gate each turn ran with, in order.
+        self.gates: list[object] = []
+        self.origins: list[bool] = []
         #: The pane has finished the first order.
         self.pane_done = False
         #: Held turns: an event per prompt index that the scripted model waits for.
@@ -53,6 +58,9 @@ class Chat:
     async def _model(self, handle, prompt, *args, **kwargs) -> None:
         index = len(self.prompts)
         self.prompts.append((handle.turn_id, prompt))
+        # What the real brain runner would be held to this turn.
+        self.gates.append(getattr(handle, "acceptance_gate", None))
+        self.origins.append(getattr(handle, "acceptance_gate", None) is not None)
         hold = self.holds.get(index)
         if hold is not None:
             await hold.wait()
@@ -61,9 +69,20 @@ class Chat:
             async def pane():
                 if not self.pane_done:
                     return None
-                return {"status": "completed", "report": "The login bug is fixed."}
+                return {
+                    "status": "completed",
+                    "report": "The login bug is fixed.",
+                    "evidence": (
+                        "Recorded CLI completion and matching report; "
+                        "not independent verification"
+                    ),
+                    "target": {"workspace_id": "w2", "root": str(self.root), "at": 1.0},
+                }
 
-            assert register_delegated_work(DelegatedWork("pane-t2", "Agent T2", pane))
+            # The key the Agentic IDE really registers for a coding pane
+            # (``jarvis/agentic_ide/delegation_wait.py``): the chat's
+            # acceptance gate recognises coding work by this prefix.
+            assert register_delegated_work(DelegatedWork(_CODING_KEY, "Agent T2", pane))
         text = ["Sent to the agent in terminal two.", "The documentation agent exists.",
                 "The login bug is fixed."][min(index, 2)]
         await handle.emit(make_event("assistant_text", {"turn_id": handle.turn_id, "text": text}))
@@ -214,3 +233,36 @@ def test_the_timeline_knows_the_background_origin():
         _REPO / "jarvis/ui/web/frontend/src/components/agentchat/reduce.ts"
     ).read_text(encoding="utf-8")
     assert f'p.origin === "{BACKGROUND_ORIGIN}"' in reducer
+
+
+async def test_a_parked_coding_handback_is_gated_before_its_first_byte(chat):
+    """The late answer is the one that could still publish an unearned PASS.
+
+    A background result comes back as a NEW turn (``service.send`` with
+    ``background_result=True``). Without the gate travelling with it, that
+    turn starts with nothing to prove and the one path that answers LATE is
+    the one path with no acceptance check at all. Found by review, 2026-10-29.
+    """
+    first_turn, _ = await send_or_queue(chat.svc, chat.sid, _FIRST)
+    await _until(chat.waiting_for_agents)
+    second_turn, _ = await send_or_queue(chat.svc, chat.sid, _SECOND)
+    await chat.idle()
+
+    # Neither of the person's own turns answers delegated work.
+    assert chat.gates[:2] == [None, None]
+
+    chat.pane_done = True
+    await _until(lambda: len(chat.prompts) == 3)
+    await chat.idle()
+
+    result_turn, _ = chat.prompts[2]
+    assert result_turn not in (first_turn, second_turn)
+    gate = chat.gates[2]
+    assert gate is not None, "the background turn ran with no acceptance gate"
+    assert gate.work == (_CODING_KEY,)
+    # And the budget of the ORIGINAL request, not of this new turn.
+    from jarvis.agent_chat.delegation_budget import request_key
+    from jarvis.core.chat_turn import ChatTurn
+
+    carried = ChatTurn(chat.sid, result_turn, "x", True, "t", origin_turn_id=first_turn)
+    assert request_key(carried) == (chat.sid, first_turn)
