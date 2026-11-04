@@ -225,6 +225,12 @@ class _RunningExecutor:
 
     def __init__(self) -> None:
         self.ran: list[str] = []
+        self.denied: list[tuple[str, str]] = []
+
+    async def publish_guard_denied(
+        self, tool_name: str, reason: str, *, trace_id: str | None = None
+    ) -> None:
+        self.denied.append((tool_name, reason))
 
     async def execute(self, tool: Any, args: dict[str, Any], **_: Any) -> ToolResult:
         self.ran.append(tool.name)
@@ -302,14 +308,20 @@ def test_the_dispatcher_payload_leaves_deferred_tools_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_tool_named_outright_simply_runs() -> None:
-    """Deferred means not shown, never not allowed."""
+@pytest.mark.parametrize("requested_name", ["mail_send", "mail-send"])
+async def test_a_deferred_tool_requested_before_reveal_is_denied(
+    requested_name: str,
+) -> None:
     tools, deferred = _surface()
-    brain = _ScriptedBrain([("mail_send", {"to": "anna"})])
+    brain = _ScriptedBrain([(requested_name, {"to": "anna"})])
     executor = _RunningExecutor()
     loop = ToolUseLoop(brain, tools, executor, deferred_tools=deferred)  # type: ignore[arg-type]
-    await loop.run([], user_utterance="send anna the notes by email")
-    assert executor.ran == ["mail_send"]
+    result = await loop.run([], user_utterance="send anna the notes by email")
+    assert executor.ran == []
+    assert executor.denied
+    assert executor.denied[0][0] == "mail_send"
+    assert "deferred tool" in executor.denied[0][1]
+    assert "done" in result.text
 
 
 @pytest.mark.asyncio
