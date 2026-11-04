@@ -290,7 +290,7 @@ _NO_RUN_FLAGS = (
 #: Something in the output has to say a suite actually passed.
 _PASSED_RE = re.compile(
     r"(?:\b\d+\s+passed\b|\ball\s+tests?\s+passed\b|\btests?\s+passed\b|"
-    r"\btest\s+run\s+successful\b|\bbuild\s+success\b|\b0\s+failed\b|"
+    r"\btest\s+run\s+successful\b|\bbuild\s+success\b|"
     r"^ok\b|\bok\s*$|^PASS\b)",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -393,6 +393,39 @@ def _inside(path: str, root: str) -> bool:
     return here == there or here.startswith(there + os.sep)
 
 
+def _git_workspace(args: Any, cwd: str) -> str:
+    """Resolve a workspace selected by ``git -C`` before checking evidence."""
+    tokens = _tokens(_command_of(args))
+    if not tokens or _program(tokens[0]) != "git":
+        return cwd
+
+    workspace = cwd
+    rest = tokens[1:]
+    index = 0
+    while index < len(rest):
+        flag = rest[index]
+        if flag == "-C":
+            if index + 1 >= len(rest):
+                return ""
+            target = rest[index + 1]
+            workspace = target if os.path.isabs(target) else os.path.join(workspace, target)
+            index += 2
+            continue
+        if flag.startswith("-C") and len(flag) > 2:
+            target = flag[2:]
+            workspace = target if os.path.isabs(target) else os.path.join(workspace, target)
+            index += 1
+            continue
+        if flag in {"-c", "--git-dir", "--work-tree"}:
+            index += 2
+            continue
+        if flag.startswith("-"):
+            index += 1
+            continue
+        break
+    return workspace
+
+
 # -------------------------------------------------------------------- the job
 
 
@@ -418,7 +451,7 @@ class DelegatedJob:
             # An omitted workspace means "the visible one", which is not
             # provably this job's -- which is the whole point of the check.
             return bool(named) and named == self.workspace_id
-        return _inside(receipt.cwd, self.root)
+        return _inside(_git_workspace(receipt.args, receipt.cwd), self.root)
 
     def right_revision(self, receipt: Receipt) -> bool:
         """A command naming a revision must name the one this job ended on."""

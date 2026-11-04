@@ -291,7 +291,10 @@ def test_a_pass_has_to_be_in_the_output(output) -> None:
     assert reports_a_pass(output)
 
 
-@pytest.mark.parametrize("output", ["", "collected 3 items", "[exit 0]", "E assert False"])
+@pytest.mark.parametrize(
+    "output",
+    ["", "collected 3 items", "[exit 0]", "E assert False", "0 failed", "collected 0 items\n0 failed"],
+)
 def test_output_without_a_pass_reports_none(output) -> None:
     assert not reports_a_pass(output)
 
@@ -345,6 +348,19 @@ def test_a_diff_of_the_wrong_commit_does_not_verify() -> None:
     ledger = _ledger(_run("git show 9999999aaaa", out="diff --git a/x"), _tests())
     gate = AcceptanceGate(jobs=(_job(),))
     assert gate.verdict("PASS", ledger) is not None
+    assert WRONG_WORKSPACE in gate.gaps(ledger)
+
+
+def test_explicit_git_c_target_must_be_inside_job_workspace() -> None:
+    job = _job()
+    receipt = _run(
+        "git -C " + OTHER + " diff",
+        out="diff --git a/file.txt b/file.txt",
+    )
+    ledger = _ledger(receipt, _tests())
+    gate = AcceptanceGate(jobs=(job,))
+
+    assert not job.addresses_me(receipt)
     assert WRONG_WORKSPACE in gate.gaps(ledger)
 
 
