@@ -1332,6 +1332,25 @@ class ToolUseLoop:
                         ),
                     }
                     unknown_tool_requested = True
+                elif tool_name in self._hidden:
+                    log.warning(
+                        "tool_use_loop: deferred tool '%s' requested before discovery",
+                        tool_name,
+                    )
+                    await self._publish_guard_denied(
+                        tool_name,
+                        "guard: deferred tool not revealed in this turn",
+                        tid,
+                    )
+                    tool_result_payload = {
+                        "success": False,
+                        "blocked": True,
+                        "output": None,
+                        "error": (
+                            f"Tool '{tool_name}' is not available in this turn. "
+                            "Discover it with the tool finder before requesting it."
+                        ),
+                    }
                 elif (
                     tool_name == "spawn_worker"
                     and _is_meta_debug_intent(user_utterance)
