@@ -369,6 +369,18 @@ def test_a_diff_of_this_job_s_commit_does_verify() -> None:
     assert AcceptanceGate(jobs=(_job(),)).verdict("PASS", ledger) is None
 
 
+def test_a_test_runner_path_is_not_mistaken_for_a_git_revision() -> None:
+    ledger = _ledger(
+        _run("git diff", out="diff --git a/calc.py b/calc.py\n+def subtract"),
+        _run(
+            '"D:/Projects/Dodaios-p0-integration-20261104/.venv/Scripts/python.exe" '
+            "-m pytest test_calc.py -q",
+            out=".. [100%]\n2 passed in 0.30s\n[exit 0]",
+        ),
+    )
+    assert AcceptanceGate(jobs=(_job(),)).verdict("PASS", ledger) is None
+
+
 def test_a_test_run_from_before_the_change_does_not_verify_it() -> None:
     ledger = _ledger(_diff(), _tests(at=5.0))
     gate = AcceptanceGate(jobs=(_job(),))
@@ -490,6 +502,30 @@ async def test_the_filter_wraps_the_whole_surface() -> None:
     assert set(wrapped) == {"RunCommand", "Read"}
     await wrapped["RunCommand"].execute({"command": "git diff"}, None)
     assert [r.args["command"] for r in ledger.receipts] == ["git diff"]
+
+
+async def test_explicit_recording_workspace_overrides_tool_cwd() -> None:
+    class _ToolInOtherWorkspace(_Tool):
+        cwd = OTHER
+
+    ledger = EvidenceLedger()
+    wrapped = recording_filter(ledger, cwd=ROOT)(
+        {"RunCommand": _ToolInOtherWorkspace()}
+    )["RunCommand"]
+
+    await wrapped.execute({"command": "git diff"}, None)
+
+    assert ledger.receipts[0].cwd == ROOT
+
+
+def test_zero_failed_without_pass_does_not_satisfy_acceptance_gate() -> None:
+    ledger = _ledger(
+        _diff(),
+        _run("python -m pytest", out="collected 0 items\n0 failed"),
+    )
+    gate = AcceptanceGate(jobs=(_job(),))
+
+    assert gate.verdict("PASS, all tests pass.", ledger) is not None
 
 
 def test_an_unrecordable_receipt_fails_closed() -> None:

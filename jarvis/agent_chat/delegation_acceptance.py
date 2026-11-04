@@ -233,7 +233,7 @@ class RecordingTool:
                 args,
                 success=bool(getattr(result, "success", False)),
                 output=getattr(result, "output", "") or getattr(result, "error", "") or "",
-                cwd=str(getattr(self._tool, "cwd", "") or self._cwd),
+                cwd=str(self._cwd or getattr(self._tool, "cwd", "") or ""),
             )
         except Exception:  # noqa: BLE001 - the tool's own result is never affected
             self._ledger.observer_error = True
@@ -320,6 +320,33 @@ def _program(token: str) -> str:
     """The bare program name of a token, without its path or extension."""
     tail = re.split(r"[\\/]", token)[-1].casefold()
     return tail[:-4] if tail.endswith(".exe") else tail
+
+
+def _git_revision_tokens(command: str) -> list[str]:
+    """Return revision-like arguments from a git command, not arbitrary paths."""
+    tokens = _tokens(command)
+    for index, token in enumerate(tokens):
+        if _program(token) != "git":
+            continue
+        position = index + 1
+        while position < len(tokens):
+            current = tokens[position]
+            if current in {"-C", "--git-dir", "--work-tree"}:
+                position += 2
+                continue
+            if current.startswith(("-C=", "--git-dir=", "--work-tree=")):
+                position += 1
+                continue
+            if current == "--no-pager" or current.startswith("-"):
+                position += 1
+                continue
+            break
+        return [
+            candidate.casefold()
+            for candidate in tokens[position:]
+            if _SHA_RE.fullmatch(candidate.casefold())
+        ]
+    return []
 
 
 def reads_change(tool_name: str, args: Any) -> bool:
@@ -457,7 +484,7 @@ class DelegatedJob:
         """A command naming a revision must name the one this job ended on."""
         if not self.head_sha:
             return True
-        named = _SHA_RE.findall(_command_of(receipt.args).casefold())
+        named = _git_revision_tokens(_command_of(receipt.args))
         return all(self.head_sha.casefold().startswith(token) for token in named)
 
     def evidence_gaps(self, ledger: EvidenceLedger) -> tuple[str, ...]:
