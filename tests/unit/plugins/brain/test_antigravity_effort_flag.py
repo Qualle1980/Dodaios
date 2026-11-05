@@ -1,12 +1,22 @@
-"""agy requires --effort next to --model, and silently "answers" without it.
+"""agy must NOT get --effort beside --model: the level lives inside the id.
 
-Live 2026-07-26: a current agy aborted with
+This contract reversed, so both halves are recorded here.
 
-    invalid model selection (--model "gemini-3.5-flash" --effort ""): ...
+Live 2026-07-26, agy ~1.0.x: the binary REQUIRED the pair and aborted without
+it, writing `invalid model selection (--model "gemini-3.5-flash" --effort "")`
+to stdout where the caller read it as the model's answer.
 
-and wrote that to stdout, where the caller read it as the model's answer. The
-pairing is therefore not cosmetic — without it the provider is unusable while
-looking like it works.
+Live 2026-11-05, agy 1.5.1: the opposite. Effort is now spelled in the model id
+(`gemini-3.8-flash-low` / `-medium` / `-high`) and passing the flag as well is
+an error:
+
+    error: invalid model selection (--model "gemini-3.8-flash-low"
+    --effort "medium"): --model gemini-3.8-flash-low conflicts with
+    --effort=medium
+
+A run with a valid id and no flag succeeded in 7.2 s. So the ladder maps onto
+the id suffix and the flag is never sent — see
+`tests/unit/brain/test_antigravity_model_discovery.py` for the resolution.
 """
 from __future__ import annotations
 
@@ -26,17 +36,35 @@ def _gemini() -> SimpleNamespace:
     return SimpleNamespace(kind="gemini", argv_prefix=["gemini"])
 
 
-def test_agy_always_gets_an_effort_beside_its_model() -> None:
-    argv = antigravity._build_argv(_agy(), "prompt", "gemini-3.5-flash")
+def test_agy_never_gets_an_effort_beside_its_model() -> None:
+    argv = antigravity._build_argv(_agy(), "prompt", "gemini-3.8-flash-low")
 
-    assert "--effort" in argv
-    effort = argv[argv.index("--effort") + 1]
-    assert effort in {"low", "medium", "high"}
-    assert effort, "an empty effort is exactly what agy rejects"
+    assert "--effort" not in argv, "agy 1.5.1 refuses the flag beside a levelled id"
+    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-low"
+
+
+def test_a_refused_model_is_recognised_as_a_model_problem() -> None:
+    """A rejected model must be told apart from a dead subscription.
+
+    Only the first retries with a different id; the second must surface.
+    """
+    for complaint in (
+        'invalid model selection (--model "gemini-3.5-flash" --effort "")',
+        "model gemini-3.5-flash is not recognized as a known model",
+        "--model gemini-3.8-flash-low conflicts with --effort=medium",
+    ):
+        assert antigravity._is_model_rejection(complaint), complaint
+
+    for outage in (
+        "Google CLI failed with exit status 1.",
+        "could not reach the subscription",
+        "please sign in again",
+    ):
+        assert not antigravity._is_model_rejection(outage), outage
 
 
 def test_the_gemini_cli_is_left_alone() -> None:
-    """Only agy demands the pair; adding it elsewhere would break that path."""
+    """The Gemini CLI never took this flag either; its path is untouched."""
     argv = antigravity._build_argv(_gemini(), "prompt", "gemini-3.5-flash")
 
     assert "--effort" not in argv
