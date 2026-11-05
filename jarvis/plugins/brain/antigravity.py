@@ -25,7 +25,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import suppress
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
@@ -52,16 +52,33 @@ from .cli_prompt_context import (
 log = logging.getLogger(__name__)
 
 # Fallback only — the active model comes from [brain.providers.antigravity].model.
-# Flash is the fast default. NOTE (verified 2026-06-21, agy 1.0.10): agy ignores
-# both --model and settings.json model.name and runs its own IDE-configured
-# default, so this value only steers the gemini-CLI fallback path; for agy it is
-# informational. Kept in sync with the curated catalog (model_catalog.py).
+# Flash is the fast default for the gemini-CLI fallback path, which takes a
+# plain model name. It is NOT used verbatim for agy any more.
+#
+# History, because the behaviour reversed twice and a stale assumption broke the
+# provider outright: agy 1.0.10 IGNORED ``--model`` and REQUIRED ``--effort``
+# beside it. agy 1.5.1 does the opposite — it validates ``--model`` against the
+# account's own list and REFUSES ``--effort`` when the id already carries a
+# level ("--model gemini-3.8-flash-low conflicts with --effort=medium"). A
+# hardcoded id therefore ages into a hard failure: this one did, with
+# "model gemini-3.5-flash is not recognized as a known model".
+#
+# So the agy path ASKS the binary what it can run (``agy models``) instead of
+# naming a model from memory — the capability gate AP-21 requires.
 DEFAULT_MODEL = "gemini-3.5-flash"
+
+#: Family preferred when resolving an agy model, when nothing better is asked
+#: for. A family, never a version: versions retire, families do not.
+_AGY_PREFERRED_FAMILY = "gemini"
 
 # Hard cap for a single CLI brain turn. The agent CLI is slow (cold start +
 # 20k-token system prompt); 120 s leaves headroom without hanging the brain
 # coroutine forever if the subscription is unreachable.
 _CLI_TIMEOUT_S: float = 120.0
+
+#: ``agy models`` does a short network fetch; it must never hold up a turn for
+#: long, because failing it only costs us the model check.
+_MODELS_TIMEOUT_S: float = 20.0
 
 # Env keys dropped from the child so the subscription login wins and an
 # accidental API key can never bill the wrong account / break the OAuth path.
@@ -136,20 +153,141 @@ def _build_cli_prompt(req: BrainRequest) -> str:
     return "\n".join(lines)
 
 
-# Reasoning effort sent alongside an explicit ``--model`` on the agy CLI. The
-# binary REQUIRES the pair: passing a model without an effort aborts the run.
+# Reasoning effort on the agy CLI rides INSIDE the model id as a level suffix
+# (``gemini-3.8-flash-low`` / ``-medium`` / ``-high``), and passing ``--effort``
+# beside such an id is an error. So the ladder maps onto the suffix instead of a
+# flag, and ``--effort`` is never sent to agy.
 _DEFAULT_AGY_EFFORT = "medium"
-# The levels agy accepts (``agy --help``: low|medium|high). A request asking to
-# disable thinking maps to the lowest level agy offers, since it has no "off".
-_AGY_EFFORTS = frozenset({"low", "medium", "high"})
+#: The levels agy spells in its model ids. A caller asking to disable thinking
+#: maps to the lowest level agy offers, since it has no "off".
+_AGY_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 
 
 def _agy_effort(req: BrainRequest | None) -> str:
-    """Effort flag for an agy run, derived from the caller's own hint."""
+    """The level an agy model id should carry, from the caller's own hint."""
     requested = str(getattr(req, "reasoning_effort", "") or "").strip().lower()
     if requested == "none":
         return "low"
+    if requested in {"xhigh", "max"}:
+        return "high"
     return requested if requested in _AGY_EFFORTS else _DEFAULT_AGY_EFFORT
+
+
+def _strip_level(model: str) -> str:
+    """``gemini-3.8-flash-low`` -> ``gemini-3.8-flash``; others unchanged."""
+    for level in _AGY_EFFORTS:
+        suffix = f"-{level}"
+        if model.endswith(suffix):
+            return model[: -len(suffix)]
+    return model
+
+
+def pick_agy_model(available: Sequence[str], requested: str, effort: str) -> str:
+    """Choose a model id agy will actually accept.
+
+    ``available`` is what the binary reported. The order of preference is the
+    caller's exact id, then the caller's family at the wanted level, then the
+    preferred family at that level, then anything at that level, then anything
+    at all. Returns ``requested`` unchanged when nothing was reported, so a
+    discovery failure degrades to the old behaviour rather than inventing an id.
+    """
+    if not available:
+        return requested
+    if requested in available:
+        return requested
+
+    def at_level(candidates: Sequence[str]) -> str | None:
+        for candidate in candidates:
+            if candidate.endswith(f"-{effort}"):
+                return candidate
+        return candidates[0] if candidates else None
+
+    base = _strip_level(requested)
+    if base:
+        same_family = [m for m in available if _strip_level(m) == base]
+        if same_family:
+            chosen = at_level(same_family)
+            if chosen:
+                return chosen
+
+    preferred = [m for m in available if m.startswith(_AGY_PREFERRED_FAMILY)]
+    chosen = at_level(preferred) or at_level(list(available))
+    # ``available`` is non-empty, so at_level cannot return None here.
+    assert chosen is not None
+    return chosen
+
+
+#: What agy says when it will not run the model it was handed. Matched on the
+#: wording rather than the exit status, because the status also covers real
+#: outages and a retry must not paper over those.
+_MODEL_REJECTION_MARKERS: tuple[str, ...] = (
+    "invalid model selection",
+    "is not recognized as a known model",
+    "conflicts with --effort",
+)
+
+
+def _is_model_rejection(message: str) -> bool:
+    """Whether a failed run failed because of the MODEL, not the subscription."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _MODEL_REJECTION_MARKERS)
+
+
+def parse_agy_models(stdout: str) -> tuple[str, ...]:
+    """Model ids from ``agy models`` output (``id<TAB>display name`` per line).
+
+    Tolerant on purpose: the command prints a progress line to stderr and may
+    gain columns, so only the first tab-separated field of plausible lines is
+    read.
+    """
+    ids: list[str] = []
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line or "	" not in line:
+            continue
+        candidate = line.split("	", 1)[0].strip()
+        if candidate and " " not in candidate:
+            ids.append(candidate)
+    return tuple(ids)
+
+
+#: Model ids reported by ``agy models``, cached per process. The command does a
+#: network fetch (~2 s), and nothing may run it on the boot path (AP-26), so it
+#: is populated lazily on the first turn and reused afterwards.
+_agy_models_lock = asyncio.Lock()
+_agy_models_cache: tuple[str, ...] | None = None
+
+
+async def _agy_models(argv_prefix: Sequence[str], env: dict[str, str]) -> tuple[str, ...]:
+    """Ask agy which models this account may run. Empty tuple on any failure."""
+    global _agy_models_cache
+    async with _agy_models_lock:
+        if _agy_models_cache is not None:
+            return _agy_models_cache
+        creationflags = NO_WINDOW_CREATIONFLAGS if sys.platform == "win32" else 0
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv_prefix,
+                "models",
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                creationflags=creationflags,
+            )
+            raw, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_TIMEOUT_S)
+        except (TimeoutError, OSError) as exc:
+            # Not cached: a transient failure must not pin an empty list for the
+            # life of the process. Degrades to the caller's configured id.
+            log.warning("AntigravityBrain: could not list models (%s)", exc)
+            return ()
+        found = parse_agy_models(raw.decode("utf-8", "replace"))
+        if not found:
+            log.warning("AntigravityBrain: 'agy models' reported nothing usable")
+            return ()
+        log.info("AntigravityBrain: agy offers %s", ", ".join(found))
+        _agy_models_cache = found
+        return found
 
 
 def _build_argv(
@@ -161,6 +299,8 @@ def _build_argv(
     Keeping input out of argv avoids both Windows and POSIX argument limits.
     """
     if cli.kind == "agy":
+        # No ``--effort``: the level is already inside ``model`` and agy rejects
+        # the combination. See the note on DEFAULT_MODEL.
         return [
             *cli.argv_prefix,
             "--output-format",
@@ -169,8 +309,6 @@ def _build_argv(
             "plan",
             "--model",
             model,
-            "--effort",
-            effort,
         ]
     return [
         *cli.argv_prefix,
@@ -268,9 +406,40 @@ class AntigravityBrain:
             )
 
         prompt = self._render_prompt(req)
-        argv = _build_argv(cli, prompt, self._model, _agy_effort(req))
-        async for delta in self._complete_via_pipe(argv, prompt):
-            yield delta
+        effort = _agy_effort(req)
+        model = self._model
+        # The configured id is tried FIRST and the binary is only questioned
+        # when it refuses that id. Asking up front would spend a subprocess and
+        # a network fetch on every single turn to answer a question that is
+        # almost always "yes".
+        for attempt in (1, 2):
+            try:
+                async for delta in self._complete_via_pipe(
+                    _build_argv(cli, prompt, model, effort), prompt
+                ):
+                    yield delta
+                return
+            except RuntimeError as exc:
+                retryable = (
+                    attempt == 1 and cli.kind == "agy" and _is_model_rejection(str(exc))
+                )
+                if not retryable:
+                    raise
+                env = await asyncio.to_thread(self._build_child_env, harden_path=True)
+                replacement = pick_agy_model(
+                    await _agy_models(cli.argv_prefix, env), model, effort
+                )
+                if replacement == model:
+                    raise
+                log.info(
+                    "AntigravityBrain: %r was refused, retrying once with %r",
+                    model,
+                    replacement,
+                )
+                model = replacement
+                # Remember it: otherwise every later turn would pay the same
+                # refusal again, roughly three seconds each, on a voice path.
+                self._model = replacement
 
     def _build_child_env(self, *, harden_path: bool) -> dict[str, str]:
         """Child env: drop API keys (subscription login wins), redirect HOME to an
@@ -299,7 +468,10 @@ class AntigravityBrain:
         log.info(
             "AntigravityBrain(pipe): spawning %s (model=%s, prompt=%d chars)",
             argv[0],
-            self._model,
+            # From argv, not from self._model: a retry runs a DIFFERENT id, and
+            # logging the configured one made a successful retry read as though
+            # it had run the refused model.
+            argv[argv.index("--model") + 1] if "--model" in argv else "default",
             len(prompt),
         )
 
@@ -381,8 +553,25 @@ class AntigravityBrain:
                 shutil.rmtree(workdir, ignore_errors=True)
 
         if proc.returncode:
-            log.warning("AntigravityBrain: CLI exited with status %s", proc.returncode)
-            raise RuntimeError(f"Google CLI failed with exit status {proc.returncode}.")
+            # agy reports WHY on both channels, as JSON on stdout and plain text
+            # on stderr. Carrying it into the exception is what lets the caller
+            # tell a rejected model apart from a real outage.
+            complaint = " ".join(
+                part
+                for part in (
+                    stdout_bytes.decode("utf-8", errors="replace").strip(),
+                    stderr_bytes.decode("utf-8", errors="replace").strip(),
+                )
+                if part
+            )[:500]
+            log.warning(
+                "AntigravityBrain: CLI exited with status %s: %s",
+                proc.returncode,
+                complaint or "(no detail)",
+            )
+            raise RuntimeError(
+                f"Google CLI failed with exit status {proc.returncode}. {complaint}".strip()
+            )
         decoded = stdout_bytes.decode("utf-8", errors="replace")
         try:
             envelope = json.loads(decoded)
