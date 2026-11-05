@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -96,11 +96,17 @@ def _ns(moment: datetime) -> int:
 def _power_user_db(tmp_path: Path) -> tuple[Path, Path]:
     jsonl_dir = tmp_path / "flight_recorder"
     jsonl_dir.mkdir(parents=True)
-    base = datetime.now().astimezone().replace(hour=23, minute=0, second=0, microsecond=0)
+    # Build each day from its own LOCAL date. Subtracting whole days from one
+    # pinned-offset timestamp would shift the wall-clock hour across a DST
+    # boundary, so "23:00" on a day before the change lands at 00:00 the next
+    # local day -- two nominal days collapse onto one date and the fixture
+    # silently yields 13 days instead of 14. Localising each date separately
+    # gives every day its own correct offset.
+    today = datetime.now().astimezone().date()
 
     events = []
     for day_off in range(14):
-        day = base - timedelta(days=day_off)
+        day = datetime.combine(today - timedelta(days=day_off), time(hour=23)).astimezone()
         for idx, tool in enumerate(["bash", "search_web", "write_file", "read_file", "grep_repo"]):
             events.append({
                 "ts_ns": _ns(day + timedelta(minutes=idx * 4)),
@@ -446,7 +452,7 @@ def test_days_observed_counts_from_first_active_day(tmp_path: Path) -> None:
     # Power-user fixture has 14 days of activity → days_observed should be 13
     # (difference today - earliest_active_day, excluding the endpoint).
     days = store.days_observed()
-    assert days >= 13, f"erwarte mindestens 13 Tage, bekam {days}"
+    assert days >= 13, f"expected at least 13 days, got {days}"
 
 
 # ----------------------------------------------------------------------
