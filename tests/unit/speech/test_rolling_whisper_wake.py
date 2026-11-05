@@ -14,6 +14,7 @@ Two live symptoms — "huge delay" + "sometimes nothing at all":
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import numpy as np
 
@@ -345,6 +346,10 @@ async def test_consumer_keeps_draining_while_transcription_is_in_flight() -> Non
     src: asyncio.Queue = asyncio.Queue()
     consumed = 0
     stop_feed = asyncio.Event()
+    # Signalled by the consumer once it has drained ``drain_target`` chunks, so
+    # the assertion below waits for real progress instead of for the clock.
+    drain_target: int | None = None
+    drained = asyncio.Event()
 
     async def _iter():
         nonlocal consumed
@@ -353,6 +358,8 @@ async def test_consumer_keeps_draining_while_transcription_is_in_flight() -> Non
             if chunk is None:
                 return
             consumed += 1
+            if drain_target is not None and consumed >= drain_target:
+                drained.set()
             yield chunk
 
     async def _feeder() -> None:
@@ -375,8 +382,17 @@ async def test_consumer_keeps_draining_while_transcription_is_in_flight() -> Non
         await asyncio.wait_for(stt.first_call_started.wait(), timeout=3.0)
         consumed_when_blocked = consumed
 
-        # The mic keeps streaming while the transcription is stuck.
-        await asyncio.sleep(0.3)
+        # The mic keeps streaming while the transcription is stuck. Wait for the
+        # target count instead of sleeping a fixed span and counting whatever
+        # arrived: ``asyncio.sleep`` is bounded by the OS timer granularity,
+        # measured at ~15 ms on Windows, so this feeder's nominal 2 ms tick
+        # really delivers ~20 chunks in 0.3 s rather than the ~150 the rate
+        # suggests. Polling for the bar keeps it at 30 and makes the check
+        # independent of timer resolution; coupled code never reaches it and
+        # still fails on the deadline.
+        drain_target = consumed_when_blocked + 30
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(drained.wait(), timeout=5.0)
         progressed = consumed - consumed_when_blocked
 
         # Coupled (buggy) code is stuck on ``await transcribe`` and cannot pull
