@@ -71,6 +71,16 @@ DEFAULT_MODEL = "gemini-3.5-flash"
 #: for. A family, never a version: versions retire, families do not.
 _AGY_PREFERRED_FAMILY = "gemini"
 
+#: What the agy path starts from when the install configured nothing. agy names
+#: its models differently from the Gemini CLI (the level is a suffix), so the
+#: two cannot share ``DEFAULT_MODEL``: using the Gemini name here is what made
+#: every first turn a guaranteed refusal.
+#:
+#: Verified against a live ``agy models`` on 2026-11-05. It WILL age, and that
+#: is acceptable: the refusal path then discovers a working id and remembers it.
+#: An explicitly configured model is never overridden by this.
+_AGY_DEFAULT_MODEL = "gemini-3.8-flash-medium"
+
 # Hard cap for a single CLI brain turn. The agent CLI is slow (cold start +
 # 20k-token system prompt); 120 s leaves headroom without hanging the brain
 # coroutine forever if the subscription is unreachable.
@@ -345,6 +355,10 @@ class AntigravityBrain:
         cli_timeout_s: float | None = None,
     ) -> None:
         self._model = model or DEFAULT_MODEL
+        #: Whether the INSTALL picked this model. An inherited default is a
+        #: guess, and for agy a guess from the wrong naming scheme, so the agy
+        #: path may replace it; a deliberate choice is always tried as given.
+        self._model_was_configured = bool((model or "").strip())
         # Background/structured callers (the wiki curator tier) set this so
         # their JSON contract reaches the CLI model verbatim instead of the
         # conversational "answer in 1-3 plain-text sentences" wrapper — which
@@ -408,6 +422,11 @@ class AntigravityBrain:
         prompt = self._render_prompt(req)
         effort = _agy_effort(req)
         model = self._model
+        if cli.kind == "agy" and not self._model_was_configured:
+            # No extra subprocess here on purpose: asking the binary up front
+            # would spend a fetch on every turn, and the refusal path below
+            # already recovers when this guess ages out.
+            model = _AGY_DEFAULT_MODEL
         # The configured id is tried FIRST and the binary is only questioned
         # when it refuses that id. Asking up front would spend a subprocess and
         # a network fetch on every single turn to answer a question that is
