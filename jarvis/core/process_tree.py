@@ -42,6 +42,7 @@ and removes a whole class of spawn failures.
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import os
 import signal
@@ -56,6 +57,37 @@ from loguru import logger
 #: Long enough for a CLI to flush its state, short enough that a user closing a
 #: workspace never waits on it (the escalation runs on its own thread anyway).
 GRACE_S = 0.5
+
+#: Escalation timers that have not fired yet, so interpreter shutdown can stop
+#: them. ``close()`` is synchronous and hands the SIGKILL escalation to a daemon
+#: timer, so a process that exits inside the grace window leaves those timers to
+#: fire while the interpreter is already finalizing. A daemon thread that writes
+#: to stderr at that moment aborts the whole process with
+#: ``_enter_buffered_busy`` — which looks like "398 tests passed, then exit 250".
+#: The escalation is a safeguard, never the primary reaper: a dying process has
+#: the kernel close its job objects and orphan its groups anyway, so dropping a
+#: pending escalation at shutdown costs nothing and removes the race entirely.
+_pending_lock = threading.Lock()
+_pending_timers: set[threading.Timer] = set()
+_shutting_down = False
+
+
+def _stop_pending_escalations() -> None:
+    """Cancel every unfired escalation before the interpreter finalizes."""
+    global _shutting_down
+    with _pending_lock:
+        _shutting_down = True
+        timers = tuple(_pending_timers)
+        _pending_timers.clear()
+    for timer in timers:
+        timer.cancel()
+    for timer in timers:
+        # A timer already inside its callback gets the grace period to leave it;
+        # joining here is what keeps its stderr writes before finalization.
+        timer.join(GRACE_S)
+
+
+atexit.register(_stop_pending_escalations)
 
 # Win32 constants — stable kernel API, declared here so the base install needs
 # no pywin32 (that package lives in the desktop extra; containment must work
@@ -276,8 +308,27 @@ class _PosixProcessGroup:
         if not groups:
             return
         self._signal(groups, signal.SIGTERM)
-        timer = threading.Timer(GRACE_S, self._signal, args=(groups, _SIGKILL))
+        self._schedule_kill(groups)
+
+    def _schedule_kill(self, groups: tuple[int, ...]) -> None:
+        """Escalate to ``SIGKILL`` after the grace period, cancellably."""
+        timer: threading.Timer
+
+        def escalate() -> None:
+            try:
+                self._signal(groups, _SIGKILL)
+            finally:
+                with _pending_lock:
+                    _pending_timers.discard(timer)
+
+        timer = threading.Timer(GRACE_S, escalate)
         timer.daemon = True
+        with _pending_lock:
+            if _shutting_down:
+                # Teardown has begun: starting a thread now is exactly the race
+                # that aborts the process, and process exit reaps what is left.
+                return
+            _pending_timers.add(timer)
         timer.start()
 
     def _signal(self, groups: tuple[int, ...], sig: int) -> None:
@@ -289,6 +340,11 @@ class _PosixProcessGroup:
             except (ProcessLookupError, PermissionError, OSError):
                 # Already gone, or not ours to signal. Reaping is best-effort by
                 # nature: the tree exiting on its own is the good outcome.
+                if _shutting_down:
+                    # Silent on purpose: a sink write during finalization is the
+                    # fatal error this guard exists to prevent, and "already
+                    # gone" is the expected outcome while everything is exiting.
+                    continue
                 logger.debug(
                     "Signalling process group {} of {} did nothing — already gone",
                     pgid,
@@ -311,8 +367,7 @@ def make_process_tree(name: str) -> ProcessTree:
             return _WindowsJob(name)
         except Exception as exc:  # noqa: BLE001 - containment is a safeguard
             logger.warning(
-                "Could not create a job object for {} — its descendants will "
-                "not be reaped: {}",
+                "Could not create a job object for {} — its descendants will not be reaped: {}",
                 name,
                 exc,
             )

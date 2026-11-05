@@ -296,7 +296,7 @@ class ChatGPTPlanBrain:
                                 continue
                             raise exc
                         admitted = True
-                        async for delta in _events(resp, reverse_names):
+                        async for delta in _events(resp, reverse_names, model):
                             if delta.finish_reason:
                                 finished = True
                             yield delta
@@ -380,7 +380,9 @@ def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:
 
 
 async def _events(
-    resp: httpx.Response, reverse_names: dict[str, str] | None = None
+    resp: httpx.Response,
+    reverse_names: dict[str, str] | None = None,
+    model: str | None = None,
 ) -> AsyncIterator[BrainDelta]:
     """Stream deltas; tool calls are collected and handed out before the finish,
     like the OpenAI brain's Responses path, so the tool loop sees one shape."""
@@ -405,29 +407,29 @@ async def _events(
         if kind == "response.output_text.delta":
             text = payload.get("delta")
             if isinstance(text, str) and text:
-                yield BrainDelta(content=text)
+                yield BrainDelta(content=text, model=model)
         elif kind == "response.output_item.done":
             item = payload.get("item") or {}
             if isinstance(item, dict) and item.get("type") == "function_call":
                 calls.append(_tool_call(item, reverse_names, len(calls)))
         elif kind == "response.completed":
             for call in calls:
-                yield BrainDelta(tool_call=call)
-            yield BrainDelta(finish_reason="tool_calls" if calls else "stop")
+                yield BrainDelta(tool_call=call, model=model)
+            yield BrainDelta(finish_reason="tool_calls" if calls else "stop", model=model)
             # Usage last, after the finish reason, as the OpenAI brain's
             # Responses path yields it: the meter reads it from the stream.
             spent = _usage_of(payload)
             if spent is not None:
-                yield BrainDelta(usage=spent)
+                yield BrainDelta(usage=spent, model=model)
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
             if reason == "max_output_tokens":
-                yield BrainDelta(finish_reason="length")
+                yield BrainDelta(finish_reason="length", model=model)
                 # A truncated answer was paid for in full; it is still spend.
                 spent = _usage_of(payload)
                 if spent is not None:
-                    yield BrainDelta(usage=spent)
+                    yield BrainDelta(usage=spent, model=model)
                 return
             raise ChatGPTPlanError(
                 "incomplete", f"ChatGPT stopped the answer early ({reason or 'unknown'})."
