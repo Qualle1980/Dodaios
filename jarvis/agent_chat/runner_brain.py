@@ -617,21 +617,39 @@ async def run_brain_turn(
                 answer, ledger, language=handle.output_language or DEFAULT_LOCALE
             )
             if rewritten is not None:
-                answer = rewritten
+                from jarvis.agent_chat.delegation_correction import correctable
+
+                missing = list(gate.gaps(ledger))
+                # A job that was handed back may be sent after the missing
+                # evidence once more; one that is blocked, crashed or
+                # superseded may not be re-dispatched on suspicion.
+                pending = correctable(gate) if handle.corrections_left > 0 else ()
                 await emit(
                     "notice",
                     {
-                        "kind": "delegation_unverified",
+                        "kind": "delegation_correction" if pending else "delegation_unverified",
                         "turn_id": turn_id,
                         "work": list(gate.work),
-                        "missing": list(gate.gaps(ledger)),
+                        "missing": missing,
+                        **({"correcting": list(pending),
+                            "left": handle.corrections_left} if pending else {}),
                     },
                 )
-                # The verdict stands as it is; this only writes the failure down
-                # and lets the conductor's seat learn from it once per job.
+                # The rejection is written down either way, and the conductor's
+                # seat learns from the first one per job (slice 1). The verdict
+                # itself is never granted anything here.
                 from jarvis.agent_chat.delegation_lessons import document_rejection
 
                 await document_rejection(gate, ledger, person_request)
+                if pending:
+                    # The honest line is NOT spoken yet: a correction follows,
+                    # and the gate's own rule is that a rewritten verdict must
+                    # not arrive after the person has already read a claim.
+                    # Saying "unverified" now and "all good" two waves later is
+                    # exactly that, in the other direction.
+                    answer = ""
+                else:
+                    answer = rewritten
         if answer:
             await emit(
                 "assistant_text", {"turn_id": turn_id, "message_id": message_id, "text": answer}
