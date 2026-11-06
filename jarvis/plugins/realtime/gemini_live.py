@@ -18,7 +18,13 @@ from uuid import uuid4
 
 log = logging.getLogger(__name__)
 
-_MODEL = "gemini-3.1-flash-live-preview"
+# Re-verified 2026-11-06 against the account's own Live model list.
+# 3.8 Live over the 3.1 preview for ONE reason: Google documents the 3.1
+# preview as synchronous function calling only — "execution pauses until
+# you send the tool response" — so every tool stops the conversation.
+# 3.8 Live takes ``behavior: NON_BLOCKING``. Keep this in step with
+# ``REALTIME_MODELS["gemini-live"]`` in jarvis/brain/model_catalog.py.
+_MODEL = "gemini-3.8-live"
 _INPUT_RATE = 16_000
 _OUTPUT_RATE = 24_000
 
