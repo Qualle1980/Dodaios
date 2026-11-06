@@ -113,6 +113,7 @@ from jarvis.voice.contextual_readback import render_readback
 from .action_honesty import has_unbacked_action_claim, replace_unbacked_action_claim
 from .assistant_name import resolve_assistant_name
 from .dispatcher import BrainDispatcher
+from .lead_budget import LeadActivity, LeadTookTooLong, run_lead_under_budget
 from .evidence_gate import live_surface_covers
 from .identity import identity_block
 from .intent_router import RoutingDecision, classify
@@ -12975,25 +12976,58 @@ class BrainManager:
             # the chosen talker streams the answer normally after the fall-through.
             _is_router_lead = self._router_lead_key == (prov_name, model)
             _attempt_consumer = None if _is_router_lead else text_consumer
+            # A lead that is still setting itself up shows no sign of life, and
+            # the bounds that exist cannot see that: the tool-loop deadline is
+            # checked between rounds and the stall watchdog waits 30 s, which is
+            # the right number for an answer and far too long for a provider
+            # whose only job is to name a tool. See jarvis/brain/lead_budget.py
+            # for the measured turn this comes from.
+            _lead_alive = LeadActivity() if _is_router_lead else None
             try:
                 # CostMeter: start per-trace tracking (idempotent if already started).
                 if self._cost_meter is not None:
                     self._cost_meter.start(trace_uuid, prov_name, model)
-                agg = await disp.dispatch(
-                    user_text,
-                    images=images,
-                    history=history,
-                    trace_id=trace_id,
-                    intent_level=decision.level,
-                    evidence_required_tool=self._evidence_required_tool,
-                    text_consumer=_attempt_consumer,
-                    ack_emitter=_tool_ack_emitter,
-                    on_progress=on_progress,
-                    turn_context=turn_context,
-                    reply_language=self._reply_language,
-                    conversation_language=self._conversation_language,
-                    voice_confirm=(allow_voice_confirm and self._voice_confirm_enabled),
-                )
+
+                # Bound as defaults, not captured: this closure is awaited
+                # inside its own iteration, but a late-bound chain variable
+                # here would be a silent cross-provider mix-up (ruff B023).
+                def _attempt(
+                    _disp: Any = disp,
+                    _consumer: Any = _attempt_consumer,
+                    _alive: LeadActivity | None = _lead_alive,
+                ) -> Any:
+                    return _disp.dispatch(
+                        user_text,
+                        images=images,
+                        history=history,
+                        trace_id=trace_id,
+                        intent_level=decision.level,
+                        evidence_required_tool=self._evidence_required_tool,
+                        text_consumer=(
+                            _consumer if _alive is None else _alive.wrap(_consumer)
+                        ),
+                        ack_emitter=(
+                            _tool_ack_emitter if _alive is None
+                            else _alive.wrap(_tool_ack_emitter)
+                        ),
+                        on_progress=(
+                            on_progress if _alive is None
+                            else _alive.wrap(on_progress)
+                        ),
+                        turn_context=turn_context,
+                        reply_language=self._reply_language,
+                        conversation_language=self._conversation_language,
+                        voice_confirm=(
+                            allow_voice_confirm and self._voice_confirm_enabled
+                        ),
+                    )
+
+                if _lead_alive is None:
+                    agg = await _attempt()
+                else:
+                    agg = await run_lead_under_budget(
+                        _attempt, _lead_alive, provider=prov_name, model=model,
+                    )
                 # Post-call cost hook: aggregated usage → meter.
                 # The meter cancels on overrun via CancelToken (see ADR-0006);
                 # the pre-call gate above catches that on the next turn.
@@ -13228,6 +13262,17 @@ class BrainManager:
                             to_provider=prov_name,
                         ))
                 break
+            except LeadTookTooLong as abandoned:
+                # OUR deadline ended this attempt, so it says nothing about the
+                # provider: no health failure, no cooldown, no dead-list entry.
+                # Recording one would turn a status dot red for a setting, the
+                # same reasoning the local_context carve-out below rests on.
+                log.warning(
+                    "Tool lead %s(%s) produced nothing in %.1fs — the turn goes "
+                    "on without a lead.", prov_name, model, abandoned.budget_s,
+                )
+                self._router_lead_key = None
+                continue
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 msg = str(exc)
