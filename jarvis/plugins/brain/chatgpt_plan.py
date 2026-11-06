@@ -216,6 +216,10 @@ class ChatGPTPlanBrain:
     supports_vision: bool = True
     #: The caller's system prompt goes in ``instructions``, a real channel.
     native_system_prompt: bool = True
+    #: The model the last call actually ran on, for the usage ledger. This
+    #: route resolves it DURING the call, so MeteredBrain has no name at call
+    #: time and reads this instead (its own comment names the incident).
+    last_model: str = ""
 
     def __init__(self, model: str | None = None, structured_prompts: bool = True) -> None:
         # ``structured_prompts`` is accepted for resolve_subscription_brain: an
@@ -258,6 +262,7 @@ class ChatGPTPlanBrain:
                     "no_models", "Your ChatGPT plan lists no models for Dodaios."
                 )
             model = models[0]["slug"]
+        self.last_model = model
         return token, model
 
     async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:
@@ -296,7 +301,7 @@ class ChatGPTPlanBrain:
                                 continue
                             raise exc
                         admitted = True
-                        async for delta in _events(resp, reverse_names, model):
+                        async for delta in _events(resp, reverse_names):
                             if delta.finish_reason:
                                 finished = True
                             yield delta
@@ -380,9 +385,7 @@ def _usage_of(payload: dict[str, Any]) -> dict[str, int] | None:
 
 
 async def _events(
-    resp: httpx.Response,
-    reverse_names: dict[str, str] | None = None,
-    model: str | None = None,
+    resp: httpx.Response, reverse_names: dict[str, str] | None = None
 ) -> AsyncIterator[BrainDelta]:
     """Stream deltas; tool calls are collected and handed out before the finish,
     like the OpenAI brain's Responses path, so the tool loop sees one shape."""
@@ -407,29 +410,29 @@ async def _events(
         if kind == "response.output_text.delta":
             text = payload.get("delta")
             if isinstance(text, str) and text:
-                yield BrainDelta(content=text, model=model)
+                yield BrainDelta(content=text)
         elif kind == "response.output_item.done":
             item = payload.get("item") or {}
             if isinstance(item, dict) and item.get("type") == "function_call":
                 calls.append(_tool_call(item, reverse_names, len(calls)))
         elif kind == "response.completed":
             for call in calls:
-                yield BrainDelta(tool_call=call, model=model)
-            yield BrainDelta(finish_reason="tool_calls" if calls else "stop", model=model)
+                yield BrainDelta(tool_call=call)
+            yield BrainDelta(finish_reason="tool_calls" if calls else "stop")
             # Usage last, after the finish reason, as the OpenAI brain's
             # Responses path yields it: the meter reads it from the stream.
             spent = _usage_of(payload)
             if spent is not None:
-                yield BrainDelta(usage=spent, model=model)
+                yield BrainDelta(usage=spent)
             return
         elif kind == "response.incomplete":
             reason = ((payload.get("response") or {}).get("incomplete_details") or {}).get("reason")
             if reason == "max_output_tokens":
-                yield BrainDelta(finish_reason="length", model=model)
+                yield BrainDelta(finish_reason="length")
                 # A truncated answer was paid for in full; it is still spend.
                 spent = _usage_of(payload)
                 if spent is not None:
-                    yield BrainDelta(usage=spent, model=model)
+                    yield BrainDelta(usage=spent)
                 return
             raise ChatGPTPlanError(
                 "incomplete", f"ChatGPT stopped the answer early ({reason or 'unknown'})."
