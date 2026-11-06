@@ -341,7 +341,11 @@ def test_get_realtime_options_gemini_live_voices(monkeypatch):
         "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
         "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
     }
-    assert body["models"][0]["id"] == "gemini-3.1-flash-live-preview"
+    # The catalog decides which Live model leads; copying its id here is what
+    # let the route and the catalog drift apart (PR #108).
+    from jarvis.brain.model_catalog import REALTIME_MODELS
+
+    assert body["models"][0]["id"] == REALTIME_MODELS["gemini-live"][0].id
 
 
 def test_get_realtime_options_vertex_live_shares_the_gemini_voice_roster(monkeypatch):
