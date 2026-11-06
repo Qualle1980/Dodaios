@@ -1645,7 +1645,7 @@ async def test_worker_prompt_carries_artifact_language_directive(
 # --- missions.conductor = "on" (ADR-0043) ---
 
 
-def _conductor_ledger(*, done: bool, nxt: str = "codex", instruction: str = "") -> str:
+def _conductor_ledger(*, done: bool, nxt: str = "coding", instruction: str = "") -> str:
     import json
 
     return json.dumps({
@@ -1675,7 +1675,7 @@ class _ScriptedSeat:
             return self.final
         if "Answer this directly" in prompt:
             return "Rebase rewrites history; merge keeps it."
-        return "- codex: write the helper"
+        return "- coding: write the helper"
 
 
 def _conduct(k: Kontrollierer, seat) -> None:  # type: ignore[no-untyped-def]
