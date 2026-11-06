@@ -231,12 +231,20 @@ CURATED_MODELS: dict[str, list[ModelInfo]] = {
             ("gpt-5.4-nano", "GPT-5.4 Nano"),
         ]
     ),
+    # Checked against the live AI Studio catalog on 2026-11-06. Two ids that
+    # used to sit here answer nothing: ``gemini-3.7-flash`` and
+    # ``gemini-3.5-flash`` are not in Google's model list at all - only the
+    # Flash-Lite build of 3.5 exists. ``gemini-2.5-flash`` is deprecated and
+    # routes to ``gemini-3.5-flash-lite`` from 2026-12-01, so it stays listed
+    # but last. The Lite tier leads the Flash tier on request allowance, not
+    # on capability: a free AI Studio project gets ~500 requests/day on
+    # Flash-Lite against ~20 on Flash, which decides whether a chat install
+    # survives a day at all.
     "gemini": _curated(
         [
             ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-            ("gemini-3.7-flash", "Gemini 3.7 Flash"),
             ("gemini-3.6-flash", "Gemini 3.6 Flash"),
-            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+            ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
             ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
             ("gemini-3-flash-preview", "Gemini 3 Flash"),
             ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
