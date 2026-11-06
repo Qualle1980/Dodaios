@@ -47,7 +47,9 @@ export type EventType =
   | "MissionBudgetWarning"
   | "MissionWaitingCapacity"
   | "MissionCapacityDecision"
-  | "MissionPaidUsage";
+  | "MissionPaidUsage"
+  | "SubagentsRequested"
+  | "SubagentsDecided";
 
 export interface BasePayload {
   event_type: EventType;
@@ -238,6 +240,23 @@ export interface MissionCapacityDecision extends BasePayload {
   reason: string;
 }
 
+export interface SubagentsRequested extends BasePayload {
+  event_type: "SubagentsRequested";
+  worker_id: string;
+  count: number;
+  budget_left: number;
+  tasks: string[];
+}
+
+export interface SubagentsDecided extends BasePayload {
+  event_type: "SubagentsDecided";
+  worker_id: string;
+  approved: boolean;
+  count: number;
+  reason: string;
+  code: string;
+}
+
 export interface MissionPaidUsage extends BasePayload {
   event_type: "MissionPaidUsage";
   provider: string;
@@ -329,7 +348,9 @@ export type AnyPayload =
   | MissionCapacityDecision
   | MissionPaidUsage
   | BusStats
-  | MissionBudgetWarning;
+  | MissionBudgetWarning
+  | SubagentsRequested
+  | SubagentsDecided;
 
 export interface EventEnvelope {
   event_id: string;

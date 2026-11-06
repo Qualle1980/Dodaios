@@ -8602,6 +8602,20 @@
     "paid_usage": "Ejecución de pago en {provider} / {model}: real {cost} (estimado {estimate}, límite {cap}).",
     "paid_usage_automatic": "Ejecución de pago automática en {provider} / {model}: real {cost} (estimado {estimate}, límite {cap})."
   },
+  "subagents": {
+    "requested": "{count} ayudantes paralelos solicitados.",
+    "approved": "{count} ayudantes aprobados.",
+    "refused": {
+      "single_helper": "Ayudante rechazado: uno solo no es trabajo paralelo.",
+      "duplicate_tasks": "Ayudantes rechazados: dos tenían la misma tarea.",
+      "budget_spent": "Ayudantes rechazados: a esta misión no le quedan.",
+      "over_budget": "Ayudantes rechazados: se pidieron más de los que quedan.",
+      "repeat_batch": "Ayudantes rechazados: la misma ronda ya se ejecutó.",
+      "empty_task": "Ayudantes rechazados: una tarea estaba vacía.",
+      "no_task": "Ayudantes rechazados: no se indicó ninguna tarea.",
+      "other": "Ayudantes rechazados."
+    }
+  },
   "ide_projects": {
     "connect_failed": "No se pudo conectar esta carpeta. Inténtalo de nuevo.",
     "choose_folder_error": "Elige una carpeta para continuar.",
