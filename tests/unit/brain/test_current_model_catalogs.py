@@ -97,13 +97,28 @@ def test_gemini_fallback_uses_current_non_media_models() -> None:
     ids = _ids(CURATED_MODELS["gemini"])
 
     assert {
-        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
         "gemini-3.1-pro-preview",
         "gemini-3-flash-preview",
         "gemini-3.1-flash-lite",
     } <= ids
     assert "gemini-3-pro" not in ids
     assert "gemini-3-pro-preview" not in ids
+
+
+def test_no_gemini_id_google_stopped_serving_is_offered() -> None:
+    """Checked against the live AI Studio catalog on 2026-11-06.
+
+    Both ids were listed here and answer nothing: Google serves no
+    ``gemini-3.7-flash`` at all, and of the 3.5 generation only the
+    Flash-Lite build. Offering a model that 404s is worse than offering
+    one fewer.
+    """
+    ids = _ids(CURATED_MODELS["gemini"])
+
+    assert "gemini-3.7-flash" not in ids
+    assert "gemini-3.5-flash" not in ids
 
 
 def test_current_stt_and_cartesia_model_rosters() -> None:
