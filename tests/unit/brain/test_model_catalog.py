@@ -817,9 +817,12 @@ class TestRealtimeCatalog:
     def test_gemini_live_models_lead_with_the_hardcoded_default(self) -> None:
         from jarvis.brain.model_catalog import REALTIME_MODELS
 
+        from jarvis.plugins.realtime.gemini_live import _MODEL
+
         ids = [m.id for m in REALTIME_MODELS["gemini-live"]]
-        # Matches _MODEL in jarvis/plugins/realtime/gemini_live.py.
-        assert ids[0] == "gemini-3.1-flash-live-preview"
+        # Imported, not copied: the catalog's lead and the plugin's own default
+        # are the SAME decision, and a literal here let them drift apart once.
+        assert ids[0] == _MODEL
         assert len(ids) == len(set(ids))
 
     def test_vertex_live_models_lead_with_the_hardcoded_default(self) -> None:

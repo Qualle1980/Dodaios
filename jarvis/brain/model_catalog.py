@@ -608,15 +608,26 @@ REALTIME_MODELS: dict[str, list[ModelInfo]] = {
             ("gpt-realtime-mini", "GPT Realtime Mini"),
         ]
     ),
-    # gemini-live — verified 2026-07-10 against ai.google.dev/gemini-api/docs/models
-    # (the Live API model list). ``gemini-3.1-flash-live-preview`` is the current
-    # flagship (matches ``_MODEL`` in ``jarvis/plugins/realtime/gemini_live.py``);
-    # ``gemini-2.5-flash-native-audio-preview-12-2025`` is the current 2.5-series
-    # native-audio sibling still listed on that page. The older
-    # ``gemini-2.0-flash-live-preview`` family is marked for shutdown — omitted.
+    # gemini-live — re-verified 2026-11-06 against the account's own Live model
+    # list (``?key=…`` filtered on ``bidiGenerateContent``), which is the only
+    # authoritative answer: nine Live models, two of them newer than everything
+    # that used to be listed here.
+    #
+    # ``gemini-3.8-live`` leads, and the reason is function calling, not size.
+    # Google's Live tool documentation says ``gemini-3.1-flash-live-preview``
+    # supports SYNCHRONOUS function calling only — "execution pauses until you
+    # send the tool response" — so every tool a live conversation touches stops
+    # the conversation. 3.8 Live supports ``behavior: NON_BLOCKING``, which is
+    # what a spoken turn needs to stay a conversation while a tool runs. Both
+    # also carry Google Search natively.
+    #
+    # The 3.1 preview stays selectable: it is a real model and someone may
+    # prefer it. It is simply not what an install should default to.
     "gemini-live": _curated(
         [
-            ("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (default)"),
+            ("gemini-3.8-live", "Gemini 3.8 Live (default)"),
+            ("gemini-3.8-live-extended-thinking", "Gemini 3.8 Live Extended Thinking"),
+            ("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (tools block)"),
             (
                 "gemini-2.5-flash-native-audio-latest",
                 "Gemini 2.5 Flash Native Audio (latest alias)",

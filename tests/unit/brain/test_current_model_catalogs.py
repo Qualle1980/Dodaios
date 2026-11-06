@@ -164,7 +164,13 @@ def test_current_realtime_models_and_voices() -> None:
         "marin",
         "cedar",
     }
+    # Re-verified 2026-11-06 against the account's own Live model list
+    # (``bidiGenerateContent``). The 3.8 pair is newer than everything that
+    # used to stand here; the 3.1 preview stays selectable but no longer
+    # leads, because its function calling is synchronous only.
     assert {
+        "gemini-3.8-live",
+        "gemini-3.8-live-extended-thinking",
         "gemini-3.1-flash-live-preview",
         "gemini-2.5-flash-native-audio-latest",
         "gemini-2.5-flash-native-audio-preview-12-2025",
