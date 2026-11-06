@@ -627,6 +627,11 @@ async def run_brain_turn(
                         "missing": list(gate.gaps(ledger)),
                     },
                 )
+                # The verdict stands as it is; this only writes the failure down
+                # and lets the conductor's seat learn from it once per job.
+                from jarvis.agent_chat.delegation_lessons import document_rejection
+
+                await document_rejection(gate, ledger, person_request)
         if answer:
             await emit(
                 "assistant_text", {"turn_id": turn_id, "message_id": message_id, "text": answer}

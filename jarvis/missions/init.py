@@ -1314,7 +1314,10 @@ async def bootstrap_missions(
 
     # Every non-approving verdict and every failed mission is written down
     # (ADR-0043), so a recurring failure can become a lesson.
-    from jarvis.missions.conductor.incidents import bind_incident_recorder
+    from jarvis.missions.conductor.incidents import (
+        bind_incident_recorder,
+        set_active_recorder,
+    )
     from jarvis.missions.conductor.lessons import LessonStore, set_active_store
 
     async def _mission_prompt(mission_id: str) -> str | None:
@@ -1322,9 +1325,12 @@ async def bootstrap_missions(
         return view[0] if view else None
 
     lesson_store = LessonStore(db_path.parent / "conductor")
-    bind_incident_recorder(
+    recorder = bind_incident_recorder(
         manager.bus, lesson_store, _mission_prompt, learn=_lesson_on_subscription,
     )
+    # A rejected chat delegation is a failure with no mission and no bus event,
+    # so it documents itself through the recorder instead (incidents.py).
+    set_active_recorder(recorder)
     # ...and every worker prompt reads the rules back (ExpeL: rules before the task).
     set_active_store(lesson_store)
     # Shadow conductor: plans every order next to today's path (missions.conductor).
