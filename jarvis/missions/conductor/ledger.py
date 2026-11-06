@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
@@ -118,6 +119,52 @@ The work above is done. Based on what was found and produced, give the final
 answer to the user, phrased as if speaking to them. Say plainly what was not
 achieved, if anything.
 """
+
+WORKER_BRIEF_CHARS: Final[int] = 1500
+WORKER_BRIEF_STEPS: Final[int] = 4
+
+WORKER_BRIEF: Final[str] = """What this order has already established. Use it; do not find it again.
+
+Fact sheet:
+{facts}
+{earlier}
+---
+Your step now:
+
+{instruction}"""
+
+
+def worker_brief(
+    instruction: str,
+    facts: str,
+    earlier: Sequence[tuple[str, str]] = (),
+) -> str:
+    """``instruction`` with the order's ledger in front of it.
+
+    Magentic-One's executors are agents in one group chat, so the task record
+    and every earlier result reach them through the shared thread. Ours are
+    isolated workers in their own worktree (AP-10): nothing reaches them but
+    the text handed over here. Without this the second step on a subject
+    repeats the first one's work, because its instruction is all it has.
+
+    Deterministic string work on what the conductor already holds - no seat
+    call, so carrying the ledger costs nothing per step. Bounded on both
+    axes: the last ``WORKER_BRIEF_STEPS`` results, each cut to
+    ``WORKER_BRIEF_CHARS``, so a long order cannot grow the brief without end.
+    """
+    if not facts.strip() and not earlier:
+        return instruction
+    recent = [(who, text) for who, text in earlier if text.strip()][-WORKER_BRIEF_STEPS:]
+    block = ""
+    if recent:
+        done = "\n\n".join(
+            f"[{who}]\n{text.strip()[:WORKER_BRIEF_CHARS]}" for who, text in recent
+        )
+        block = f"\n\nResults of earlier steps:\n\n{done}"
+    return WORKER_BRIEF.format(
+        facts=facts.strip() or "(none recorded)", earlier=block, instruction=instruction,
+    )
+
 
 LEDGER_PROMPT: Final[str] = """We are working to address the following user request:
 
@@ -224,5 +271,6 @@ class StallCounter:
 __all__ = [
     "DEFAULT_MAX_REPLANS", "DEFAULT_MAX_STALLS", "FACTS_PROMPT", "FACTS_UPDATE_PROMPT",
     "FINAL_ANSWER_PROMPT", "LEDGER_PROMPT", "PLAN_PROMPT", "PLAN_UPDATE_PROMPT", "PROGRESS_PROMPT",
-    "ProgressEntry", "StallCounter", "parse_progress",
+    "ProgressEntry", "StallCounter", "WORKER_BRIEF", "WORKER_BRIEF_CHARS", "WORKER_BRIEF_STEPS",
+    "parse_progress", "worker_brief",
 ]
