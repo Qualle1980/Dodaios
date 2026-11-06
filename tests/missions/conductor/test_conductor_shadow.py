@@ -15,7 +15,7 @@ _LEDGER = json.dumps({
     "is_request_satisfied": {"reason": "r", "answer": False},
     "is_in_loop": {"reason": "r", "answer": False},
     "is_progress_being_made": {"reason": "r", "answer": True},
-    "next_executor": {"reason": "a file read", "answer": "codex"},
+    "next_executor": {"reason": "a file read", "answer": "memory"},
     "instruction": {"reason": "r", "answer": "rg -n TODO jarvis/missions/budget.py"},
 })
 
@@ -38,7 +38,7 @@ def _bind(tmp_path: Path, mode: str, seat_calls: list[str], seat: bool = True) -
     async def _ask(messages: Sequence[Message]) -> str:
         prompt = messages[-1][1]
         seat_calls.append(prompt[:20])
-        return _LEDGER if "Recall the request" in prompt else "- codex: search the file"
+        return _LEDGER if "Recall the request" in prompt else "- memory: search the file"
 
     async def _seat():  # type: ignore[no-untyped-def]
         return _ask if seat else None
@@ -72,6 +72,7 @@ async def test_shadow_previews_an_order_and_pairs_it_with_the_real_worker(tmp_pa
 
     preview, actual = _records(tmp_path)
     assert preview["kind"] == "preview" and preview["lane"] == "lookup"
+    assert preview["conductor_lead"] == "memory"
     assert preview["conductor_executor"] == "codex"
     assert preview["conductor_instruction"].startswith("rg -n TODO")
     assert actual == {**actual, "kind": "actual", "executor": "codex"}  # first worker only
