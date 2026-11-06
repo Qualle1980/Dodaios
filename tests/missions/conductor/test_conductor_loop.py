@@ -63,7 +63,8 @@ async def test_one_step_then_done_writes_the_final_answer() -> None:
     out = await conductor.run("TODOs in a.py?", team)
 
     assert out.status == "done" and out.answer == "a.py holds 2 TODOs."
-    assert team.steps == [("codex", "List the TODOs in a.py")]
+    assert [who for who, _ in team.steps] == ["codex"]
+    assert "List the TODOs in a.py" in team.steps[0][1]
     assert out.steps[0].result.startswith("a.py:3")
     assert seat.calls == ["facts", "plan", "ledger", "ledger", "final"]
 
@@ -193,5 +194,6 @@ async def test_a_named_executor_is_still_the_conductors_to_choose() -> None:
 
     outcome = await Conductor(seat, TEAM).run("Refactor a.py", team)
 
-    assert team.steps == [("claude-code", "List the TODOs in a.py")]
+    assert [who for who, _ in team.steps] == ["claude-code"]
+    assert "List the TODOs in a.py" in team.steps[0][1]
     assert [entry.next_executor.answer for entry in outcome.ledgers][0] == "claude-code"

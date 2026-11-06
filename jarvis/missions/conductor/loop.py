@@ -43,6 +43,7 @@ from .ledger import (
     ProgressEntry,
     StallCounter,
     parse_progress,
+    worker_brief,
 )
 
 logger = logging.getLogger(__name__)
@@ -233,8 +234,14 @@ class Conductor:
             executor = entry.next_executor.answer
             instruction = entry.instruction.answer
             thread.append(("assistant", f"[conductor -> {executor}] {instruction}"))
+            # The worker is isolated (AP-10): the thread above cannot reach it,
+            # so the ledger travels with the instruction. The record keeps the
+            # bare instruction - the brief is transport, not the decision.
+            briefed = worker_brief(
+                instruction, facts, [(step.executor, step.result) for step in steps],
+            )
             try:
-                result = await execute(executor, instruction)
+                result = await execute(executor, briefed)
             except OrderHalted as halt:
                 steps.append(Step(executor=executor, instruction=instruction, result=halt.result))
                 logger.info("conductor: order halted (%s), no further seat call", halt.reason)
