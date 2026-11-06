@@ -8602,6 +8602,20 @@
     "paid_usage": "Paid run on {provider} / {model}: actual {cost} (estimated {estimate}, cap {cap}).",
     "paid_usage_automatic": "Automatic paid run on {provider} / {model}: actual {cost} (estimated {estimate}, cap {cap})."
   },
+  "subagents": {
+    "requested": "{count} parallel helpers requested.",
+    "approved": "{count} helpers approved.",
+    "refused": {
+      "single_helper": "Helper refused: one helper is not parallel work.",
+      "duplicate_tasks": "Helpers refused: two of them had the same task.",
+      "budget_spent": "Helpers refused: this mission has none left.",
+      "over_budget": "Helpers refused: more were asked for than are left.",
+      "repeat_batch": "Helpers refused: the same batch already ran.",
+      "empty_task": "Helpers refused: a task was empty.",
+      "no_task": "Helpers refused: no task was given.",
+      "other": "Helpers refused."
+    }
+  },
   "ide_projects": {
     "connect_failed": "Could not connect this folder. Try again.",
     "choose_folder_error": "Choose a folder to continue.",
