@@ -171,6 +171,11 @@ class TurnHandle:
     #: and running the tests itself
     #: (:class:`jarvis.agent_chat.delegation_acceptance.AcceptanceGate`).
     acceptance_gate: Any = None
+    #: Correction waves this turn may still spend when the gate rejects an
+    #: answer about work that was handed back
+    #: (:mod:`jarvis.agent_chat.delegation_correction`). Zero means the
+    #: rejection is final, and the honest answer is shown now.
+    corrections_left: int = 0
 
 
 # ------------------------------------------------------------ history

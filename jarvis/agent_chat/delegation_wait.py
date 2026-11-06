@@ -30,6 +30,12 @@ POLL_SECONDS = 2.0
 PROBE_TIMEOUT_SECONDS = 5.0
 WAIT_TIMEOUT_SECONDS = 30 * 60.0  # No new evidence, not a limit on active work.
 MAX_WAVES = 8
+#: Correction waves one turn may spend after the acceptance gate rejected an
+#: answer about work that was handed back. Two, because each one is a real turn
+#: that may drive a paid coding agent. It lives here, next to the wave budget
+#: it is spent from; :mod:`jarvis.agent_chat.delegation_correction` re-exports
+#: it and would import this module anyway (``_CONTINUATION_LEAD``).
+MAX_CORRECTIONS = 2
 
 
 class SeatYielded(Exception):  # noqa: N818 - a hand-over, not an error
@@ -102,6 +108,14 @@ class DelegationWait:
         self.started = time.monotonic()
         self.failures: dict[str, int] = {}
         self.progress: dict[str, str] = {}
+        #: The last wave's ``delegation_correction`` notice, when it rejected an
+        #: answer about handed-back work and one more attempt is allowed.
+        self.correction: dict[str, Any] | None = None
+        #: The gaps of a rejection whose honest line was held back for a
+        #: correction, until some wave actually answers. Without this a
+        #: correction wave that returns nothing would leave the person with
+        #: silence where the honest line used to be -- worse than the claim.
+        self.owed_honesty: tuple[str, ...] = ()
 
     def add(self, work: DelegatedWork) -> None:
         if work.key not in self.work:
@@ -110,6 +124,19 @@ class DelegationWait:
 
     async def emit(self, event: dict[str, Any]) -> None:
         if event.get("kind") != "turn_finished":
+            if event.get("kind") == "notice":
+                payload = event.get("payload") or {}
+                if payload.get("kind") == "delegation_correction":
+                    # The wave answered handed-back work without the evidence
+                    # for it, and asked for one more attempt. The loop below
+                    # reads this; nothing else changes about the event.
+                    self.correction = dict(payload)
+                    self.owed_honesty = tuple(payload.get("missing") or ())
+            elif event.get("kind") == "assistant_text" and str(
+                (event.get("payload") or {}).get("text") or ""
+            ).strip():
+                # Some wave did answer, so the held-back line is not owed.
+                self.owed_honesty = ()
             await self.handle.emit(event)
             return
         self.finish = event
@@ -277,9 +304,11 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
     # decides which chats do); elsewhere the turn holds its seat as before.
     waiting = getattr(service, "delegate_wait", None)
     parked: list[dict[str, Any]] | None = None
+    corrections = MAX_CORRECTIONS
     with collect_delegated_work(gate.add):
         for wave in range(MAX_WAVES):
             gate.finish = None
+            gate.correction = None
             await run_attempt(active, prompt)
             if not gate.finish or gate.finish["payload"].get("status") != "done":
                 break
@@ -302,7 +331,45 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 ]
                 break
             if not rows:
-                break
+                if gate.correction is None or corrections <= 0:
+                    break
+                # The wave answered handed-back work without the evidence for
+                # it. Nothing new was delegated, so the old loop would end the
+                # request here; instead the turn gets one more attempt, with
+                # the gaps and whatever the first failure taught named up
+                # front. The gate stays armed, so the corrected answer is
+                # judged exactly like the first one.
+                from jarvis.agent_chat.delegation_correction import correction_prompt
+                from jarvis.missions.conductor.lessons import lessons_block
+
+                attempt = MAX_CORRECTIONS - corrections + 1
+                corrections -= 1
+                log.info(
+                    "agent chat %s: turn %s was rejected for missing evidence on %s; "
+                    "correction attempt %d of %d",
+                    handle.session.session_id, handle.turn_id,
+                    gate.correction.get("correcting"), attempt, MAX_CORRECTIONS,
+                )
+                prompt = correction_prompt(
+                    gaps=tuple(gate.correction.get("missing") or ()),
+                    work=tuple(gate.correction.get("correcting") or ()),
+                    original=original,
+                    rules=lessons_block(original),
+                    attempt=attempt,
+                )
+                stored = service.store.get_session(handle.session.session_id)
+                active = replace(
+                    active,
+                    session=replace(
+                        active.session, vendor_session=stored.vendor_session if stored else None
+                    ),
+                    history=service.store.list_events(handle.session.session_id),
+                    continuation=True,
+                    # Spent down to zero, so the LAST attempt's rejection is
+                    # final and its honest answer is the one the person reads.
+                    corrections_left=corrections,
+                )
+                continue
             if wave == MAX_WAVES - 1:
                 gate.finish["payload"].update(status="error", error="delegation_continuation_limit")
                 break
@@ -326,7 +393,27 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 history=service.store.list_events(handle.session.session_id),
                 continuation=True,
                 acceptance_gate=acceptance,
+                # A wave that answers handed-back work may ask for the missing
+                # evidence instead of ending the request (delegation_correction).
+                corrections_left=corrections,
             )
+        if gate.owed_honesty:
+            # Every correction wave came back empty. The rejection still has to
+            # reach the person, in the language the turn was answering in.
+            from .delegation_acceptance import unverified_answer
+            from .events import make_event
+
+            log.info(
+                "agent chat %s: turn %s corrected nothing and said nothing; speaking the "
+                "held-back honest line",
+                handle.session.session_id, handle.turn_id,
+            )
+            await handle.emit(make_event("assistant_text", {
+                "turn_id": handle.turn_id,
+                "text": unverified_answer(
+                    gate.owed_honesty, language=handle.output_language or "en"
+                ),
+            }))
         await gate.publish()
     if parked is not None:
         # After the turn's own registration ended: the background wait takes

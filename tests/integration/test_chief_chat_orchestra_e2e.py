@@ -738,3 +738,150 @@ async def test_a_dispatch_that_started_nothing_gives_its_slot_back(chat):
     # because the three that started nothing returned their slots.
     assert len(gateway.calls) == 4
     assert [e.result.success for e in chief.executed] == [False, False, False, True]
+
+
+# ------------------------------------ 11. a rejection that becomes a correction
+
+
+async def test_a_rejected_claim_is_corrected_and_then_accepted(chat):
+    """Phase C1/C2, the acceptance criterion: a handback that cannot be proven is
+    rejected, sent back for exactly the missing evidence, and the corrected
+    answer is then accepted. The person never reads the rejected claim."""
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    registry = FakeRegistry((workspace, pane))
+    delegate = DelegateTool(registry, {"T1": (workspace, pane)})
+
+    def apply_edit(*_a, **_k):
+        path = rig["project"] / "calc.py"
+        if "subtract" not in path.read_text(encoding="utf-8"):
+            path.write_text(
+                path.read_text(encoding="utf-8") + "\n\ndef subtract(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            tests = rig["project"] / "test_calc.py"
+            tests.write_text(
+                tests.read_text(encoding="utf-8")
+                + "\n\ndef test_subtract():\n    from calc import subtract\n\n"
+                "    assert subtract(3, 1) == 2\n",
+                encoding="utf-8",
+            )
+        return _transcript(pane.last_prompt, reply="Done. PASS, tests pass.")
+
+    rig = chat(
+        [
+            Wave(
+                calls=(Call(delegate.name, {"terminal_id": "T1", "prompt": "Add subtract()."}),),
+                reply="Sent to T1.",
+            ),
+            # The claim nobody earned: no diff read, no test run.
+            Wave(reply="PASS - subtract() is implemented and all tests pass."),
+            # The correction wave does the work the gate asked for.
+            Wave(
+                calls=(
+                    Call("RunCommand", {"command": "git diff"}),
+                    Call("RunCommand", {"command": f'"{PYTHON}" -m pytest test_calc.py -q'}),
+                ),
+                reply="Verified: the diff adds subtract() and both tests pass. PASS.",
+            ),
+        ],
+        tools={delegate.name: delegate},
+    )
+
+    rig["reader"]["fn"] = apply_edit
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    notices = [
+        e["payload"] for e in events if e["kind"] == "notice"
+        and e["payload"].get("kind") in {"delegation_correction", "delegation_unverified"}
+    ]
+    assert [n["kind"] for n in notices] == ["delegation_correction"], notices
+    assert notices[0]["correcting"] and notices[0]["missing"]
+
+    # The correction briefing named the gaps to the next wave. A composed
+    # prompt travels as the turn's BRIEFING, not as the person's words
+    # (``is_continuation_prompt``), so that is where it is read back.
+    chief: ScriptedChief = rig["chief"]
+    briefings = [e.system_extra for e in chief.executed if e.tool == "RunCommand"]
+    assert briefings, chief.executed
+    assert "Missing evidence" in briefings[0], briefings[0]
+    assert "test_missing" in briefings[0], briefings[0]
+    assert "Do not claim the work is good" in briefings[0]
+
+    # The agent was not re-ordered; the chief got the evidence itself.
+    assert len(delegate.briefs) == 1
+    checks = [e for e in chief.executed if e.tool == "RunCommand"]
+    assert len(checks) == 2 and all(e.result.success for e in checks)
+
+    answer = _said(events)
+    assert "PASS" in answer.upper(), answer
+    # The rejected claim was never shown, in either direction.
+    assert "all tests pass. PASS" not in answer
+    assert _finished(events)[-1]["status"] == "done"
+
+
+async def test_a_claim_that_stays_unproven_ends_honestly_after_two_corrections(chat):
+    """The bound is real: two correction waves, then the honest answer. A model
+    that keeps claiming a pass cannot spend the owner's money forever."""
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    registry = FakeRegistry((workspace, pane))
+    delegate = DelegateTool(registry, {"T1": (workspace, pane)})
+    claim = Wave(reply="PASS - everything works, all tests pass.")
+    rig = chat(
+        [
+            Wave(
+                calls=(Call(delegate.name, {"terminal_id": "T1", "prompt": "Add subtract()."}),),
+                reply="Sent to T1.",
+            ),
+            claim, claim, claim, claim,
+        ],
+        tools={delegate.name: delegate},
+    )
+
+    rig["reader"]["fn"] = lambda *a, **k: _transcript(
+        pane.last_prompt, reply="Done. PASS, tests pass."
+    )
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    kinds = [
+        e["payload"]["kind"] for e in events if e["kind"] == "notice"
+        and e["payload"].get("kind") in {"delegation_correction", "delegation_unverified"}
+    ]
+    assert kinds == ["delegation_correction", "delegation_correction", "delegation_unverified"]
+    # Three answering waves at most: the claim, two corrections. Nothing more.
+    chief: ScriptedChief = rig["chief"]
+    assert len(chief.calls) == 4, len(chief.calls)
+    assert len(delegate.briefs) == 1
+    assert "PASS" not in _said(events).upper(), _said(events)
+
+
+async def test_a_correction_that_answers_nothing_still_tells_the_person(chat):
+    """Holding the honest line back for a correction must never end in silence:
+    if every correction wave comes back empty, the rejection is spoken anyway."""
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    registry = FakeRegistry((workspace, pane))
+    delegate = DelegateTool(registry, {"T1": (workspace, pane)})
+    rig = chat(
+        [
+            Wave(
+                calls=(Call(delegate.name, {"terminal_id": "T1", "prompt": "Add subtract()."}),),
+                reply="Sent to T1.",
+            ),
+            Wave(reply="PASS - all tests pass."),
+            # No further waves: every correction attempt returns an empty reply.
+        ],
+        tools={delegate.name: delegate},
+    )
+
+    rig["reader"]["fn"] = lambda *a, **k: _transcript(
+        pane.last_prompt, reply="Done. PASS, tests pass."
+    )
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    answer = _said(events)
+    assert answer.strip(), "the person was left with silence"
+    assert "PASS" not in answer.upper(), answer
+    # It names what was actually missing, not a vague apology.
+    assert "test" in answer.lower() or "diff" in answer.lower(), answer
