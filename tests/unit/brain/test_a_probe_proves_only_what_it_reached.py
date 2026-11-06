@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from jarvis.brain.healthcheck import BrainHealthChecker
+from jarvis.brain.healthcheck import BrainHealthChecker, _cut_off_by_our_own_budget
 from jarvis.brain.provider_test import (
     PROOF_STAGES,
     PROVEN_ANSWERED,
@@ -208,3 +208,90 @@ def test_a_connected_login_does_not_prove_a_turn() -> None:
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_ANSWERED) is False
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_TOOL_CALL) is False
     assert at_least(PROVEN_AUTHENTICATED, PROVEN_END_TO_END) is False
+
+
+# ── 3. Our own token cap is not the provider's silence ───────────────────────
+#
+# Measured live on 2026-11-06. The probe spends eight tokens, and a reasoning
+# model spends them thinking before it emits a single visible one, so the
+# stream is truncated mid-thought and carries no content at all:
+#
+#   openrouter / nvidia/nemotron-3-ultra-550b-a55b:free
+#       (None, None, 'length')         <- our cap, through our own adapter
+#   gemini / gemini-3.5-flash-lite
+#       ('Hello! How can', None, None) <- answers inside eight tokens
+#       (None, None, 'FinishReason.MAX_TOKENS')
+#
+# The same model answered "Hi there! How can I help you" at max_tokens=256 for
+# a cost of 0. Reporting it dead marked a working free fallback unusable, which
+# is the opposite failure to 2026-10-30 and just as expensive.
+
+
+@pytest.mark.asyncio
+async def test_a_stream_our_own_token_cap_truncated_is_a_passing_turn() -> None:
+    """``length`` means the probe stopped the model, not that it said nothing."""
+    result = await _probe((BrainDelta(finish_reason="length"),))
+
+    assert result.ok
+    assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_the_gemini_spelling_of_the_same_cutoff_also_passes() -> None:
+    """The Gemini SDK hands over an enum, not the OpenAI wire string.
+
+    Discriminated by the value, never by the provider name (AP-21/AP-28).
+    """
+    result = await _probe((BrainDelta(finish_reason="FinishReason.MAX_TOKENS"),))
+
+    assert result.ok
+
+
+@pytest.mark.asyncio
+async def test_a_clean_stop_with_nothing_in_it_still_fails() -> None:
+    """The 2026-10-30 repair is untouched: only a CUT-OFF counts, not any finish."""
+    result = await _probe((BrainDelta(content=None), BrainDelta(finish_reason="stop")))
+
+    assert not result.ok
+    assert result.error
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_finish_with_no_content_still_fails() -> None:
+    """``tool_calls`` as a finish reason is not a tool call in a delta."""
+    result = await _probe((BrainDelta(finish_reason="tool_calls"),))
+
+    assert not result.ok
+
+
+@pytest.mark.asyncio
+async def test_content_before_the_cutoff_is_reported_as_the_answer_it_is() -> None:
+    """The shape Gemini actually produced: text first, cut-off marker after."""
+    result = await _probe(
+        (
+            BrainDelta(content="Hello! How can"),
+            BrainDelta(finish_reason="FinishReason.MAX_TOKENS"),
+        )
+    )
+
+    assert result.ok
+
+
+@pytest.mark.parametrize(
+    ("finish", "cut_off"),
+    [
+        ("length", True),
+        ("LENGTH", True),
+        ("max_tokens", True),
+        ("FinishReason.MAX_TOKENS", True),
+        ("  length  ", True),
+        ("stop", False),
+        ("FinishReason.STOP", False),
+        ("tool_calls", False),
+        ("content_filter", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_only_a_budget_cutoff_reads_as_our_own_cap(finish: object, cut_off: bool) -> None:
+    assert _cut_off_by_our_own_budget(finish) is cut_off

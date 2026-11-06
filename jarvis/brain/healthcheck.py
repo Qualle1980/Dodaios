@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from jarvis.core.protocols import BrainMessage, BrainRequest
 
@@ -48,6 +48,23 @@ _PROBE_REQUEST = BrainRequest(
     temperature=1.0,
     stream=True,
 )
+
+
+#: Finish reasons that mean "your own ``max_tokens`` stopped me", whatever the
+#: provider calls it. Discriminated by the value, never by a provider name
+#: (AP-21/AP-28): OpenAI-compatible transports send ``length``, the Gemini SDK
+#: hands over an enum whose ``str()`` is ``FinishReason.MAX_TOKENS``. Measured
+#: 2026-11-06 on both, through our own adapters.
+_BUDGET_CUTOFFS: Final[frozenset[str]] = frozenset({"length", "max_tokens"})
+
+
+def _cut_off_by_our_own_budget(finish_reason: object) -> bool:
+    """Whether this finish reason says the probe's token cap ended the stream."""
+    if not finish_reason:
+        return False
+    raw = str(finish_reason).strip().casefold()
+    # ``FinishReason.MAX_TOKENS`` -> ``max_tokens``; a bare ``length`` is kept.
+    return raw.rsplit(".", maxsplit=1)[-1] in _BUDGET_CUTOFFS
 
 
 class BrainHealthChecker:
@@ -154,9 +171,20 @@ class BrainHealthChecker:
         first delta of any kind. Several providers open with an empty role or
         keep-alive chunk before any text, so "first delta" and "first answer"
         are not the same event, and only the second one proves a turn ran.
+
+        One more shape counts as an answer: a stream this probe's own
+        ``max_tokens`` cut short. A reasoning model spends its budget thinking
+        before it emits a single visible token, so at eight tokens it is
+        truncated mid-thought and never reaches content. That is our cap
+        talking, not the provider's silence, and reporting it as a dead
+        provider costs the install a working brain. Silence itself is
+        unchanged: a stream that closes on ``stop`` with nothing in it still
+        fails (2026-10-30).
         """
         stream = brain.complete(_PROBE_REQUEST)  # type: ignore[attr-defined]
         async for delta in stream:
             if getattr(delta, "content", None) or getattr(delta, "tool_call", None):
+                return True
+            if _cut_off_by_our_own_budget(getattr(delta, "finish_reason", None)):
                 return True
         return False
