@@ -163,7 +163,17 @@ def _usage_from_metadata(md: Any) -> dict[str, int] | None:
     """Token counts of one generation as a flat dict, or None when empty.
 
     Modality detail lists are optional on the wire; totals are authoritative.
-    Keys: input_total/output_total plus the text/audio split when reported.
+    Keys: input_total/output_total, the text/audio split when reported, and
+    input_cached.
+
+    ``prompt_token_count`` INCLUDES the cached content, so a Live session that
+    re-attends the same system prompt and tool catalog every turn reports those
+    tokens again on each one. Summing the field therefore overstates the bill:
+    measured 2026-11-07, our ledger made 138 339 input tokens out of 12 turns
+    while Google's quota counter recorded 12 370 for the whole day.
+    ``RealtimeVoiceSession`` already prices ``input_cached`` at a tenth of the
+    input rate; it was simply never given the number. The OpenAI mapper has
+    reported its ``cached_tokens`` since the 2026-07-28 audit.
     """
     def _count(value: Any) -> int:
         try:
@@ -180,6 +190,7 @@ def _usage_from_metadata(md: Any) -> dict[str, int] | None:
         "output_total": total_out,
         "input_text": 0,
         "input_audio": 0,
+        "input_cached": _count(getattr(md, "cached_content_token_count", None)),
         "output_text": 0,
         "output_audio": 0,
     }

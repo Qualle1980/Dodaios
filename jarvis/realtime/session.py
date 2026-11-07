@@ -2868,6 +2868,11 @@ class RealtimeVoiceSession:
         # audio in AND out, re-billed context included — never reached the
         # recorder at all (2026-07-28 cost audit: 100% unmetered).
         self._turn_usage: dict[str, int] = {}
+        # What the spoken turn has cost so far. _publish_live_usage
+        # clears _turn_usage on every model turn, and one spoken turn
+        # routinely spans several of them (nine, measured 2026-11-07),
+        # so the running total is kept here instead of recomputed.
+        self._voice_turn_spend: dict[str, float] = {}
         self._turn_id = ""
         self._turn_trace_id = None
         self._latency_tracker: Any = None
@@ -8662,6 +8667,10 @@ class RealtimeVoiceSession:
             rates = resolve_rates(self._active_model)
             if cached_in > 0 and rates is not None:
                 cost += cached_in * rates[0] * 0.1 / 1_000_000
+            spend = self._voice_turn_spend
+            spend["tokens_in"] = spend.get("tokens_in", 0) + total_in
+            spend["tokens_out"] = spend.get("tokens_out", 0) + total_out
+            spend["cost_usd"] = spend.get("cost_usd", 0.0) + cost
             await self._bus.publish(
                 BrainTurnCompleted(
                     **self._event_trace_kwargs(),
@@ -9651,6 +9660,12 @@ class RealtimeVoiceSession:
                             tier="realtime",
                             provider=self.active_provider,
                             model=self._active_model,
+                            # The sum of this spoken turn's model turns. Left
+                            # at the field defaults these read 0 while the
+                            # brain turns underneath them reported six figures.
+                            tokens_in=int(self._voice_turn_spend.get("tokens_in", 0)),
+                            tokens_out=int(self._voice_turn_spend.get("tokens_out", 0)),
+                            cost_usd=float(self._voice_turn_spend.get("cost_usd", 0.0)),
                             latency_total_ms=latency_total_ms,
                             tool_calls=tuple(sorted(self._executed_tool_names)),
                             # Only claim the session voice when the session
@@ -9872,6 +9887,7 @@ class RealtimeVoiceSession:
         self._cancel_turn_pause_waiter()
         self._turn_id = ""
         self._turn_trace_id = None
+        self._voice_turn_spend = {}
         self._latency_tracker = None
         self._current_turn_index = -1
         self._last_user_text = ""

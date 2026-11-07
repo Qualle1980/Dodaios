@@ -193,3 +193,35 @@ def test_zai_glm_cache_reads_use_twenty_percent_of_input_rate() -> None:
 
     assert cache_read_fraction("glm-5.3") == pytest.approx(0.20)
     assert calculate_cost_usd("glm-5.3", 0, 0, 1_000_000) == pytest.approx(0.28)
+
+
+class TestGemini38LiveIsPriced:
+    """The model the app actually runs must resolve to a rate.
+
+    2026-11-07: every Live turn recorded ``cost_usd=0.0`` because
+    ``gemini-3.8-live`` was in neither table, so ``resolve_rates`` returned
+    None. The identical omission is already documented in ``cost.py`` for
+    gemini-3.7-flash on 2026-08-18 -- "the live install showed a whole
+    session as $0". Google lists 3.8-live in the SAME pricing row as
+    gemini-3.1-flash-live-preview, so the sibling entry is the expected
+    value: asserting against it rather than a copied literal keeps the two
+    from drifting apart (the #108/#110 lesson).
+    """
+
+    def test_text_rates_match_the_sibling_live_model(self) -> None:
+        from jarvis.brain.cost import PRICING_USD_PER_MTOK as text_rates
+
+        assert "gemini-3.8-live" in text_rates
+        assert text_rates["gemini-3.8-live"] == text_rates["gemini-3.1-flash-live-preview"]
+
+    def test_audio_rates_match_the_sibling_live_model(self) -> None:
+        from jarvis.brain.cost import REALTIME_AUDIO_PRICING_USD_PER_MTOK as audio_rates
+
+        assert "gemini-3.8-live" in audio_rates
+        assert audio_rates["gemini-3.8-live"] == audio_rates["gemini-3.1-flash-live-preview"]
+
+    def test_a_live_turn_is_no_longer_free(self) -> None:
+        from jarvis.brain.cost import calculate_realtime_cost_usd
+
+        cost = calculate_realtime_cost_usd("gemini-3.8-live", 1_000, 100, 2_000, 300)
+        assert cost > 0.0
