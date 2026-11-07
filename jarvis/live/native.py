@@ -189,6 +189,32 @@ def _log_late_probe(task: asyncio.Future) -> None:
         log.info("Native voice readiness probe answered late: %s", task.result())
 
 
+
+def split_new_input_tokens(
+    usage: dict[str, int], previous_total: int
+) -> tuple[int, int, int]:
+    """What this Live turn ADDED to the context, split into text and audio.
+
+    A Live session holds its context on the server: the client never re-sends
+    the system prompt or the tool declarations. ``prompt_token_count`` still
+    reports everything the model attended to, so it grows with every turn, and
+    adding those readings together bills the same context over and over.
+    Measured 2026-11-07 against Google's own quota counter: 138 339 input
+    tokens out of 12 turns where Google recorded 12 370 for the whole day.
+
+    Growth, not the reading, is what the turn added. The user's speech is
+    always new, so it is taken out of the growth first and whatever remains is
+    new text. A total that SHRANK means the context was compacted and rebuilt,
+    and the model read all of it again, so that reading counts whole.
+
+    Returns ``(new_total, text_in, audio_in)``.
+    """
+    total = max(0, int(usage.get("input_total", 0) or 0))
+    audio = max(0, int(usage.get("input_audio", 0) or 0))
+    new_total = total if total < previous_total else total - previous_total
+    audio_in = min(audio, new_total)
+    return new_total, new_total - audio_in, audio_in
+
 class NativeLiveVoiceSession(LiveVoiceSession):
     """Reuse native turn mechanics, without the legacy heuristic delegate loop."""
 
@@ -643,20 +669,31 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 from jarvis.brain.cost import calculate_realtime_cost_usd
                 from jarvis.core.events import BrainTurnCompleted
 
+                new_in, text_in, audio_in = split_new_input_tokens(
+                    usage, self._live_input_high_water
+                )
+                self._live_input_high_water = max(
+                    0, int(usage.get("input_total", 0) or 0)
+                )
+                tokens_out = int(usage.get("output_total", 0) or 0)
+                turn_cost = calculate_realtime_cost_usd(
+                    self._active_model,
+                    text_in,
+                    usage.get("output_text", 0),
+                    audio_in,
+                    usage.get("output_audio", 0),
+                )
+                self._live_spend["tokens_in"] += new_in
+                self._live_spend["tokens_out"] += tokens_out
+                self._live_spend["cost_usd"] += turn_cost
                 await self._bus.publish(
                     BrainTurnCompleted(
                         provider=self.active_provider,
                         model=self._active_model,
-                        tokens_in=usage.get("input_total", 0),
-                        tokens_out=usage.get("output_total", 0),
+                        tokens_in=new_in,
+                        tokens_out=tokens_out,
                         tokens_cached=usage.get("input_cached", 0),
-                        cost_usd=calculate_realtime_cost_usd(
-                            self._active_model,
-                            usage.get("input_text", 0),
-                            usage.get("output_text", 0),
-                            usage.get("input_audio", 0),
-                            usage.get("output_audio", 0),
-                        ),
+                        cost_usd=turn_cost,
                         finish_reason="realtime_usage",
                     )
                 )
