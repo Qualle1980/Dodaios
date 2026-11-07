@@ -69,3 +69,45 @@ def test_a_conditional_denial_is_not_a_capability_claim() -> None:
     assert capability_denial_terms(
         "Ohne deine Freigabe kann ich den Kalender nicht aendern."  # i18n-allow: DE output
     ) == ()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phrasings the model actually used. The detector shipped in #118 logged
+# NOTHING over a live turn that contained two false denials, because its
+# tests were written from imagined wording rather than observed wording.
+# These cases come from data/jarvis_desktop.log, 2026-11-07 20:35.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_an_adjective_before_access_does_not_hide_the_denial() -> None:
+    """An adjective before the noun broke the match."""
+    assert _contradicted(
+        "Nein, ich habe keinen direkten Zugriff auf deinen Kalender.",  # i18n-allow: DE output
+        ["google_calendar"],
+    )
+
+
+def test_an_adverb_inside_the_denial_does_not_hide_it() -> None:
+    """An adverb inside the denial broke it too, and the object then sits
+    before a trailing clause that carries none of it."""
+    assert _contradicted(
+        "Ich habe aktuell keinen direkten Zugriff auf deinen Kalender, "  # i18n-allow: DE output
+        "daher kann ich nicht nachsehen.",  # i18n-allow: DE output
+        ["google_calendar", "gmail"],
+    )
+
+
+def test_the_obsidian_denial_reaches_the_tool_that_serves_it() -> None:
+    """The user says 'Obsidian'; the tool is called 'wiki-recall'."""
+    assert _contradicted(
+        "Nein, ich habe keinen direkten Zugriff auf dein Obsidian.",  # i18n-allow: DE output
+        ["wiki-recall", "gmail"],
+    )
+
+
+def test_a_note_denial_still_needs_a_note_tool() -> None:
+    """The bridge must not make every denial look contradicted."""
+    assert not _contradicted(
+        "Nein, ich habe keinen direkten Zugriff auf dein Obsidian.",  # i18n-allow: DE output
+        ["gmail", "google_calendar"],
+    )
