@@ -61,6 +61,9 @@ export type RealtimeAudioOptions = {
  */
 const OUTPUT_TAP_TTL_MS = 600;
 
+/** PCM16 wire rate for output; `handleAudio` resamples from this. */
+const UNTIMED_PCM_SAMPLE_RATE = 24_000;
+
 /** Historical fixed budget for one realtime start attempt. */
 const DEFAULT_START_BUDGET_MS = 20_000;
 // This starts only AFTER microphone permission is granted. A suspended audio
@@ -1011,7 +1014,7 @@ export class RealtimeAudioClient {
       };
       socket.onmessage = (event) => {
         if (typeof event.data !== "string") {
-          this.handleAudio(event.data as ArrayBuffer);
+          this.handleUntimedAudio(event.data as ArrayBuffer);
           return;
         }
         let message: RealtimeStatusPayload;
@@ -1292,6 +1295,35 @@ export class RealtimeAudioClient {
     const providerRate = typeof value === "number" && value > 0 ? value : 24_000;
     const contextRate = this.ctx?.sampleRate ?? 48_000;
     this.playbackResampler = new StreamingPcm16Resampler(providerRate, contextRate);
+  }
+
+  /** Raw PCM that arrived without an interval, kept behind the timed stream.
+
+   * A timed session does not receive timed frames only: when a provider delta
+   * carries no interval the backend falls back to a binary frame, so one call
+   * mixes both wires. Handing those straight to the worklet plays them AT
+   * ONCE, on top of whatever the scheduler already placed, and leaves
+   * ``lastTimedAudioEnd`` untouched so the next timed frame is not trimmed
+   * against them either. Both halves of that were audible as words running
+   * over each other, worst at the start of a call where untimed deltas
+   * cluster and the baseline is still unset (2026-11-07).
+   *
+   * So the untimed buffer is given the interval it implies -- it starts where
+   * the queued audio ends, and lasts as long as its own samples -- and it
+   * advances the baseline like any timed frame. One ordered timeline, nothing
+   * dropped. Outside a timed session there is no timeline to join and the
+   * buffer is played as before.
+   */
+  private handleUntimedAudio(pcm: ArrayBuffer): void {
+    if (!this.timedOutput || !pcm.byteLength) {
+      this.handleAudio(pcm);
+      return;
+    }
+    const startMs = Math.max(0, this.lastTimedAudioEnd);
+    // The wire is PCM16 at the session's output rate; two bytes per sample.
+    const endMs = startMs + (pcm.byteLength / 2) * 1000 / UNTIMED_PCM_SAMPLE_RATE;
+    this.lastTimedAudioEnd = endMs;
+    this.handleAudio(pcm, { startMs, endMs });
   }
 
   private handleAudio(pcm: ArrayBuffer, timing?: AudioInterval): void {
