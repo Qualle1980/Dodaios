@@ -383,6 +383,14 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         ]
         budget = self._declaration_budget_tokens()
         if budget <= 0:
+            # AP-30 again, one level up: the early return skipped the only
+            # line the live path says about its tool surface, and an unbounded
+            # budget is the DEFAULT. So on a real install the call declared
+            # its tools in silence -- 2026-11-07 was spent inferring what a
+            # live call had offered while the text brain plainly logged
+            # "Tool surface for gemini: 23 of 89 tools shown". An unbounded
+            # surface is a fact worth the same line.
+            self._report_tool_surface(len(declarations), len(declarations), 0)
             return tuple(declarations)
         safe = frozenset(
             descriptor.name
@@ -390,16 +398,40 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             if str(getattr(descriptor, "risk_tier", "")) == "safe"
         )
         fitted = _fit_declarations(declarations, budget * 4, fillers=safe)
-        # AP-30: a trimmed tool set looks exactly like a complete one.
-        log.info(
-            "Native voice declares %d of %d tools under a %d-token budget for %s; "
-            "the rest stay reachable through discover_tools",
-            len(fitted),
-            len(declarations),
-            budget,
-            self.active_provider,
-        )
+        self._report_tool_surface(len(fitted), len(declarations), budget)
         return fitted
+
+    def _report_tool_surface(self, shown: int, total: int, budget: int) -> None:
+        """Say what the call offered — once per distinct surface, not per call.
+
+        AP-30: a trimmed tool set looks exactly like a complete one, and so
+        does an UNBOUNDED one. The budget-0 path used to return before the log
+        entirely, and 0 is the default, so on a real install the live call
+        declared its tools in silence: 2026-11-07 was spent inferring what a
+        live call had offered while the text brain plainly logged
+        "Tool surface for gemini: 23 of 89 tools shown".
+
+        Reporting only on change is not just tidiness. _tool_declarations runs
+        on every rebuild, and logging there on every call perturbed the timing
+        of an async subscription test enough to make it fail about one run in
+        three (5/5 green without it). Work in a hot path is never free.
+        """
+        state = (shown, total, budget, self.active_provider)
+        if getattr(self, "_tool_surface_reported", None) == state:
+            return
+        self._tool_surface_reported = state
+        if budget > 0:
+            log.info(
+                "Native voice declares %d of %d tools under a %d-token budget "
+                "for %s; the rest stay reachable through discover_tools",
+                shown, total, budget, self.active_provider,
+            )
+            return
+        log.info(
+            "Native voice declares %d of %d tools with no declaration budget "
+            "for %s; nothing is behind discover_tools",
+            shown, total, self.active_provider,
+        )
 
     async def _refuse_unless_duplex_ready(self) -> None:
         """Refuse within a second, in the provider's own words, when it cannot talk.
