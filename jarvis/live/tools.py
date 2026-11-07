@@ -193,6 +193,24 @@ def _board_section(section: str, output: Any) -> Any:
     return None
 
 
+# Words a user says for a capability whose TOOL NAME does not carry them.
+# Under ``defer_catalog`` the model reads a names-only index, so a tool whose
+# subject lives only in its description is invisible to the word the user
+# actually used. Live 2026-11-07 20:35 the model said it had no direct
+# access to the Obsidian vault -- while wiki-recall sat in the catalog and
+# ``discovery.discover`` searches descriptions, so one discover_tools call
+# would have found it. The model never asked. Calendar and Gmail worked in
+# the same turn because their names carry the user's word.
+#
+# This is a lexical bridge and nothing more: it only has to get the model to
+# ASK. It never claims a capability -- a hint is emitted only for a tool the
+# session actually holds, and the names themselves stay unannotated so a name
+# read back from the index still dispatches.
+SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "wiki-recall": ("obsidian", "vault", "notes", "notizen"),  # i18n-allow: DE input word
+}
+
+
 class LiveTools:
     """Single execution owner, including when both RTC and sideband see events.
 
@@ -354,9 +372,18 @@ class LiveTools:
             )
             # A names-only index lets the same model choose an exact capability
             # without asking lexical search to infer the user's intent.
-            definitions[1]["description"] += " Available tool names: " + ", ".join(
-                sorted(descriptor.name for descriptor in self.catalog())
-            )
+            names = sorted(descriptor.name for descriptor in self.catalog())
+            definitions[1]["description"] += " Available tool names: " + ", ".join(names)
+            held = set(names)
+            hints = [
+                f"{'/'.join(words)} -> {tool}"
+                for tool, words in sorted(SUBJECT_ALIASES.items())
+                if tool in held
+            ]
+            if hints:
+                definitions[1]["description"] += (
+                    ". Words naming a tool whose own name does not: " + "; ".join(hints) + "."
+                )
             definitions[1]["parameters"]["properties"]["offset"] = {"type": "integer", "minimum": 0}
             return definitions
         # Count alone is insufficient: an imported tool may carry a large schema.
