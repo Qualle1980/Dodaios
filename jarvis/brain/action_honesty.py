@@ -457,13 +457,19 @@ _CAPABILITY_DENIAL_RE = re.compile(
     r"\bich\s+kann\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
     r"\bkann\s+ich\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
     r"\bkomme\s+ich\s+nicht\b|"  # i18n-allow: German output matcher
-    r"\bich\s+habe\s+(?:leider\s+)?kein(?:en|e)?\s+zugriff\b|"  # i18n-allow: DE
-    r"\bhabe\s+ich\s+(?:leider\s+)?kein(?:en|e)?\s+zugriff\b|"  # i18n-allow: DE
+    # The model inserts an adverb inside the denial and an adjective before
+    # the noun ("no DIRECT access at the MOMENT"); the fixed form missed both
+    # and logged nothing over a turn that carried two denials (live
+    # 2026-11-07 20:35). Up to two filler words on each side, which is what
+    # the natural phrasings use. The phrasings themselves are in
+    # tests/unit/brain/test_capability_denial.py.
+    r"\bich\s+habe\s+(?:\w+\s+){0,2}kein(?:en|e)?\s+(?:\w+\s+){0,2}zugriff\b|"  # i18n-allow: DE
+    r"\bhabe\s+ich\s+(?:\w+\s+){0,2}kein(?:en|e)?\s+(?:\w+\s+){0,2}zugriff\b|"  # i18n-allow: DE
     r"\bich\s+habe\s+keinen?\s+(?:zugang|moglichkeit)\b|"  # i18n-allow: DE
     r"\bi\s+can\s*(?:no|not)\b|"
     r"\bi\s+can['’]?t\b|"
     r"\bi\s+cannot\b|"
-    r"\bi\s+(?:do\s+not|don['’]?t)\s+have\s+access\b|"
+    r"\bi\s+(?:do\s+not|don['’]?t)\s+have\s+(?:\w+\s+){0,2}access\b|"
     r"\bi\s+have\s+no\s+access\b"
     r")"
 )
@@ -481,7 +487,8 @@ _DENIAL_CONDITION_RE = re.compile(
 # a tool name can be compared against.
 _DENIAL_NOISE: frozenset[str] = frozenset({
     "kann", "kannst", "nicht", "kein", "keine", "keinen", "zugriff", "zugang",  # i18n-allow: DE
-    "direkt", "leider", "habe", "hab", "komme", "moglichkeit", "darauf",  # i18n-allow: DE
+    "direkt", "direkten", "direkte", "direkter", "aktuell", "derzeit",  # i18n-allow: DE
+    "leider", "habe", "hab", "komme", "moglichkeit", "darauf",  # i18n-allow: DE
     "suchen", "sehen", "schauen", "nachschauen", "zugreifen", "offnen",  # i18n-allow: DE
     "andern", "lesen", "abrufen", "externen", "externe", "extern",  # i18n-allow: DE
     "cant", "cannot", "not", "no", "access", "dont", "have", "search",
@@ -492,6 +499,14 @@ _DENIAL_NOISE: frozenset[str] = frozenset({
 # open web. It is kept here rather than added there because that table feeds
 # three gates that SPEAK refusals, and this detector only measures.
 _WEB_TERMS: frozenset[str] = frozenset({"web", "internet", "online", "browser"})
+
+# The long-term memory is called ``wiki-recall``; the user calls it Obsidian.
+# Live 2026-11-07 20:35 denied access to it while the tool sat in the catalog,
+# and this detector stayed silent because no tool NAME carries the word the
+# user said. "wiki" belongs in the set so the bridge reaches that name.
+_NOTE_TERMS: frozenset[str] = frozenset(
+    {"obsidian", "vault", "wiki", "notes", "notizen"}  # i18n-allow: DE input word
+)
 
 
 def capability_denial_terms(text: str) -> tuple[str, ...]:
@@ -517,8 +532,9 @@ def capability_denial_terms(text: str) -> tuple[str, ...]:
             token for token in _content_tokens(normalized)
             if token not in _DENIAL_NOISE
         }
-        if terms & _WEB_TERMS:
-            terms |= _WEB_TERMS
+        for bridge in (_WEB_TERMS, _NOTE_TERMS):
+            if terms & bridge:
+                terms |= bridge
         found |= terms
     return tuple(sorted(found))
 
