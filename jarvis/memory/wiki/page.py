@@ -35,6 +35,8 @@ DIR_TO_TYPE: dict[str, str] = {
     "sessions": "session",
     # Mirrored address-book contacts (jarvis/memory/wiki/contact_mirror.py).
     "people": "person",
+    # What went wrong once and must not go wrong twice.
+    "lessons": "lesson",
 }
 
 # Required frontmatter keys per page type. Derived from schema.md
@@ -46,6 +48,10 @@ REQUIRED_KEYS: dict[str, frozenset[str]] = {
     "session": frozenset({"type", "session_id"}),
     "meta": frozenset({"type"}),
     "person": frozenset({"type", "slug"}),
+    # ``source`` is the half of recall that keeps two workers apart: a hit
+    # has to say WHO learned it. ``status`` because a lesson is never its
+    # own proof -- the evidence named inside it is.
+    "lesson": frozenset({"type", "slug", "source", "status"}),
 }
 
 # Canonical section headings per page type, in expected order. Used by
@@ -63,6 +69,19 @@ CANONICAL_SECTIONS: dict[str, tuple[str, ...]] = {
     # Person pages carry a machine-managed block + free-form learned
     # content; no canonical section order is enforced.
     "person": (),
+    # The only type whose sections are REQUIRED, not merely canonical --
+    # see REQUIRED_SECTIONS.
+    "lesson": ("Symptom", "Cause", "Evidence", "Rule"),
+}
+
+# Sections a page type must actually carry, each with something under it.
+# Only lessons have one. A lesson recording a symptom and a hypothesis
+# prevents nothing: the next session cannot tell the confirmed cause from
+# the first guess, and pays for the same day twice. So who / what / why /
+# on-what-grounds is enforced rather than requested -- ``atomic_writer``
+# already rolls back a write whose page is not schema-valid.
+REQUIRED_SECTIONS: dict[str, frozenset[str]] = {
+    "lesson": frozenset(CANONICAL_SECTIONS["lesson"]),
 }
 
 _FM_BOUNDARY = "---"
@@ -118,6 +137,7 @@ def parse_markdown(raw: str, path: Path) -> WikiPage:
         fm_present=fm_present,
         fm_type=fm_type,
         dir_type=dir_type,
+        body=body,
     )
 
     wikilinks = extract_wikilinks(body)
@@ -341,6 +361,7 @@ def _is_schema_valid(
     fm_present: bool,
     fm_type: str,
     dir_type: str,
+    body: str = "",
 ) -> bool:
     if not fm_present:
         return False
@@ -361,8 +382,16 @@ def _is_schema_valid(
     # Filename slug must match the frontmatter slug for the three
     # long-term page types. Sessions use a date-prefixed filename whose
     # session_id is stored separately, so they are exempt.
-    if fm_type in {"entity", "concept", "project", "person"}:
+    if fm_type in {"entity", "concept", "project", "person", "lesson"}:
         if frontmatter.get("slug") != path.stem:
+            return False
+
+    required_sections = REQUIRED_SECTIONS.get(fm_type)
+    if required_sections:
+        filled = {
+            heading for heading, text in parse_sections(body) if text.strip()
+        }
+        if not required_sections.issubset(filled):
             return False
 
     return True
@@ -376,5 +405,6 @@ __all__ = [
     "normalise_sources_section",
     "DIR_TO_TYPE",
     "REQUIRED_KEYS",
+    "REQUIRED_SECTIONS",
     "CANONICAL_SECTIONS",
 ]

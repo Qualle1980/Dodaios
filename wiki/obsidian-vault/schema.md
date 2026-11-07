@@ -172,6 +172,42 @@ Rules for the curator:
   written to the wiki. They live in the address book and are resolved on
   demand via the `contact-lookup` tool.
 
+### Lesson page (`lessons/<slug>.md`)
+
+One page per thing that went wrong and must not go wrong twice. The only
+page type whose **sections are required, not merely canonical**: a note that
+records a symptom and a hypothesis prevents nothing, because the next reader
+cannot tell the confirmed cause from the first guess and pays for the same
+day twice.
+
+Required frontmatter:
+
+```yaml
+---
+type: lesson
+slug: <slug>                # must match the filename stem
+source: <who learned it>    # claude | codex | gemini | jarvis | manual
+status: unverified | verified
+---
+```
+
+Required sections, each with content under it (any order; more are welcome):
+
+| section | question it answers |
+|---|---|
+| `## Symptom` | what was observed, in the words it was observed in |
+| `## Cause` | the confirmed cause — never the first hypothesis |
+| `## Evidence` | the discriminating measurement that confirmed it |
+| `## Rule` | what must be found next time, in one sentence |
+
+`source` is what lets a recall hit say WHO learned it, so two workers'
+lessons stay apart. `status: unverified` is the honest default: a page is
+never its own proof — the evidence named inside it is.
+
+A page missing any of the four sections, or carrying an empty heading, is
+not schema-valid, and `atomic_writer` rolls its write back. The rule is
+enforced rather than requested because asking did not work.
+
 ## Wikilinks
 
 Use double-bracket syntax `[[entities/ruben]]` or short form `[[ruben]]`
