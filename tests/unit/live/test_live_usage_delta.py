@@ -107,3 +107,43 @@ class TestTheClosingRecordCarriesTheTotals:
         from jarvis.live.native import split_new_input_tokens
 
         assert callable(split_new_input_tokens)
+
+
+class TestTheModalitySplitIsRecorded:
+    """Audio input costs 4x text input, so the split is what sets the price.
+
+    `calculate_realtime_cost_usd` already takes text and audio separately, but
+    the published turn only carried the combined total -- so a recorded turn
+    could not be re-derived or checked against the provider's own counter.
+    Measured 2026-11-07: our day summed 49 637 input tokens where Google's
+    free-tier quota counter recorded 29 300, and without the split there is no
+    way to tell whether the difference is audio.
+    """
+
+    def test_the_event_carries_the_audio_share(self) -> None:
+        from jarvis.core.events import BrainTurnCompleted
+
+        event = BrainTurnCompleted(tokens_in=500, tokens_in_audio=75, tokens_out_audio=40)
+        assert event.tokens_in_audio == 75
+        assert event.tokens_out_audio == 40
+
+    def test_the_share_defaults_to_zero_for_a_text_provider(self) -> None:
+        from jarvis.core.events import BrainTurnCompleted
+
+        event = BrainTurnCompleted(tokens_in=500)
+        assert event.tokens_in_audio == 0
+        assert event.tokens_out_audio == 0
+
+    def test_the_live_path_publishes_what_it_priced(self) -> None:
+        """The audio figure on the record must be the one the cost used."""
+        import inspect
+
+        from jarvis.live import native
+
+        source = inspect.getsource(native.NativeLiveVoiceSession)
+        start = source.index("BrainTurnCompleted(")
+        call = source[start : start + 900]
+        assert "tokens_in_audio=audio_in" in call, (
+            "the record must carry the audio tokens the price was computed from"
+        )
+        assert "tokens_out_audio=" in call

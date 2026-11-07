@@ -693,6 +693,8 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                         tokens_in=new_in,
                         tokens_out=tokens_out,
                         tokens_cached=usage.get("input_cached", 0),
+                        tokens_in_audio=audio_in,
+                        tokens_out_audio=int(usage.get("output_audio", 0) or 0),
                         cost_usd=turn_cost,
                         finish_reason="realtime_usage",
                     )
