@@ -448,8 +448,84 @@ def replace_unbacked_action_claim(
     return text
 
 
+# A denial of JARVIS'S OWN REACH, as opposed to a statement about the world
+# ("the concert is sold out") or a plain answer that happens to name a system
+# ("your calendar says nine"). Only the first person counts: the subject of
+# the inability has to be the assistant.
+_CAPABILITY_DENIAL_RE = re.compile(
+    r"(?:"
+    r"\bich\s+kann\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
+    r"\bkann\s+ich\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
+    r"\bkomme\s+ich\s+nicht\b|"  # i18n-allow: German output matcher
+    r"\bich\s+habe\s+(?:leider\s+)?kein(?:en|e)?\s+zugriff\b|"  # i18n-allow: DE
+    r"\bhabe\s+ich\s+(?:leider\s+)?kein(?:en|e)?\s+zugriff\b|"  # i18n-allow: DE
+    r"\bich\s+habe\s+keinen?\s+(?:zugang|moglichkeit)\b|"  # i18n-allow: DE
+    r"\bi\s+can\s*(?:no|not)\b|"
+    r"\bi\s+can['’]?t\b|"
+    r"\bi\s+cannot\b|"
+    r"\bi\s+(?:do\s+not|don['’]?t)\s+have\s+access\b|"
+    r"\bi\s+have\s+no\s+access\b"
+    r")"
+)
+
+# "...without your approval", "...until you connect it" names a PRECONDITION
+# the user can satisfy, not a tool Jarvis lacks. Flagging those would turn
+# every correct consent prompt into a false alarm.
+_DENIAL_CONDITION_RE = re.compile(
+    r"\b(?:ohne|solange|bis\s+du|erst\s+wenn|nur\s+wenn|"  # i18n-allow: DE
+    r"without|unless|until\s+you|only\s+if)\b"
+)
+
+# The denial's own vocabulary plus the generic verbs of reaching for
+# something. What is left is the SYSTEM being denied, which is the only part
+# a tool name can be compared against.
+_DENIAL_NOISE: frozenset[str] = frozenset({
+    "kann", "kannst", "nicht", "kein", "keine", "keinen", "zugriff", "zugang",  # i18n-allow: DE
+    "direkt", "leider", "habe", "hab", "komme", "moglichkeit", "darauf",  # i18n-allow: DE
+    "suchen", "sehen", "schauen", "nachschauen", "zugreifen", "offnen",  # i18n-allow: DE
+    "andern", "lesen", "abrufen", "externen", "externe", "extern",  # i18n-allow: DE
+    "cant", "cannot", "not", "no", "access", "dont", "have", "search",
+    "see", "look", "open", "read", "change", "reach", "external", "directly",
+})
+
+# The one domain the shared ``_SYSTEM_SYNONYMS`` table does not cover: the
+# open web. It is kept here rather than added there because that table feeds
+# three gates that SPEAK refusals, and this detector only measures.
+_WEB_TERMS: frozenset[str] = frozenset({"web", "internet", "online", "browser"})
+
+
+def capability_denial_terms(text: str) -> tuple[str, ...]:
+    """Systems a reply claims to be unable to reach, for a surface check.
+
+    The caller passes the result to
+    :func:`jarvis.brain.evidence_gate.live_surface_covers`; a non-empty
+    result that the live surface DOES cover is a denial the attached tools
+    contradict. Empty means the text carries no first-person capability
+    denial, or none whose object can be named.
+
+    Like ``live_surface_covers`` this is lexical on purpose and errs toward
+    reporting: here a false positive costs one log line.
+    """
+    found: set[str] = set()
+    for clause in _split_clauses(text):
+        normalized = _normalize(clause.body).strip()
+        if not _CAPABILITY_DENIAL_RE.search(normalized):
+            continue
+        if _DENIAL_CONDITION_RE.search(normalized):
+            continue
+        terms = {
+            token for token in _content_tokens(normalized)
+            if token not in _DENIAL_NOISE
+        }
+        if terms & _WEB_TERMS:
+            terms |= _WEB_TERMS
+        found |= terms
+    return tuple(sorted(found))
+
+
 __all__ = [
     "action_not_started_phrase",
+    "capability_denial_terms",
     "has_deferred_action_claim",
     "has_false_completion_claim",
     "has_unbacked_action_claim",
