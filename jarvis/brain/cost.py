@@ -107,6 +107,12 @@ PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # Live API models — TEXT rates; audio rates live in
     # REALTIME_AUDIO_PRICING_USD_PER_MTOK below.
     "gemini-3.1-flash-live-preview": (0.75, 4.50),
+    # gemini-3.8-live shares 3.1-flash-live-preview's pricing row. It was
+    # missing here until 2026-11-07, so every Live turn the app ran recorded
+    # cost_usd=0.0 -- the same failure as gemini-3.7-flash above, for the same
+    # reason. Keep the two rows equal; a test asserts that rather than a
+    # copied literal.
+    "gemini-3.8-live": (0.75, 4.50),
     # 2.5 Flash native-audio Live: $0.50 / $2.00 text (ai.google.dev pricing,
     # 2026-08-18). ``gemini-live-2.5-flash-native-audio`` is the Vertex id of
     # the same model — VertexLiveProvider.default_model — and Vertex bills
@@ -465,6 +471,11 @@ async def ensure_pricing_for(model: str | None, *, timeout_s: float = 3.0) -> bo
 #   gpt-realtime-2.1-mini $10 in / $20 out
 REALTIME_AUDIO_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "gemini-3.1-flash-live-preview": (3.0, 12.0),
+    # Same pricing row as 3.1-flash-live-preview (2026-11-07). Google's own
+    # pricing page would not render cleanly on retrieval, so this was taken
+    # from the shared-row listing and is worth re-checking when the next Live
+    # model lands.
+    "gemini-3.8-live": (3.0, 12.0),
     # 2.5 Flash native audio (AI Studio id + Vertex id): $3.00 in / $12.00
     # out per ai.google.dev/gemini-api/docs/pricing, 2026-08-18.
     "gemini-2.5-flash-native-audio-preview-12-2025": (3.0, 12.0),
