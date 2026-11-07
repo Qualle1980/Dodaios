@@ -32,5 +32,9 @@
   },
   "sideEffects": [
     "*.css"
-  ]
+  ],
+  "overrides": {
+    "minimatch": "^11.0.1",
+    "postcss-selector-parser": "^6.1.5"
+  }
 }
