@@ -662,6 +662,12 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 event_id=str(uuid4()), role=role, text=event.text or "",
                 start_ms=stamp, end_ms=stamp, snapshot=role == "user",
             )
+            # What the call said, where the rest of the session looks for it.
+            # ``LiveVoiceSession._event`` has always kept this; the native
+            # handler built the same caption and dropped it, so every reader
+            # of ``_captions`` saw an empty string on the path the app
+            # actually runs -- the honesty check among them.
+            self._captions[role] = caption.text
             if self._bus is not None:
                 await self._bus.publish(caption)
             if role == "user" and event.is_final:
