@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +149,10 @@ class VaultSearch:
         self._db_path: Path | None = db_path
         self._external = tuple(external_sources)
         self._external_conns: dict[str, sqlite3.Connection] = {}
+        # ``warm_up`` builds these on a background thread at boot while a
+        # turn may already be searching, so the cache is reached from two
+        # threads and an entry must not be built twice.
+        self._external_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -224,6 +229,16 @@ class VaultSearch:
             # Missing table = index not built yet; anything else is the same
             # degraded-but-working state search() already tolerates.
             log.debug("VaultSearch warm_up skipped: %s", exc)
+        for source in self._external:
+            try:
+                self._external_conn(source).execute(
+                    "SELECT rowid FROM wiki_fts WHERE wiki_fts MATCH ? LIMIT 1",
+                    ('"warmup"',),
+                ).fetchall()
+            except Exception as exc:  # noqa: BLE001
+                log.debug(
+                    "VaultSearch warm_up skipped for source %r: %s", source.name, exc
+                )
 
     def close(self) -> None:
         """Close the owned DB connection, if any."""
@@ -259,23 +274,36 @@ class VaultSearch:
             log.debug("VaultSearch: fts_index not available — schema not ensured")
         return self._conn
 
+    def _external_conn(self, source: ExternalSource) -> sqlite3.Connection:
+        """The cached index connection for one read-only source.
+
+        Building it walks and indexes the source, which cost 430.8 ms over
+        six real sources (measured 2026-11-07) -- far past the injector's
+        whole 150 ms budget. ``warm_up`` therefore calls this at boot, off
+        the critical path, so a turn only ever pays the query.
+        """
+        with self._external_lock:
+            conn = self._external_conns.get(source.name)
+            if conn is not None:
+                return conn
+            import jarvis.memory.wiki.fts_index as _fts
+
+            db_path = index_db_path(source)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            if source.path.is_dir():
+                _fts.rebuild_index(source.path, conn)
+            else:
+                _fts.ensure_schema(conn)
+            self._external_conns[source.name] = conn
+            return conn
+
     def _search_external(
         self, source: ExternalSource, match_expr: str, k: int
     ) -> list[SearchHit]:
         """Hits from one read-only source; any failure only drops its hits."""
         try:
-            conn = self._external_conns.get(source.name)
-            if conn is None:
-                import jarvis.memory.wiki.fts_index as _fts
-
-                db_path = index_db_path(source)
-                db_path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db_path), check_same_thread=False)
-                if source.path.is_dir():
-                    _fts.rebuild_index(source.path, conn)
-                else:
-                    _fts.ensure_schema(conn)
-                self._external_conns[source.name] = conn
+            conn = self._external_conn(source)
             return self._run_query(
                 conn,
                 match_expr,
