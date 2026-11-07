@@ -18,6 +18,48 @@ copy directly.
 
 ---
 
+## 0. Look before you build
+
+**The first step of every task is not the task. It is finding out whether
+someone already did it.** Every fix, every feature, every turn — not only when
+you are stuck, not only for large changes. When you find it, read it, keep the
+reasoning, and adapt it to our names and our paths. That is faster, more
+accurate and cheaper in tokens than inventing it, and it is how this repo is
+meant to be worked on.
+
+Look in this order, cheapest first:
+
+1. **The diagnostics we already emit.** Logs, events, the flight recorder.
+   A theory formed before reading our own output is a guess. On 2026-11-07 an
+   agent reasoned about a tool-declaration budget while the session's own log
+   line read `declares 20 of 20 tools … nothing is behind discover_tools` — the
+   answer was already printed.
+2. **This repo.** The costs view, the cached-token discount, the honesty
+   backstop, the per-source FTS index: each was proposed as new work while it
+   sat in the tree. Search for the capability, not for the file name you
+   expect.
+3. **Upstream `Dodaios/Dodaios`.** Its package is `dodaios`, NOT `jarvis`, so a
+   path lookup with `jarvis/` returns 404 and reads as "nothing there" when the
+   file is right in front of you. Search the commit subjects
+   (`git log upstream/main --grep=… -i`) and the issues; a closed issue often
+   carries the whole answer. On 2026-11-07 upstream turned out to hold a
+   complete memory-vault subsystem that an agent had just started rebuilding by
+   hand (ADR-0044).
+4. **Public projects**, per the licence rules below.
+
+**An empty search is a RESULT, and it belongs in the PR.** "Upstream has the
+same gap, nothing to adopt" is a finding that justifies building; silence
+about it is not. State in one line what you took, adapted, or why nothing fit.
+
+**Adapting is not copying.** Module layout, config keys, test helpers and
+names differ between trees. A file pasted in unchanged is worse than none.
+Add attribution only where the licence requires it (an MIT/Apache notice on a
+substantial copy); check with `gh api repos/<owner>/<repo>/license` before
+copying code. Non-permissive or custom licences: take the idea, not the text.
+Competitor research stays out of tracked files (§2).
+
+---
+
 ## 1. Traps no one guesses
 
 These cost real bugs. Nothing catches them but you.
