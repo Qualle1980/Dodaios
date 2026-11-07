@@ -8,6 +8,7 @@ engine, so every behaviour here is pinned on both connection shapes from
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 from types import SimpleNamespace
 
@@ -752,3 +753,51 @@ async def test_turn_language_reaches_the_provider_before_the_response(tmp_path, 
             ]
     finally:
         session._ledger.close()
+
+
+class TestTheLiveToolSurfaceIsAlwaysReported:
+    """The one diagnostic the live path has must also fire in the default config.
+
+    `_tool_declarations` logs "Native voice declares N of M tools ..." with an
+    AP-30 note that a trimmed set looks exactly like a complete one -- but it
+    returns BEFORE that line when the budget is 0, and 0 (unbounded) is the
+    default. So the live call said nothing about its tool surface on any real
+    install, and a whole day of 2026-11-07 was spent guessing what a live call
+    had declared while the text brain happily logged
+    "Tool surface for gemini: 23 of 89 tools shown".
+
+    An unbounded surface is a fact worth one line too.
+    """
+
+    def _session(self, budget: int, tool_count: int, caplog):
+        session = object.__new__(NativeLiveVoiceSession)
+        declarations = [
+            {"type": "function", "name": f"tool_{i}", "description": "d", "parameters": {}}
+            for i in range(tool_count)
+        ]
+        session._tools = SimpleNamespace(
+            declarations=lambda: list(declarations),
+            catalog=lambda: (),
+        )
+        session._config = SimpleNamespace(
+            voice=SimpleNamespace(realtime_tool_declaration_budget_tokens=budget)
+        )
+        session._provider = SimpleNamespace(
+            name="gemini-live", tool_declaration_budget_tokens=0
+        )
+        return session
+
+    def test_an_unbounded_surface_is_still_reported(self, caplog) -> None:
+        session = self._session(0, 7, caplog)
+        with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
+            fitted = session._tool_declarations()
+        assert len(fitted) == 7
+        assert any("7 of 7" in record.getMessage() for record in caplog.records), (
+            "an unbounded tool surface must still say how many tools it declared"
+        )
+
+    def test_a_trimmed_surface_keeps_reporting(self, caplog) -> None:
+        session = self._session(4, 7, caplog)
+        with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
+            session._tool_declarations()
+        assert any("of 7" in record.getMessage() for record in caplog.records)
