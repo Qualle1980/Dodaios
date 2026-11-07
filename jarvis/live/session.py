@@ -630,7 +630,46 @@ class LiveVoiceSession:
         self._thinking = self._has_pending_work()
         if ended_speech:
             await self._emit_indicator({"type": "tts_end"})
+        self._report_capability_denial()
         await self._emit_indicator({"type": "turn_complete"})
+
+    def _report_capability_denial(self) -> None:
+        """Record a spoken "I can't do that" the attached tools contradict.
+
+        The live model speaks audio directly, so by the time the sentence is
+        in the transcript the user has already heard it -- there is nothing
+        left to rewrite, which is why this only measures. The count decides
+        whether the intrusive remedies (an immediate self-correction, or
+        making the capability visible in the declared surface) are worth
+        their cost. GT-16's own ``live_surface_covers`` is the judge, so a
+        denial and a canned refusal are held to one standard.
+        """
+        # Imported here: the brain package must not join the live
+        # module's import graph for a diagnostic (AP-26).
+        from jarvis.brain.action_honesty import capability_denial_terms
+        from jarvis.brain.evidence_gate import live_surface_covers
+
+        spoken = self._captions.get("assistant") or ""
+        if not spoken:
+            return
+        terms = capability_denial_terms(spoken)
+        if not terms:
+            return
+        try:
+            names = [str(getattr(d, "name", "")) for d in self._tools.catalog()]
+        except Exception:
+            # A gateway that cannot list its catalog is a different defect,
+            # already logged where it happens; measuring must never be the
+            # reason a turn ends badly (AP-30: said, not swallowed).
+            log.debug("capability-denial check could not read the catalog", exc_info=True)
+            return
+        if not live_surface_covers(terms, names):
+            return
+        log.warning(
+            "capability denied over voice while %d tools were attached: terms=%s",
+            len(names),
+            ",".join(terms),
+        )
 
     async def wait_finished(self) -> None:
         await self._closed.wait()
