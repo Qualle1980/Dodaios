@@ -205,6 +205,17 @@ class LiveVoiceSession:
         self._reasoning_parts: dict[str, dict[int, str]] = {}
         self._reasoning_published_at: dict[str, float] = {}
         self._voice_seconds = 0.0
+        # A Live session reports its context size, which grows every
+        # turn; only the growth is new. The high-water mark is what the
+        # growth is measured against, and the spend is the running sum
+        # the closing VoiceTurnCompleted reports (see
+        # jarvis.live.native.split_new_input_tokens).
+        self._live_input_high_water = 0
+        self._live_spend: dict[str, float] = {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost_usd": 0.0,
+        }
         self.playback_active = False
         self._speaking = False
         self._thinking = False
@@ -2067,6 +2078,14 @@ class LiveVoiceSession:
                             provider=self.active_provider,
                             model=self._active_model,
                             tier="realtime",
+                            # The session's own totals. Left at the field
+                            # defaults these read 0 while the brain turns
+                            # underneath them reported five figures, so the
+                            # Costs view had nothing true to show for voice
+                            # (2026-11-07).
+                            tokens_in=int(self._live_spend["tokens_in"]),
+                            tokens_out=int(self._live_spend["tokens_out"]),
+                            cost_usd=float(self._live_spend["cost_usd"]),
                         )
                     )
                 await self._bus.publish(
