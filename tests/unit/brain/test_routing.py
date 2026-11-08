@@ -2024,6 +2024,14 @@ def test_router_tools_is_pure_dispatcher_set() -> None:
             # worker set. See ADR-0011 amendment "Every app action".
             "find-app-action",
             "run-app-action",
+            # Personal memory vault read tools (ADR-0044): three read-only
+            # lookups over one SQLite file, no model call - what is known
+            # about a topic, how it changed, which topics exist. Never a
+            # spawn, never in a worker set (AP-5/AP-14). See ADR-0011
+            # amendment "Personal memory vault read tools".
+            "memory-search",
+            "memory-history",
+            "memory-topics",
         }
     )
     assert ROUTER_TOOLS == expected, (

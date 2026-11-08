@@ -15,6 +15,7 @@ import pytest
 
 from jarvis.core.config import JarvisConfig
 from jarvis.memory.vault import MemoryVault, runtime
+
 # Bound at import, before the autouse `_memory_vault_in_tmp` fixture replaces
 # the module attribute: this is the one test that checks the real resolution.
 from jarvis.memory.vault.runtime import vault_path as real_vault_path

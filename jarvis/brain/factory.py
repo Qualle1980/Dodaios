@@ -139,6 +139,17 @@ ROUTER_TOOLS = frozenset({
     # The brain calls this when the user asks "what do we know about X" or
     # references a past project, person, or decision by name.
     "wiki-recall",
+    # The personal memory vault, read side (ADR-0044). Three read-only
+    # lookups over one SQLite file: what is known about a topic, how it
+    # changed, and which topics exist at all. Router-tier for the same reason
+    # as ``wiki-recall`` and ``search-web``: a lookup is not an action, there
+    # is no model call, and spawning a worker for "what do you know about me"
+    # is the spawn reflex ADR-0011 exists to prevent. Risk safe, never a
+    # spawn, never in a worker set (AP-5/AP-14). See ADR-0011 amendment
+    # "Personal memory vault read tools".
+    "memory-search",
+    "memory-history",
+    "memory-topics",
     # Phase B5 follow-up: full-page reader for the wiki vault. Used after
     # wiki-recall when the brain has narrowed to one page and needs the
     # complete content, not the 240-char snippet.

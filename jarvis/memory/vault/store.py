@@ -490,29 +490,26 @@ class MemoryVault:
     def history(self, memory_id: str) -> list[Memory]:
         """Every version of a memory, oldest first."""
         ids = self._chain_ids(memory_id)
-        found = {m.id: m for m in (self.get(i) for i in ids) if m is not None}
+        found = [m for m in (self.get(i) for i in ids) if m is not None]
         # Follow the supersede links; time alone cannot order two versions
         # recorded in the same second.
-        depth: dict[str, int] = {}
-
-        def _depth(mid: str) -> int:
-            if mid not in depth:
-                prev = found[mid].supersedes_id
-                depth[mid] = 0 if prev not in found else _depth(prev) + 1
-            return depth[mid]
-
-        return sorted(found.values(), key=lambda m: (_depth(m.id), m.recorded_at, m.id))
+        return _in_supersede_order(found, chain_first=True)
 
     def about(self, entity: str, *, include_closed: bool = True) -> list[Memory]:
         """Every memory that names an entity, oldest first ("where did I live before?")."""
         rows = self._db.execute(
             f"SELECT {_prefixed()} FROM memory m "  # noqa: S608
             "JOIN memory_entity me ON me.memory_id = m.id "
-            "JOIN entity e ON e.id = me.entity_id WHERE e.name_key = ? "
-            "ORDER BY m.recorded_at, m.id",
+            "JOIN entity e ON e.id = me.entity_id WHERE e.name_key = ?",
             (entity.casefold().strip(),),
         )
-        memories = [self._row_to_memory(r) for r in rows]
+        # NOT `ORDER BY recorded_at, id`: `recorded_at` has one-second
+        # resolution and an id ends in random hex, so a fact changed in the
+        # same second as it was stored came back in arbitrary order - "where
+        # did I live before?" answered Berlin before Hamburg in 2 of 6 runs.
+        # The supersede links are what actually order two versions, the same
+        # reason `history` follows them.
+        memories = _in_supersede_order([self._row_to_memory(r) for r in rows])
         if include_closed:
             return memories
         now = self.now()
@@ -918,6 +915,31 @@ class MemoryVault:
             last_helpful_at=row["last_helpful_at"],
             unhelpful_count=int(row["unhelpful_count"]),
         )
+
+
+def _in_supersede_order(memories: list[Memory], *, chain_first: bool = False) -> list[Memory]:
+    """Oldest first, using the supersede links where the clock cannot decide.
+
+    ``recorded_at`` has one-second resolution and an id ends in random hex, so
+    two versions written in the same second cannot be ordered by either. How
+    deep a memory sits in its supersede chain can. ``chain_first`` orders a
+    single chain by depth before time; across chains time leads and depth only
+    breaks a tie.
+    """
+    known = {m.id: m for m in memories}
+    depth: dict[str, int] = {}
+
+    def _depth(mid: str) -> int:
+        if mid not in depth:
+            previous = known[mid].supersedes_id
+            # Guard against a cycle a corrupt file could hold.
+            depth[mid] = 0
+            depth[mid] = 0 if previous not in known else _depth(previous) + 1
+        return depth[mid]
+
+    if chain_first:
+        return sorted(memories, key=lambda m: (_depth(m.id), m.recorded_at, m.id))
+    return sorted(memories, key=lambda m: (m.recorded_at, _depth(m.id), m.id))
 
 
 def _prefixed() -> str:
