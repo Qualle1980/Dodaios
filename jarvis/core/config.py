@@ -1954,6 +1954,17 @@ class JarvisLearningConfig(BaseModel):
     timeout_s: float = Field(default=90.0, ge=5.0, le=600.0)
 
 
+class VaultMemoryConfig(BaseModel):
+    """The personal memory vault (ADR-0044).
+
+    ``enabled`` is the off switch: with it false nothing is written to
+    ``data/memory/vault.db`` and no memory reaches a prompt. It is read by
+    :func:`jarvis.memory.vault.runtime.vault_enabled`.
+    """
+
+    enabled: bool = True
+
+
 class MemoryConfig(BaseModel):
     recall_store: str = "sqlite"
     # chromadb was removed (2026-06-28); there is no chroma backend in
@@ -1963,6 +1974,7 @@ class MemoryConfig(BaseModel):
     retention_days_recall: int = 90
     data_dir: str = "./data"
     wiki: WikiMemoryConfig = Field(default_factory=WikiMemoryConfig)
+    vault: VaultMemoryConfig = Field(default_factory=VaultMemoryConfig)
     legacy_curator: LegacyCuratorConfig = Field(default_factory=LegacyCuratorConfig)
     learning: JarvisLearningConfig = Field(default_factory=JarvisLearningConfig)
 
