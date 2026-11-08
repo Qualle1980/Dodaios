@@ -27,6 +27,22 @@ ORIGINS: tuple[str, ...] = ("user", "inferred", "imported")
 #: ``sensitive`` memories never enter the always-on profile block.
 SENSITIVITIES: tuple[str, ...] = ("normal", "sensitive")
 
+#: Highest confidence a memory may carry when nobody said it outright. An
+#: inference and an import are candidates, and the store caps them so no
+#: caller can present a guess as something the user stated.
+INFERRED_MAX_CONFIDENCE = 0.8
+
+#: Confidence below which a memory stays out of the always-on profile block.
+#: Without a floor, lowering confidence would change nothing and the signal
+#: would be theatre.
+PROFILE_MIN_CONFIDENCE = 0.35
+
+#: How much one "this was wrong" mark takes off ``confidence``.
+UNHELPFUL_STEP = 0.25
+
+#: Confidence never reaches zero: that is what forgetting is for.
+MIN_CONFIDENCE = 0.05
+
 _SPACE = re.compile(r"\s+")
 
 
@@ -63,8 +79,17 @@ class Memory:
     confidence: float = 1.0
     sensitivity: str = "normal"
     pinned: bool = False
+    #: How often the memory was PUT IN FRONT of the model. Being shown is not
+    #: evidence that it helped, so this never decides what the profile block
+    #: holds; see ``helpful_count``.
     use_count: int = 0
     last_used_at: str | None = None
+    #: How often something confirmed the memory actually helped.
+    helpful_count: int = 0
+    last_helpful_at: str | None = None
+    #: How often it was marked wrong or in the way. Each mark lowers
+    #: ``confidence``.
+    unhelpful_count: int = 0
 
     def is_current(self, now: str) -> bool:
         """True while the memory is neither replaced nor past its end date."""

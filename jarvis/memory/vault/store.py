@@ -24,14 +24,19 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from jarvis.memory.vault.models import (
+    INFERRED_MAX_CONFIDENCE,
     KINDS,
+    MIN_CONFIDENCE,
     ORIGINS,
+    PROFILE_MIN_CONFIDENCE,
     SENSITIVITIES,
+    UNHELPFUL_STEP,
     Memory,
     SearchHit,
     WriteResult,
@@ -40,7 +45,7 @@ from jarvis.memory.vault.models import (
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -64,7 +69,10 @@ CREATE TABLE IF NOT EXISTS memory (
     sensitivity   TEXT NOT NULL DEFAULT 'normal',
     pinned        INTEGER NOT NULL DEFAULT 0,
     use_count     INTEGER NOT NULL DEFAULT 0,
-    last_used_at  TEXT
+    last_used_at  TEXT,
+    helpful_count   INTEGER NOT NULL DEFAULT 0,
+    last_helpful_at TEXT,
+    unhelpful_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS memory_hash ON memory(content_hash);
 CREATE INDEX IF NOT EXISTS memory_kind ON memory(kind);
@@ -106,8 +114,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
 _COLUMNS = (
     "id, content_hash, kind, text, scope, valid_from, valid_to, recorded_at, "
     "expired_at, supersedes_id, origin, source, confidence, sensitivity, pinned, "
-    "use_count, last_used_at"
+    "use_count, last_used_at, helpful_count, last_helpful_at, unhelpful_count"
 )
+
+#: Columns added after SCHEMA_VERSION 1, as ``name -> column definition``. An
+#: existing file gains them by ALTER; nothing is rewritten.
+_ADDED_COLUMNS: dict[str, str] = {
+    "helpful_count": "INTEGER NOT NULL DEFAULT 0",
+    "last_helpful_at": "TEXT",
+    "unhelpful_count": "INTEGER NOT NULL DEFAULT 0",
+}
 
 _CURRENT = "m.expired_at IS NULL AND (m.valid_to IS NULL OR m.valid_to > ?)"
 
@@ -172,9 +188,14 @@ class MemoryVault:
                 self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.executescript(_SCHEMA)
+            self._migrate()
             self._db.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
+            )
+            self._db.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version' AND value<?",
+                (str(SCHEMA_VERSION), str(SCHEMA_VERSION)),
             )
             self._db.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('vault_id', ?)",
@@ -264,7 +285,7 @@ class MemoryVault:
                 valid_from=valid_from or now,
                 valid_to=valid_to,
                 source=dict(source or {}),
-                confidence=max(0.0, min(1.0, float(confidence))),
+                confidence=self._capped_confidence(origin, confidence),
                 sensitivity=sensitivity,
                 pinned=pinned,
             )
@@ -317,7 +338,9 @@ class MemoryVault:
                 valid_to=valid_to,
                 supersedes_id=old.id,
                 source=dict(source or {}),
-                confidence=old.confidence if confidence is None else confidence,
+                confidence=self._capped_confidence(
+                    origin, old.confidence if confidence is None else confidence
+                ),
                 sensitivity=old.sensitivity,
                 pinned=old.pinned,
             )
@@ -384,6 +407,47 @@ class MemoryVault:
                 "UPDATE memory SET use_count = use_count + 1, last_used_at=? WHERE id=?",
                 [(now, mid) for mid in ids],
             )
+            self._db.commit()
+
+    def mark_helpful(self, memory_ids: Iterable[str]) -> None:
+        """Record that a memory actually helped — not merely that it was shown.
+
+        The separate counter is the point. Ordering the always-on block by how
+        often a memory was *surfaced* makes the block fill with whatever it
+        already held, because being shown is its own cause. Only this counter
+        decides what stays in the block.
+        """
+        ids = list(memory_ids)
+        if not ids:
+            return
+        with self._lock:
+            now = self.now()
+            self._db.executemany(
+                "UPDATE memory SET helpful_count = helpful_count + 1, last_helpful_at=? "
+                "WHERE id=?",
+                [(now, mid) for mid in ids],
+            )
+            self._db.commit()
+
+    def mark_unhelpful(self, memory_ids: Iterable[str], *, reason: str = "") -> None:
+        """Record that a memory was wrong or in the way, and lower its confidence.
+
+        Confidence has to be able to fall, or a memory that was never right
+        keeps being offered with the same certainty as one the user stated. It
+        stops above zero: removing a memory is what forgetting is for.
+        """
+        ids = list(memory_ids)
+        if not ids:
+            return
+        with self._lock:
+            now = self.now()
+            for mid in ids:
+                self._db.execute(
+                    "UPDATE memory SET unhelpful_count = unhelpful_count + 1, "
+                    "confidence = MAX(?, confidence - ?) WHERE id=?",
+                    (MIN_CONFIDENCE, UNHELPFUL_STEP, mid),
+                )
+                self._audit("unhelpful", mid, {"reason": reason, "at": now})
             self._db.commit()
 
     # -- reads -------------------------------------------------------------
@@ -530,7 +594,11 @@ class MemoryVault:
         current = [
             m
             for m in self.list(scope=scope)
-            if m.sensitivity == "normal" and (m.pinned or m.kind in _PROFILE_ORDER)
+            if m.sensitivity == "normal"
+            and (m.pinned or m.kind in _PROFILE_ORDER)
+            # A memory marked wrong often enough falls out of the block. Pinned
+            # is the user's own word and outranks the floor.
+            and (m.pinned or m.confidence >= PROFILE_MIN_CONFIDENCE)
         ]
         groups: dict[str, list[Memory]] = {}
         for m in current:
@@ -540,7 +608,10 @@ class MemoryVault:
         for key in ("pinned", *_PROFILE_ORDER):
             items = sorted(
                 groups.get(key, []),
-                key=lambda m: (m.use_count, m.recorded_at),
+                # `helpful_count`, never `use_count`: being shown is not
+                # evidence of having helped, and ordering by it would let the
+                # block keep whatever it already held.
+                key=lambda m: (m.helpful_count, m.confidence, m.recorded_at),
                 reverse=True,
             )
             if not items:
@@ -630,6 +701,11 @@ class MemoryVault:
             self._validate(memory.text, memory.kind, memory.origin, memory.sensitivity)
             if _secret_check(memory.text):
                 return False
+            # A bundle is untrusted input: an exported row may claim any
+            # confidence, and an import is not the user saying it.
+            capped = self._capped_confidence(memory.origin, memory.confidence)
+            if capped != memory.confidence:
+                memory = replace(memory, confidence=capped)
             self._insert(memory)
             self._audit("import", memory.id, {"kind": memory.kind})
             self._db.commit()
@@ -652,6 +728,32 @@ class MemoryVault:
 
     # -- internals ---------------------------------------------------------
 
+    def _migrate(self) -> None:
+        """Add the columns a newer version introduced. Additive only.
+
+        ``executescript(_SCHEMA)`` creates a missing table with every column but
+        leaves an existing one alone, so a file written by an older version
+        needs the new columns added here.
+        """
+        have = {row["name"] for row in self._db.execute("PRAGMA table_info(memory)")}
+        for name, definition in _ADDED_COLUMNS.items():
+            if name not in have:
+                self._db.execute(f"ALTER TABLE memory ADD COLUMN {name} {definition}")  # noqa: S608
+
+    @staticmethod
+    def _capped_confidence(origin: str, confidence: float) -> float:
+        """Confidence a write may claim for this origin.
+
+        Nobody said an inference or an import out loud, so it enters as a
+        candidate. Capping here rather than at each call site means no caller,
+        including a model that answers with ``confidence: 1.0``, can present a
+        guess as something the user stated.
+        """
+        value = max(0.0, min(1.0, float(confidence)))
+        if origin == "user":
+            return value
+        return min(value, INFERRED_MAX_CONFIDENCE)
+
     def _validate(self, text: str, kind: str, origin: str, sensitivity: str) -> None:
         if not text:
             raise ValueError("a memory needs text")
@@ -665,27 +767,42 @@ class MemoryVault:
             raise ValueError(f"unknown sensitivity {sensitivity!r}")
 
     def _insert(self, m: Memory) -> None:
+        values = (
+            m.id,
+            m.content_hash,
+            m.kind,
+            m.text,
+            m.scope,
+            m.valid_from,
+            m.valid_to,
+            m.recorded_at,
+            m.expired_at,
+            m.supersedes_id,
+            m.origin,
+            m.source_json(),
+            m.confidence,
+            m.sensitivity,
+            1 if m.pinned else 0,
+            m.use_count,
+            m.last_used_at,
+            m.helpful_count,
+            m.last_helpful_at,
+            m.unhelpful_count,
+        )
+        # Counted from `_COLUMNS`, so adding a column cannot silently shift the
+        # values of the one next to it. A raise, not an assert: `python -O`
+        # drops asserts, and this is exactly the mistake that must never pass
+        # silently.
+        columns = _COLUMNS.split(",")
+        if len(values) != len(columns):
+            raise RuntimeError(
+                f"memory vault: {len(columns)} columns but {len(values)} values; "
+                "a column was added without its value"
+            )
+        placeholders = ",".join("?" * len(columns))
         self._db.execute(
-            f"INSERT INTO memory({_COLUMNS}) VALUES ({','.join('?' * 17)})",  # noqa: S608
-            (
-                m.id,
-                m.content_hash,
-                m.kind,
-                m.text,
-                m.scope,
-                m.valid_from,
-                m.valid_to,
-                m.recorded_at,
-                m.expired_at,
-                m.supersedes_id,
-                m.origin,
-                m.source_json(),
-                m.confidence,
-                m.sensitivity,
-                1 if m.pinned else 0,
-                m.use_count,
-                m.last_used_at,
-            ),
+            f"INSERT INTO memory({_COLUMNS}) VALUES ({placeholders})",  # noqa: S608
+            values,
         )
         self._db.execute(
             "INSERT INTO memory_fts(id, text, entities) VALUES (?, ?, ?)",
@@ -797,6 +914,9 @@ class MemoryVault:
             pinned=bool(row["pinned"]),
             use_count=int(row["use_count"]),
             last_used_at=row["last_used_at"],
+            helpful_count=int(row["helpful_count"]),
+            last_helpful_at=row["last_helpful_at"],
+            unhelpful_count=int(row["unhelpful_count"]),
         )
 
 

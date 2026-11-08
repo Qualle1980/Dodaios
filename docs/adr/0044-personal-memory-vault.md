@@ -49,6 +49,29 @@ both trees.
    tombstones first and skips anything already known, so importing the same
    bundle twice changes nothing. A readable Markdown copy is exported beside
    it.
+7. **Being surfaced is not evidence of having helped.** Two counters, not one:
+   `use_count` records that a memory was put in front of the model,
+   `helpful_count` that something confirmed it helped. Only the second decides
+   what the always-on block holds. Ordering the block by surfacing makes the
+   block feed itself, because being in it is what gets a memory surfaced.
+8. **Confidence can fall.** `mark_unhelpful` lowers it and is audited; below
+   `PROFILE_MIN_CONFIDENCE` a memory leaves the always-on block while staying
+   searchable and intact in its history. A signal that changes nothing would be
+   theatre. It stops above zero, because removing a memory is what forgetting
+   is for, and a pin outranks the floor: that is the user's own word.
+9. **An inference enters as a candidate.** The store caps the confidence of any
+   write whose origin is not `user` at `INFERRED_MAX_CONFIDENCE`, in the one
+   place every write passes, so no caller — including a model that answers
+   `confidence: 1.0`, and including an imported bundle row — can present a
+   guess as something the user stated.
+
+Principles 7 to 9 are not upstream's. They are failures the AK Matrix memory
+import plan recorded against its own store: *"hit_count currently means
+surfaced/recalled, not proven useful"*, *"mere retrieval must not count as
+success"*, *"Confidence must be able to go down when retrieved memory was
+irrelevant or harmful"* and *"Default imported inferences to
+candidate/unverified"*. The ported store arrived with the first two, so they
+are corrected before anything writes to it.
 
 **The vault does not replace the wiki.** `[wiki_integration].external_sources`
 is this fork's own extension: it registers read-only folders Dodaios searches
@@ -64,6 +87,8 @@ optional embedding table can be added later without changing anything above.
 ## Consequences
 
 - A contradiction has one answer, with a date, instead of two paragraphs.
+- A place in the always-on block is earned, not accumulated: a memory that
+  nothing confirmed stays where it was, however often it was shown.
 - Every write is auditable, and anything written can be taken away whole.
 - The vault's file (`data/memory/vault.db`) is separate from the wiki's
   (`data/jarvis.db`) on purpose: someone must be able to export or delete their
