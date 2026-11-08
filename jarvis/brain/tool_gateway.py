@@ -220,6 +220,19 @@ class BrainSupervisorToolGateway:
         recall = self._voice_recall_tool()
         if recall is not None:
             tools[recall.name] = recall
+        # ADR-0044: the personal memory vault's read side. Named here for the
+        # same reason as the wiki recall above - this catalog is hand-curated,
+        # so a tool the text brain gets from the entry points does not reach a
+        # call unless it is listed. "What do you know about me?" has to be
+        # answerable in a call, not only in the chat.
+        from jarvis.plugins.tool.memory_recall import (
+            MemoryHistoryTool,
+            MemorySearchTool,
+            MemoryTopicsTool,
+        )
+
+        for memory_tool in (MemorySearchTool(), MemoryHistoryTool(), MemoryTopicsTool()):
+            tools[memory_tool.name] = memory_tool
         # A voice carries a takeaway, not a table: exact content goes on screen.
         from jarvis.plugins.tool.show_on_screen import ShowOnScreenTool
 

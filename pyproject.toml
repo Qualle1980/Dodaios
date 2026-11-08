@@ -840,6 +840,11 @@ message-agent = "jarvis.plugins.tool.message_agent:LeadMessageAgentTool"
 run-skill = "jarvis.plugins.tool.run_skill:RunSkillTool"
 # Phase B5 — long-term wiki recall (router-tier, read-only).
 wiki-recall = "jarvis.plugins.tool.wiki_recall:WikiRecallTool"
+# ADR-0044 — the personal memory vault, read side. Router-tier, read-only,
+# one FTS query each and no model call, so they are safe on the voice path.
+memory-search = "jarvis.plugins.tool.memory_recall:MemorySearchTool"
+memory-history = "jarvis.plugins.tool.memory_recall:MemoryHistoryTool"
+memory-topics = "jarvis.plugins.tool.memory_recall:MemoryTopicsTool"
 # Phase B5 follow-up — full-page reader (router-tier, read-only).
 wiki-page-read = "jarvis.plugins.tool.wiki_page_read:WikiPageReadTool"
 # Grounded vault listing (2026-07-14) — deterministic "what is in my wiki"

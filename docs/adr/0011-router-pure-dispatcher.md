@@ -1493,3 +1493,105 @@ recorded among the tools that ran, gets no spoken acknowledgement and no
   revealing found tools, the manager's three reasons)
 - `tests/unit/brain/test_context_window_fit.py` (window and count limits)
 - `tests/unit/brain/test_routing.py` (exact router set, unchanged)
+
+## Amendment 2026-11-08 — Personal memory vault read tools
+
+ADR-0044 put what the assistant knows about its user into one SQLite file.
+Three read-only lookups over it join `ROUTER_TOOLS`:
+
+- `memory-search` — what is known about a person, place, project, preference
+  or standing instruction.
+- `memory-history` — how that changed, including what is no longer true, so
+  "where did I live before?" has an answer.
+- `memory-topics` — which topics the store holds anything about, with counts.
+
+### Pure-dispatcher spirit is preserved
+
+A lookup is not an action. Each call is one FTS5 query against a local file:
+no model call, no network, no write, risk `safe`, and nothing is spawned. They
+sit beside `wiki-recall` and `search-web` for the reason the header gives —
+delegating "what do you know about me?" to a worker mission is exactly the
+spawn reflex this ADR exists to prevent, and a multi-minute mission for a
+single-digit-millisecond read would be absurd. None of them appears in any
+worker tool set (AP-5/AP-14), and every call still goes through
+`ToolExecutor.execute()` (AP-3).
+
+`memory-topics` has no upstream counterpart. Search only helps someone who
+already knows what to search for, and the entity index that answers "what do
+you know about me?" sat in the database with nothing exposing it. It is a tool
+rather than a line in the system prompt deliberately: a catalogue in the prompt
+is paid for on every turn — again per turn in a live call, where the server
+holds the context — and it would be a second, drifting copy of sentences that
+are already one line each.
+
+**No tool hands the model a memory id.** An id has to stay stable while the
+text it names changes, which is what keeps a superseded fact findable, so it is
+opaque (`mem_<stamp>_<hex>`). A model shown one will read it out in a call.
+Editing, pinning and forgetting by id belong to the memory view and the control
+routes, not to the model, so these tools take a topic.
+
+The three are named explicitly in `_voice_tools()`
+(`jarvis/brain/tool_gateway.py`) as well. That catalog is hand-curated: a tool
+the text brain picks up from the entry points does not reach a call unless it
+is listed there. The live session of 2026-11-07 21:22 is the precedent — asked
+whether it could reach the owner's Obsidian, the model correctly said no,
+because `wiki-recall` was router-visible and in no voice catalog.
+
+### Regression guards
+
+- `tests/unit/memory/vault/test_memory_recall_tools.py` (each tool's answers,
+  the empty and switched-off cases, no id in any output)
+- `tests/unit/brain/test_voice_catalog_vault.py` (all three in the voice
+  catalog, safe tier, not action tools)
+- `tests/unit/brain/test_routing.py` (exact router set)
+
+## Amendment 2026-11-08 — Personal memory vault read tools
+
+ADR-0044 put what the assistant knows about its user into one SQLite file.
+Three read-only lookups over it join `ROUTER_TOOLS`:
+
+- `memory-search` — what is known about a person, place, project, preference
+  or standing instruction.
+- `memory-history` — how that changed, including what is no longer true, so
+  "where did I live before?" has an answer.
+- `memory-topics` — which topics the store holds anything about, with counts.
+
+### Pure-dispatcher spirit is preserved
+
+A lookup is not an action. Each call is one FTS5 query against a local file:
+no model call, no network, no write, risk `safe`, and nothing is spawned. They
+sit beside `wiki-recall` and `search-web` for the reason the header gives —
+delegating "what do you know about me?" to a worker mission is exactly the
+spawn reflex this ADR exists to prevent, and a multi-minute mission for a
+single-digit-millisecond read would be absurd. None of them appears in any
+worker tool set (AP-5/AP-14), and every call still goes through
+`ToolExecutor.execute()` (AP-3).
+
+`memory-topics` has no upstream counterpart. Search only helps someone who
+already knows what to search for, and the entity index that answers "what do
+you know about me?" sat in the database with nothing exposing it. It is a tool
+rather than a line in the system prompt deliberately: a catalogue in the prompt
+is paid for on every turn — again per turn in a live call, where the server
+holds the context — and it would be a second, drifting copy of sentences that
+are already one line each.
+
+**No tool hands the model a memory id.** An id has to stay stable while the
+text it names changes, which is what keeps a superseded fact findable, so it is
+opaque (`mem_<stamp>_<hex>`). A model shown one will read it out in a call.
+Editing, pinning and forgetting by id belong to the memory view and the control
+routes, not to the model, so these tools take a topic.
+
+The three are named explicitly in `_voice_tools()`
+(`jarvis/brain/tool_gateway.py`) as well. That catalog is hand-curated: a tool
+the text brain picks up from the entry points does not reach a call unless it
+is listed there. The live session of 2026-11-07 21:22 is the precedent — asked
+whether it could reach the owner's Obsidian, the model correctly said no,
+because `wiki-recall` was router-visible and in no voice catalog.
+
+### Regression guards
+
+- `tests/unit/memory/vault/test_memory_recall_tools.py` (each tool's answers,
+  the empty and switched-off cases, no id in any output)
+- `tests/unit/brain/test_voice_catalog_vault.py` (all three in the voice
+  catalog, safe tier, not action tools)
+- `tests/unit/brain/test_routing.py` (exact router set)

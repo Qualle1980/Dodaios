@@ -77,3 +77,24 @@ def test_a_failure_to_build_it_does_not_empty_the_catalog() -> None:
         wiki_recall._build_search_instance = original
     assert "wiki-recall" not in names
     assert "remember" in names, "the rest of the voice catalog must survive"
+
+def test_voice_can_read_the_personal_memory_vault() -> None:
+    """ADR-0044's read tools, in a call and not only in the chat.
+
+    The same trap as `wiki-recall` above: `_voice_tools()` is hand-curated, so
+    a tool the text brain picks up from the entry points reaches a call only
+    when it is named there. "What do you know about me?" has to be answerable
+    by voice.
+    """
+    names = {d.name for d in _gateway().voice_catalog()}
+
+    assert {"memory-search", "memory-history", "memory-topics"} <= names
+
+
+def test_the_memory_tools_are_read_only_and_safe_tier() -> None:
+    """They run on the voice critical path: one FTS query, no model call."""
+    catalog = {d.name: d for d in _gateway().voice_catalog()}
+
+    for name in ("memory-search", "memory-history", "memory-topics"):
+        assert catalog[name].risk_tier == "safe"
+        assert catalog[name].is_action_tool is False
