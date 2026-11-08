@@ -32,7 +32,17 @@ from jarvis.realtime.session import _standing_memory_block
 
 
 @pytest.fixture
-def vault(tmp_path):
+def vault(tmp_path, monkeypatch):
+    """A temporary vault, and a data directory with no notes in it.
+
+    The card has three sources, and only one of them is the vault. Without
+    pinning `DATA_DIR` the "nothing to say" case depends on whether some other
+    test in the same lane left a `core_memory.json` behind - which is exactly
+    how it broke once a new test file shifted the sharding.
+    """
+    import jarvis.core.config as core_config
+
+    monkeypatch.setattr(core_config, "DATA_DIR", tmp_path / "data")
     handle = MemoryVault(tmp_path / "vault.db")
     runtime.set_active(handle)
     reset_identity_card_cache()
