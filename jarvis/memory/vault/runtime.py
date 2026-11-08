@@ -4,13 +4,16 @@ Opened on demand and kept, because a background filing run touches it once per
 candidate and SQLite connections are not free. The handle is shared, which the
 store allows: it serialises its own writes.
 
-This holds only what the writing side needs. The always-on profile block and
-the per-turn recall that read from here arrive with chunk 3; adding them now
-would be code nothing calls.
+The always-on profile block lives with the identity card
+(``jarvis/brain/identity_card.py``) and the per-message recall in
+``turn_recall``; what stays here is the handle itself, the per-message entry
+point and the kind guess both the ``remember`` tool and the one-time import of
+the older stores need.
 """
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Any
 
@@ -60,6 +63,38 @@ def set_active(vault: MemoryVault | None) -> None:
 
 def close_active() -> None:
     set_active(None)
+
+
+# Words that hint at a kind, in the languages the product takes input in. Used
+# wherever a kind has to be guessed without a model call: an explicit "remember
+# that ..." and the one-time import of the older stores.
+_KIND_WORDS = {
+    "procedural": "always never don't stop immer nie niemals siempre nunca",  # i18n-allow
+    "preference": (
+        "like love hate prefer favorite favourite "
+        "mag liebe hasse lieber bevorzuge prefiero gusta"  # i18n-allow
+    ),
+    "relationship": (
+        "wife husband partner girlfriend boyfriend mother father mom dad sister brother "
+        "son daughter friend colleague boss "
+        "frau mann freundin freund mutter vater schwester bruder sohn tochter "  # i18n-allow
+        "kollege kollegin chef chefin"  # i18n-allow
+    ),
+    "project": "project deadline goal plan launch projekt ziel abgabe frist",  # i18n-allow
+}
+
+_KIND_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (kind, re.compile(r"\b(" + "|".join(map(re.escape, words.split())) + r")\b", re.I))
+    for kind, words in _KIND_WORDS.items()
+)
+
+
+def guess_kind(text: str) -> str:
+    """A kind for a sentence, without a model call. ``profile`` when nothing hints."""
+    for kind, pattern in _KIND_HINTS:
+        if pattern.search(text):
+            return kind
+    return "profile"
 
 
 def turn_suffix(config: Any, user_text: str) -> str:
