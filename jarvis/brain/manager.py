@@ -4026,6 +4026,7 @@ class BrainManager:
                 )
             except Exception:  # noqa: BLE001 — the layers without the wiki are still Jarvis
                 log.debug("render_surface_prompt: wiki context skipped", exc_info=True)
+        prompt += self._memory_turn_suffix(user_text)
         try:
             turn_context = self._build_turn_context()
         except Exception:  # noqa: BLE001 — the context block is a nicety
@@ -4815,6 +4816,24 @@ class BrainManager:
         parts.append(self._reply_language_directive())
 
         return "\n\n".join(p for p in parts if p)
+
+    def _memory_turn_suffix(self, user_text: str) -> str:
+        """Memories matching THIS message (ADR-0044 chunk 3), or "".
+
+        The identity card above is standing and cached; this is per turn. One
+        FTS query against a local file, no model call, and whatever the card
+        already holds is left out, so a memory is never paid for twice in one
+        prompt. Defensive like every ambient block here: a turn never fails
+        over knowledge it did not need.
+        """
+        try:
+            from jarvis.memory.vault import runtime
+
+            suffix = runtime.turn_suffix(getattr(self, "_config", None), user_text)
+        except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
+            log.debug("memory turn recall skipped", exc_info=True)
+            return ""
+        return "\n\n" + suffix if suffix else ""
 
     def _cache_optimized(self) -> bool:
         """True when the cache-optimized prompt layout (Wave 2) is enabled."""
@@ -12611,6 +12630,13 @@ class BrainManager:
             # Any unexpected error in the injector must never crash a voice turn.
             log.warning("WikiContextInjector raised unexpectedly — skipping", exc_info=True)
             self._wiki_context_suffix = ""
+
+        # ADR-0044: memories that match THIS message, next to the wiki
+        # snippets and carried by the same suffix, so cache-optimized mode
+        # moves both onto the user message and the cached system prompt stays
+        # byte-stable. The standing card already holds the person's profile;
+        # this is the half a budget that always fits cannot hold.
+        self._wiki_context_suffix += self._memory_turn_suffix(user_text)
 
         # Wave 2 (omni-latency): assemble the per-turn dynamic context (date +
         # wiki) once. In cache-optimized mode it rides on the user

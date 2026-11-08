@@ -60,3 +60,32 @@ def set_active(vault: MemoryVault | None) -> None:
 
 def close_active() -> None:
     set_active(None)
+
+
+def turn_suffix(config: Any, user_text: str) -> str:
+    """Memories matching this message, as a prompt block; ``""`` when none fit.
+
+    Excludes whatever the standing block already carries, so a memory is never
+    paid for twice in one prompt, and counts what it shows as *surfaced* —
+    being shown is not evidence of having helped (ADR-0044 principle 7).
+
+    Never raises: a turn must not fail over ambient knowledge.
+    """
+    try:
+        from jarvis.memory.vault.turn_recall import turn_block  # noqa: PLC0415
+
+        vault = active(config)
+        if vault is None or not user_text.strip():
+            return ""
+        standing = frozenset(
+            memory.id
+            for _section, memories in vault.profile_selection()
+            for memory in memories
+        )
+        block, shown = turn_block(vault, user_text, standing_ids=standing)
+        if shown:
+            vault.mark_used(shown)
+        return block
+    except Exception:  # noqa: BLE001 — recall must never break a turn
+        log.warning("memory vault: turn recall unavailable", exc_info=True)
+        return ""
