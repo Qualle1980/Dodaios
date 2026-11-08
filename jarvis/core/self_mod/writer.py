@@ -17,9 +17,11 @@ Pipeline per `mutate(request)` call (all steps mandatory, order fixed):
  10. Backup GC (FIFO at cap, age-based with floor).
  11. Audit entry via `SelfModAudit`.
 
-Locking: `_LOCK` is a `ClassVar` `threading.Lock`. Acquired from step 2,
-released in `finally`. Allowlist lookup (step 1) is read-only and
-requires no lock.
+Locking: `_LOCK` is `config_writer._WRITE_LOCK`, the one guard both writers
+of `jarvis.toml` share. It holds a thread lock and an OS file lock, so a
+second process (desktop app, CLI, agent session, mission worker) cannot
+write between our read and our rename. Acquired from step 2, released in
+`finally`. Allowlist lookup (step 1) is read-only and requires no lock.
 
 BOM preservation: On Windows many editors prepend a UTF-8 BOM.
 `tomlkit.parse` does not tolerate this — we strip it before parsing and
@@ -33,7 +35,6 @@ import logging
 import os
 import stat
 import tempfile
-import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -52,6 +53,7 @@ from jarvis.core.config import (
     load_config,
     resolve_config_path,
 )
+from jarvis.core.config_writer import _WRITE_LOCK
 from jarvis.core.events import ConfigReloaded
 from jarvis.core.paths import user_data_dir
 
@@ -96,7 +98,12 @@ def _default_backup_dir() -> Path:
 class AtomicConfigWriter:
     """Atomic, validating mutation engine for `jarvis.toml`."""
 
-    _LOCK: ClassVar[threading.Lock] = threading.Lock()
+    #: The SAME guard ``jarvis.core.config_writer`` takes, so the two writers of
+    #: ``jarvis.toml`` serialise against each other — and, through its file
+    #: lock, against the other processes writing it (the desktop app, the
+    #: ``jarvis`` CLI, agent sessions, mission workers). Two independent
+    #: ``threading.Lock``s protected neither case.
+    _LOCK: ClassVar[Any] = _WRITE_LOCK
     _BOM: ClassVar[str] = "﻿"
 
     def __init__(
@@ -240,7 +247,7 @@ class AtomicConfigWriter:
             self._audit_failure(request, old_value=None, error=str(exc))
             raise
 
-        with type(self)._LOCK:
+        with type(self)._LOCK(self.config_path):
             return self._mutate_locked(request, spec)
 
     def list_backups(self, limit: int = 20) -> list[BackupRef]:
@@ -302,7 +309,7 @@ class AtomicConfigWriter:
                 f"Backup path '{backup_filename}' lies outside the "
                 "configured backup directories"
             )
-        with type(self)._LOCK:
+        with type(self)._LOCK(self.config_path):
             for root in (self._backup_dir, *self._legacy_backup_dirs):
                 candidate = (root / backup_filename).resolve()
                 try:
