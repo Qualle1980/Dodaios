@@ -3496,6 +3496,27 @@ class WebServer:
         )
         self._wiki_integration_handle = handle
         logger.info("wiki_integration: bootstrap_wiki_integration succeeded")
+
+        # ADR-0044 chunk 4: copy the stores the memory vault replaces into it,
+        # once. Here rather than on a turn: it reads the wiki, the notebooks and
+        # core_memory.json, and a first turn must not pay for that. Entirely
+        # local, no model call, idempotent (the vault records that it ran), and
+        # wrapped so a fault costs the import and never the boot.
+        try:
+            from jarvis.core.config import DATA_DIR
+            from jarvis.memory.vault import runtime as vault_runtime
+            from jarvis.memory.vault.legacy_import import import_once
+
+            vault = await asyncio.to_thread(vault_runtime.active, self.cfg)
+            if vault is not None:
+                ran = await asyncio.to_thread(
+                    import_once, vault, wiki_root=vault_root, data_dir=DATA_DIR
+                )
+                if ran:
+                    logger.info("memory vault: imported the previous memory stores")
+        except Exception:  # noqa: BLE001 — the app boots without its old memory
+            logger.warning("memory vault: the one-time import failed", exc_info=True)
+
         # No periodic re-review of voice sessions: the six-hourly auto-backfill
         # was removed on 2026-09-30 together with the per-turn and end-of-call
         # extraction (it billed paid keys while nobody was at the PC). The

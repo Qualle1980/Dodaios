@@ -32,7 +32,17 @@ from jarvis.realtime.session import _standing_memory_block
 
 
 @pytest.fixture
-def vault(tmp_path):
+def vault(tmp_path, monkeypatch):
+    """A temporary vault, and a data directory with no notes in it.
+
+    The card has three sources, and only one of them is the vault. Without
+    pinning `DATA_DIR` the "nothing to say" case depends on whether some other
+    test in the same lane left a `core_memory.json` behind - which is exactly
+    how it broke once a new test file shifted the sharding.
+    """
+    import jarvis.core.config as core_config
+
+    monkeypatch.setattr(core_config, "DATA_DIR", tmp_path / "data")
     handle = MemoryVault(tmp_path / "vault.db")
     runtime.set_active(handle)
     reset_identity_card_cache()
@@ -138,9 +148,23 @@ def test_the_block_is_switched_off_with_the_identity_card(remembered) -> None:
     assert identity_card_block(Off()) == ""
 
 
-def test_an_empty_vault_and_no_notes_add_nothing(vault) -> None:
-    assert _standing_memory(None) == ""
-    assert _standing_memory_block(None) == ""
+def test_an_empty_vault_and_no_notes_add_nothing(vault, tmp_path) -> None:
+    """All THREE sources empty, not just the vault.
+
+    The card reads the vault, `core_memory.json` and the wiki profile page, and
+    `None` as config sends the last one to whatever vault the resolver defaults
+    to. Twice in CI this test failed on a source it was not even about - once
+    on a neighbour's `core_memory.json`, once on a profile page in the default
+    vault - so it now pins every source it depends on.
+    """
+    from jarvis.core.config import load_config
+
+    config = load_config()
+    config.wiki_integration.vault_root = tmp_path / "empty-vault"
+    config.memory.wiki.session_rollup.user_entity_slug = "nobody-at-all"
+
+    assert _standing_memory(config) == ""
+    assert _standing_memory_block(config) == ""
 
 
 def test_a_fault_costs_the_block_not_the_call(monkeypatch) -> None:
