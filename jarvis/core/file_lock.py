@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -36,6 +35,23 @@ log = logging.getLogger(__name__)
 #: outlast a normal write (milliseconds), short enough that a wedged holder
 #: surfaces as an error instead of a hang.
 DEFAULT_TIMEOUT_S = 10.0
+
+# Which locking call this interpreter HAS, resolved once at import. Never
+# branch on ``sys.platform`` per call: a test that fakes it (the winreg
+# skip-on-non-win32 cases) would send Windows down the POSIX path and crash on
+# an import that cannot succeed there. Capability, not platform name (AP-28).
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # not Windows
+    _msvcrt = None  # type: ignore[assignment]
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows
+    _fcntl = None  # type: ignore[assignment]
+
+if _msvcrt is None and _fcntl is None:  # pragma: no cover - no supported OS
+    raise ImportError("no file-locking call available: neither msvcrt nor fcntl")
 
 _POLL_S = 0.01
 
@@ -68,14 +84,10 @@ class FileLock:
         try:
             # msvcrt locks a byte RANGE, so the offset must be deterministic.
             os.lseek(fd, 0, os.SEEK_SET)
-            if sys.platform == "win32":
-                import msvcrt  # noqa: PLC0415 - Windows only
-
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            if _msvcrt is not None:
+                _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
             else:
-                import fcntl  # noqa: PLC0415 - POSIX only
-
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
         except OSError:  # held elsewhere: the caller retries or gives up
             os.close(fd)
             return False
@@ -106,14 +118,10 @@ class FileLock:
             return
         try:
             os.lseek(fd, 0, os.SEEK_SET)
-            if sys.platform == "win32":
-                import msvcrt  # noqa: PLC0415 - Windows only
-
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            if _msvcrt is not None:
+                _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl  # noqa: PLC0415 - POSIX only
-
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                _fcntl.flock(fd, _fcntl.LOCK_UN)
         except OSError as exc:  # closing the descriptor below releases it anyway
             log.debug("file lock: unlocking %s failed: %s", self.path, exc)
         finally:
