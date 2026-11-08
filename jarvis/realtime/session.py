@@ -2269,10 +2269,29 @@ def _identity_block(config: Any, *, compact: bool = False) -> str:
     try:
         from jarvis.brain.identity import identity_block
 
-        return identity_block(config, compact=compact)
+        identity = identity_block(config, compact=compact)
     except Exception:  # noqa: BLE001 — never break the voice session on an identity fault
         log.warning("realtime: identity block unavailable", exc_info=True)
         return ""
+    return identity + _standing_memory_block(config)
+
+
+def _standing_memory_block(config: Any) -> str:
+    """What is standingly known about the person (ADR-0044); ``""`` on a fault.
+
+    The typed brain has carried the identity card for a while; a realtime
+    session never did, so a standing fact about the person was missing from
+    exactly the surface where asking again is most jarring. Always the compact
+    budget here: a realtime session re-pays its instructions every turn.
+    """
+    try:
+        from jarvis.brain.identity_card import identity_card_block
+
+        block = identity_card_block(config, compact=True)
+    except Exception:  # noqa: BLE001 — ambient knowledge never breaks a session
+        log.warning("realtime: standing memory unavailable", exc_info=True)
+        return ""
+    return "\n\n" + block if block else ""
 
 
 def _session_instructions(

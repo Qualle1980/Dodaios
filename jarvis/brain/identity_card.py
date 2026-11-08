@@ -321,19 +321,40 @@ def distill_identity_card(
     *,
     profile_markdown: str = "",
     core_memory: Mapping[str, Any] | None = None,
+    vault_sections: Sequence[tuple[str, Sequence[str]]] = (),
     max_chars: int = MAX_IDENTITY_CARD_CHARS,
 ) -> str:
     """Deterministically distill the sources into a card of ``<= max_chars``.
 
     Pure function: same input, same output, no IO, no model call. Returns ""
     when the sources carry nothing — the caller then emits no block at all.
+
+    ``vault_sections`` is what the personal memory vault selected (ADR-0044),
+    as ``(section, sentences)``. It goes FIRST and shares the SAME budget as
+    the notes, so the standing block does not grow by a single character: a
+    vault memory carries its own provenance and can be superseded, pinned and
+    forgotten, while a line distilled out of a note can do none of that. As
+    the vault fills, the notes fade out of the card on their own.
     """
+    lines: list[str] = []
+    used = 0
+
+    for _section, sentences in vault_sections:
+        for sentence in sentences:
+            text = " ".join(str(sentence).split())
+            if not text:
+                continue
+            line = f"- {text}"
+            projected = used + (1 if lines else 0) + len(line)
+            if projected > max_chars:
+                break
+            used = projected
+            lines.append(line)
+
     collector = _Collector()
     _collect_profile(collector, profile_markdown or "")
     _collect_core_memory(collector, core_memory)
 
-    lines: list[str] = []
-    used = 0
     for label, entries in collector.groups():
         prefix = f"- {label}: "
         line = ""
@@ -477,6 +498,29 @@ def _core_memory_path(config: Any) -> Path | None:
         return None
 
 
+def collect_vault_sections(
+    config: Any = None, *, max_chars: int = MAX_IDENTITY_CARD_CHARS
+) -> list[tuple[str, list[str]]]:
+    """What the personal memory vault wants in the standing block (ADR-0044).
+
+    ``[]`` when the vault is switched off, empty or unavailable. Never raises:
+    an ambient block must not be the reason a turn fails.
+    """
+    try:
+        from jarvis.memory.vault import runtime  # noqa: PLC0415 - off the boot path (AP-26)
+
+        vault = runtime.active(config)
+        if vault is None:
+            return []
+        return [
+            (section, [m.text for m in memories])
+            for section, memories in vault.profile_selection(max_chars=max_chars)
+        ]
+    except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
+        log.debug("identity card: memory vault unavailable", exc_info=True)
+        return []
+
+
 def collect_sources(config: Any = None) -> tuple[str, Mapping[str, Any] | None, tuple[str, ...]]:
     """Read every available source once. Returns ``(profile, core, labels)``.
 
@@ -506,8 +550,20 @@ def collect_sources(config: Any = None) -> tuple[str, Mapping[str, Any] | None, 
     return profile, core, tuple(labels)
 
 
-def _hash_sources(profile: str, core: Mapping[str, Any] | None) -> str:
+def _hash_sources(
+    profile: str,
+    core: Mapping[str, Any] | None,
+    vault_sections: Sequence[tuple[str, Sequence[str]]] = (),
+) -> str:
     digest = hashlib.sha256()
+    # The vault is part of the identity now, so a changed memory has to move
+    # the hash. Without this the card would serve its cached text until a note
+    # happened to change too.
+    for section, sentences in vault_sections:
+        digest.update(str(section).encode("utf-8", "replace"))
+        for sentence in sentences:
+            digest.update(b"")
+            digest.update(str(sentence).encode("utf-8", "replace"))
     digest.update(profile.encode("utf-8", "replace"))
     digest.update(b"\x00")
     if core is not None:
@@ -612,7 +668,12 @@ class IdentityCardCache:
                 return self._card
             try:
                 profile, core, labels = collect_sources(self._config)
-                source_hash = _hash_sources(profile, core)
+                vault_sections = collect_vault_sections(
+                    self._config, max_chars=self._max_chars
+                )
+                if vault_sections:
+                    labels = (*labels, "memory-vault")
+                source_hash = _hash_sources(profile, core, vault_sections)
             except Exception:  # noqa: BLE001 — a prompt build must never break here
                 log.debug("identity card: source read failed", exc_info=True)
                 self._checked_at = now
@@ -633,6 +694,7 @@ class IdentityCardCache:
             text = distill_identity_card(
                 profile_markdown=profile,
                 core_memory=core,
+                vault_sections=vault_sections,
                 max_chars=self._max_chars,
             )
             card = IdentityCard(text=text, source_hash=source_hash, sources=labels)
@@ -657,55 +719,68 @@ class IdentityCardCache:
 # Process-wide accessor (what the prompt builder calls)
 # ---------------------------------------------------------------------------
 
-_default_cache: IdentityCardCache | None = None
+#: Smallest compact card. A voice surface pays its instructions again on every
+#: turn, because the provider holds the session context, so it gets half the
+#: budget - but never so little that the person's own name falls out.
+MIN_COMPACT_IDENTITY_CARD_CHARS = 400
+
+_caches: dict[bool, IdentityCardCache] = {}
 _default_lock = threading.Lock()
 
 
-def _cache_for(config: Any) -> IdentityCardCache:
-    global _default_cache
+def _budget(config: Any, *, compact: bool) -> int:
+    max_chars = MAX_IDENTITY_CARD_CHARS
+    raw_max = getattr(getattr(config, "wiki_context", None), "identity_card_max_chars", None)
+    try:
+        if raw_max is not None:
+            max_chars = max(0, min(int(raw_max), MAX_IDENTITY_CARD_CHARS))
+    except (TypeError, ValueError):
+        max_chars = MAX_IDENTITY_CARD_CHARS
+    if not compact:
+        return max_chars
+    return min(max_chars, max(MIN_COMPACT_IDENTITY_CARD_CHARS, max_chars // 2))
+
+
+def _cache_for(config: Any, *, compact: bool = False) -> IdentityCardCache:
     with _default_lock:
-        if _default_cache is None:
-            max_chars = MAX_IDENTITY_CARD_CHARS
-            raw_max = getattr(
-                getattr(config, "wiki_context", None), "identity_card_max_chars", None
-            )
-            try:
-                if raw_max is not None:
-                    max_chars = max(0, min(int(raw_max), MAX_IDENTITY_CARD_CHARS))
-            except (TypeError, ValueError):
-                max_chars = MAX_IDENTITY_CARD_CHARS
-            _default_cache = IdentityCardCache(config=config, max_chars=max_chars)
-        return _default_cache
+        cache = _caches.get(compact)
+        if cache is None:
+            cache = IdentityCardCache(config=config, max_chars=_budget(config, compact=compact))
+            _caches[compact] = cache
+        return cache
 
 
 def reset_identity_card_cache() -> None:
-    """Drop the process-wide cache (tests, and an in-app source switch)."""
-    global _default_cache
+    """Drop the process-wide caches (tests, and an in-app source switch)."""
     with _default_lock:
-        _default_cache = None
+        _caches.clear()
 
 
-def identity_card_text(config: Any = None) -> str:
+def identity_card_text(config: Any = None, *, compact: bool = False) -> str:
     """The current card text, or "" when there is nothing to say."""
     try:
-        return _cache_for(config).text()
+        return _cache_for(config, compact=compact).text()
     except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
         log.debug("identity card: unavailable", exc_info=True)
         return ""
 
 
-def identity_card_block(config: Any = None) -> str:
+def identity_card_block(config: Any = None, *, compact: bool = False) -> str:
     """The framed block for the cached system-prompt prefix, or "".
 
     Disabled by ``[wiki_context].identity_card = false``. Safe to call on every
     prompt build: after the first call it is a lock, a clock read and a string
     return.
+
+    ``compact`` halves the budget for a voice surface, which pays its
+    instructions again on every turn because the provider holds the session
+    context. Each budget has its own cache, so the two do not evict each other.
     """
     try:
         wiki_cfg = getattr(config, "wiki_context", None)
         if wiki_cfg is not None and not bool(getattr(wiki_cfg, "identity_card", True)):
             return ""
-        return _cache_for(config).block()
+        return _cache_for(config, compact=compact).block()
     except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
         log.debug("identity card: unavailable", exc_info=True)
         return ""

@@ -44,6 +44,23 @@ both trees.
    kinds, and cuts whole lines to a character budget. Episodes and anything
    marked `sensitive` stay out of the block and reach the model only through
    search.
+
+   That block is **not a new one.** `jarvis/brain/identity_card.py` already
+   held the hard character budget, the byte-stable caching that keeps a
+   provider prompt cache intact, and the "never read this out" contract. So
+   the vault became a third *source* of that card, placed first and sharing
+   the same budget: the prompt does not grow by a character, and a vault
+   memory outranks a line distilled from a note because only the memory can be
+   superseded, pinned and forgotten. As the vault fills, the notes fade out of
+   the card on their own — no flag day.
+
+   **Every surface carries it.** The typed brain, a live call and a realtime
+   session each build their own instruction stack, and only the first had the
+   card: a call could not use a standing fact about the person it was speaking
+   to. Both voice paths now append it at a **compact** budget — half the typed
+   one, floored so the person's own name cannot drop out — because a voice
+   session re-pays its instructions on every turn, the provider holding the
+   session context.
 6. **Portable.** A bundle is a manifest, one JSONL per kind, entities, the
    audit log, tombstones and `CHECKSUMS`, as a folder or a zip. Import applies
    tombstones first and skips anything already known, so importing the same
