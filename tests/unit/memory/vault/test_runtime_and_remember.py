@@ -15,6 +15,9 @@ import pytest
 
 from jarvis.core.config import JarvisConfig
 from jarvis.memory.vault import MemoryVault, runtime
+# Bound at import, before the autouse `_memory_vault_in_tmp` fixture replaces
+# the module attribute: this is the one test that checks the real resolution.
+from jarvis.memory.vault.runtime import vault_path as real_vault_path
 from jarvis.plugins.tool.remember import RememberTool
 
 
@@ -89,7 +92,7 @@ def test_the_path_follows_the_configured_data_dir(tmp_path) -> None:
     config = JarvisConfig()
     config.memory.data_dir = str(tmp_path)
 
-    assert runtime.vault_path(config) == (tmp_path / "memory" / "vault.db").resolve()
+    assert real_vault_path(config) == (tmp_path / "memory" / "vault.db").resolve()
 
 
 def test_closing_releases_the_handle_and_the_next_use_reopens_it(tmp_path) -> None:

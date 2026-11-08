@@ -264,6 +264,27 @@ def _pricing_feed_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
+def _memory_vault_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep the personal memory vault off the developer's real one.
+
+    Anything that writes a memory - the ``remember`` tool, the candidate filer -
+    asks :func:`jarvis.memory.vault.runtime.active` for the process-wide vault,
+    which opens ``<data_dir>/memory/vault.db`` on first use. With the default
+    ``[memory] data_dir`` that is a path inside the checkout, and on a real
+    install it is the person's own memory. Pin the path per session and start
+    every test with no open handle, so a test that does write one cannot be
+    read by the next.
+    """
+    from jarvis.memory.vault import runtime
+
+    root = tmp_path_factory.mktemp("memory-vault")
+    monkeypatch.setattr(runtime, "vault_path", lambda _config: root / "vault.db")
+    runtime.close_active()
+    yield
+    runtime.close_active()
+
+
+@pytest.fixture(autouse=True)
 def _background_policy_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
     """Keep the background billing policy off the developer's real login state.
 

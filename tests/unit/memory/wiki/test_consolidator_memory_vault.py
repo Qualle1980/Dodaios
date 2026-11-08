@@ -14,13 +14,12 @@ import pytest
 from jarvis.memory.vault import MemoryVault
 from jarvis.memory.wiki.journal import CandidateFact
 
-from .test_consolidator import (  # noqa: F401 - `stack` is used as a fixture
+from .test_consolidator import (
     LENA_BODY,
     FakeBrain,
     _consolidator,
     _judge_json,
     _write_aged,
-    stack,
 )
 
 

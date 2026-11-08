@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import pytest_asyncio
 
 from jarvis.core.config import (
     BrainConfig,
@@ -30,14 +29,8 @@ from jarvis.core.config import (
     WikiMemoryConfig,
 )
 from jarvis.core.protocols import BrainDelta, BrainRequest
-from jarvis.memory.wiki.atomic_writer import AtomicWriter
 from jarvis.memory.wiki.consolidator import Consolidator
-from jarvis.memory.wiki.curator import WikiCurator
-from jarvis.memory.wiki.curator_llm import WikiCuratorLLM
-from jarvis.memory.wiki.journal import CandidateFact, CandidateJournal
-from jarvis.memory.wiki.log_writer import LogWriter
-from jarvis.memory.wiki.page import MarkdownPageRepository
-from jarvis.memory.wiki.vault_index import VaultIndex
+from jarvis.memory.wiki.journal import CandidateFact
 
 LENA_BODY = (
     "---\n"
@@ -215,37 +208,6 @@ def _no_alias_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "jarvis.memory.wiki.consolidator.ensure_page_aliases", _passthrough
     )
-
-
-@pytest_asyncio.fixture
-async def stack(tmp_path: Path):
-    vault_root = tmp_path / "vault"
-    for sub in ("entities", "concepts", "projects", "sessions", "_archive", "attachments"):
-        (vault_root / sub).mkdir(parents=True)
-    (vault_root / "schema.md").write_text("# stub schema\n", encoding="utf-8")
-    (vault_root / "index.md").write_text("# Index\n", encoding="utf-8")
-    (vault_root / "log.md").write_text("# Wiki Log\n", encoding="utf-8")
-    (vault_root / "entities" / "ruben.md").write_text(
-        "---\ntype: entity\nslug: ruben\n---\n\n# Ruben\n\n## Summary\n\nThe user.\n",
-        encoding="utf-8",
-    )
-
-    repo = MarkdownPageRepository()
-    vault = VaultIndex(repo=repo)
-    await vault.scan(vault_root)
-    writer = AtomicWriter(vault_root=vault_root, backup_dir=tmp_path / "backups")
-    log_writer = LogWriter(log_path=vault_root / "log.md")
-    curator = WikiCurator(
-        repo=repo,
-        vault=vault,
-        writer=writer,
-        llm=WikiCuratorLLM.__new__(WikiCuratorLLM),
-        log_writer=log_writer,
-        vault_root=vault_root,
-    )
-    journal = CandidateJournal(tmp_path / "jarvis.db")
-    yield vault_root, curator, journal
-    journal.close()
 
 
 def _consolidator(
