@@ -38,7 +38,7 @@ import datetime as _dt
 import logging
 import re
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -210,6 +210,11 @@ class Consolidator:
         batch_limit: int = 8,
         k_nearest: int = 4,
         on_run_complete: Any = None,
+        # Where a landed candidate is also filed as a memory (ADR-0044).
+        # Injected rather than looked up, so a caller - a test above all -
+        # cannot be surprised by a write to the real `data/memory/vault.db`.
+        # ``None`` means "ask the process-wide runtime".
+        vault_provider: Callable[[], Any] | None = None,
     ) -> None:
         self._root_cfg = config
         self._curator_cfg = config.memory.wiki.curator
@@ -236,6 +241,7 @@ class Consolidator:
         # at the start of every judge/execute cycle so no cached body can
         # outlive a write. ``None`` records "unreadable/absent".
         self._page_body_cache: dict[str, str | None] = {}
+        self._vault_provider = vault_provider
 
     # ------------------------------------------------------------------
     # public API
@@ -405,6 +411,46 @@ class Consolidator:
             decision=decision,  # type: ignore[arg-type]
             target_path=target_path,
         )
+
+    async def _file_in_vault(self, row: JournalRow, decision: str) -> None:
+        """Also file a landed candidate in the memory vault (ADR-0044, chunk 2).
+
+        Best effort by design: the wiki write is already durable and the
+        journal row already closed, so a vault fault must not undo either.
+        It is logged rather than swallowed (AP-30), and the next pass over the
+        same conversation proposes the fact again.
+        """
+        try:
+            from jarvis.memory.vault import candidates  # noqa: PLC0415 - off the import floor
+
+            vault = await asyncio.to_thread(self._open_vault)
+            if vault is None:
+                return
+            result = await asyncio.to_thread(candidates.file_candidate, vault, row, decision)
+        except Exception:  # noqa: BLE001 - a durable wiki write must not be undone
+            log.warning(
+                "Consolidator: could not file candidate %d in the memory vault",
+                row.id,
+                exc_info=True,
+            )
+            return
+        if result.wrote:
+            telemetry.inc("memory_vault_filed")
+        elif result.action == "deferred":
+            telemetry.inc("memory_vault_deferred")
+            log.debug(
+                "memory vault: candidate %d not filed - %s", row.id, result.reason
+            )
+        else:
+            telemetry.inc(f"memory_vault_{result.action}")
+
+    def _open_vault(self) -> Any:
+        """The vault to file into: the injected one, else the process-wide one."""
+        if self._vault_provider is not None:
+            return self._vault_provider()
+        from jarvis.memory.vault import runtime  # noqa: PLC0415 - off the import floor
+
+        return runtime.active(self._root_cfg)
 
     def _in_rejection_backoff(self, row_id: int) -> bool:
         """True while a judge-rejected row waits out its escalating backoff."""
@@ -950,6 +996,11 @@ class Consolidator:
                     target_path=target,
                 )
                 telemetry.inc(f"wiki_consolidator_{decision}")
+                # The same judged candidate also goes to the memory vault
+                # (ADR-0044) - here, where the page write has landed, so the
+                # secret guard and the validation have already passed. No extra
+                # model call: the vault files the candidate the judge produced.
+                await self._file_in_vault(by_id[cid], decision)
             elif required & rejected_rel:
                 await self._mark([cid], status="rejected", target_path=target)
                 log.warning(

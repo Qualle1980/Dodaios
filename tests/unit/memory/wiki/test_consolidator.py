@@ -257,6 +257,11 @@ def _consolidator(
 ) -> Consolidator:
     vault_root, curator, journal = stack_tuple
     registry = kwargs.pop("registry", None)
+    # No memory vault unless a test asks for one: the default provider would
+    # open the real `data/memory/vault.db`, which on a developer's machine is
+    # their own memory. `test_consolidator_memory_vault.py` passes a temporary
+    # one and checks what gets filed.
+    kwargs.setdefault("vault_provider", lambda: None)
     return Consolidator(
         config=config or _config(),
         journal=journal,

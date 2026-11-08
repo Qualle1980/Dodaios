@@ -13,10 +13,13 @@ Risk tier: safe — only writes local files.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from jarvis.core.config import DATA_DIR
 from jarvis.core.protocols import ExecutionContext, ToolResult
+
+log = logging.getLogger(__name__)
 
 
 class RememberTool:
@@ -52,6 +55,14 @@ class RememberTool:
         if not fact:
             return ToolResult(success=False, output=None, error="fact is missing")
         said = str(getattr(ctx, "user_utterance", "") or "")
+        # The vault is written first and the notebook stays the live path: the
+        # vault is not read by any prompt until ADR-0044 chunk 3, so switching
+        # now would leave the person's "remember that ..." with no effect for a
+        # step. A memory the vault refuses (a secret) must still not reach the
+        # notebook, so a refusal ends the call here.
+        refusal = await self._also_in_vault(fact, said)
+        if refusal is not None:
+            return refusal
         try:
             change = await asyncio.to_thread(remember_explicitly, fact, evidence=said)
         except LookupError:  # no MEMORY.md notebook: use the legacy store
@@ -61,6 +72,42 @@ class RememberTool:
         if change is None:
             return ToolResult(success=True, output=f"Already in MEMORY.md: {fact}")
         return ToolResult(success=True, output=f"Saved to MEMORY.md: {fact}")
+
+    @staticmethod
+    async def _also_in_vault(fact: str, said: str) -> ToolResult | None:
+        """Write the fact to the memory vault too (ADR-0044).
+
+        Returns a failed :class:`ToolResult` when the vault REFUSED the fact -
+        that only happens for something shaped like a credential (AP-2), and
+        such a fact must not land in the notebook either. ``None`` means the
+        caller carries on: stored, already known, or the vault is switched off
+        or unavailable.
+        """
+        try:
+            from jarvis.core import config as cfg  # noqa: PLC0415 - off the import floor
+            from jarvis.memory.vault import runtime  # noqa: PLC0415
+            from jarvis.memory.vault.candidates import vault_kind  # noqa: PLC0415
+
+            vault = await asyncio.to_thread(runtime.active, cfg.load_config())
+            if vault is None:
+                return None
+            result = await asyncio.to_thread(
+                vault.remember,
+                fact,
+                vault_kind("other"),
+                origin="user",
+                source={"via": "remember tool", "evidence": said[:500]},
+            )
+        except Exception:  # noqa: BLE001 - the notebook is still the live path
+            log.warning("remember: could not also write to the memory vault", exc_info=True)
+            return None
+        if result.action == "refused":
+            return ToolResult(
+                success=False,
+                output=None,
+                error="not saved: that looks like a credential, and credentials are never stored",
+            )
+        return None
 
     @staticmethod
     async def _legacy(fact: str, category: str) -> ToolResult:
