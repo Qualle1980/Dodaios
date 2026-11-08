@@ -61,6 +61,23 @@ both trees.
    one, floored so the person's own name cannot drop out — because a voice
    session re-pays its instructions on every turn, the provider holding the
    session context.
+
+   **The per-message half is the typed path only**, and that is a decision, not
+   an omission. It rides the same suffix as the wiki snippets, so
+   cache-optimized mode moves both onto the user message and the cached system
+   prompt stays byte-stable. A live session has no per-turn channel for it at
+   all, and a realtime session re-sends its whole instruction block every turn,
+   where a block that changes per message is exactly what defeats a
+   prefix-caching server. Both already have the standing card and the
+   `memory-search` tool, so a call can reach the same memories — on demand,
+   paid for once, instead of on every turn. Revisit it with a measurement, not
+   a guess.
+
+   Two rules make the per-message block worth its tokens: it never repeats what
+   the standing card already holds, so a memory is not paid for twice in one
+   prompt, and a hit must score within a share of the best hit — keyword search
+   always returns something, and "how is the weather" must not drag in whatever
+   shares a word with it.
 6. **Portable.** A bundle is a manifest, one JSONL per kind, entities, the
    audit log, tombstones and `CHECKSUMS`, as a folder or a zip. Import applies
    tombstones first and skips anything already known, so importing the same
