@@ -43,7 +43,28 @@ def _identity(config: Any) -> str:
     except Exception:  # noqa: BLE001 — never block a call on the identity block
         log.warning("live voice: identity block unavailable", exc_info=True)
         return ""
-    return identity + _instructions(config) + _memory()
+    return identity + _instructions(config) + _memory() + _standing_memory(config)
+
+
+def _standing_memory(config: Any) -> str:
+    """What is standingly known about the person (ADR-0044); ``""`` on a fault.
+
+    The typed brain has carried this block since the identity card existed; a
+    live call never did, so the model could not use a standing fact about the
+    person it was speaking to, and the person heard it ask for something it
+    already knew. Same class of gap as the vault search tool before #123.
+
+    Compact: a live session pays its instructions again on every turn because
+    the provider holds the context, so the voice budget is half the typed one.
+    """
+    try:
+        from jarvis.brain.identity_card import identity_card_block
+
+        block = identity_card_block(config, compact=True)
+    except Exception:  # noqa: BLE001 — never block a call on ambient knowledge
+        log.warning("live voice: standing memory unavailable", exc_info=True)
+        return ""
+    return "\n\n" + block if block else ""
 
 
 #: Same cap as the realtime engines' preferences block: a pathological file
