@@ -505,3 +505,7 @@ scripts/figures/cache/
 # Launch-video renders from the /brag skill (thousands of frames).
 brag-output/
 eval-results/
+
+# Cross-process write locks beside the files they guard (jarvis/core/file_lock.py).
+jarvis.toml.lock
+scripts/config-soll.json.lock

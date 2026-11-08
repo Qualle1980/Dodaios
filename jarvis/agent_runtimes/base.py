@@ -35,6 +35,7 @@ from typing import Any, Final, Protocol
 
 from jarvis.agent_runtimes.acp import McpServer
 from jarvis.agent_runtimes.model_map import ModelRoute
+from jarvis.core.file_lock import FileLock
 
 log = logging.getLogger(__name__)
 
@@ -288,63 +289,24 @@ class RuntimeGate:
             self._notify()
 
 
-class HomeFileLock:
-    """A cross-process lock on one runtime folder (``msvcrt`` / ``flock``).
+class HomeFileLock(FileLock):
+    """A cross-process lock on one runtime folder.
 
     Within one app the asyncio slot already serialises turns; this keeps a
     second process (a stale app that did not exit, a script) from running the
     same agent folder at the same time. The OS drops it when the holder dies.
+
+    The locking itself is :class:`jarvis.core.file_lock.FileLock`, shared with
+    the config writers.
     """
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._fd: int | None = None
+    async def acquire(self, timeout_s: float) -> None:  # type: ignore[override]
+        """Wait for the lock without blocking the event loop.
 
-    def try_acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            if sys.platform == "win32":
-                import msvcrt
-
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:  # held elsewhere: the caller retries or gives up
-            os.close(fd)
-            return False
-        self._fd = fd
-        return True
-
-    async def acquire(self, timeout_s: float) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
-        while not self.try_acquire():
-            if loop.time() >= deadline:
-                raise TimeoutError
-            await asyncio.sleep(0.25)
-
-    def release(self) -> None:
-        fd, self._fd = self._fd, None
-        if fd is None:
-            return
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            if sys.platform == "win32":
-                import msvcrt
-
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError as exc:  # closing the descriptor below releases it anyway
-            log.debug("agent runtimes: unlocking %s failed: %s", self.path, exc)
-        finally:
-            os.close(fd)
+        Keeps this class's historical async signature; the synchronous wait is
+        :meth:`jarvis.core.file_lock.FileLock.acquire`.
+        """
+        await self.acquire_async(timeout_s)
 
 
 class TurnSlots:

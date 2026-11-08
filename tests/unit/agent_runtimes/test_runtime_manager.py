@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -130,6 +131,20 @@ async def _finish(name: str) -> manager.RuntimeJob:
     raise AssertionError("job did not finish")
 
 
+async def _settled(predicate: Callable[[], bool], what: str) -> None:
+    """Wait for work the job runs AFTER leaving ``running``.
+
+    ``_run`` refreshes the PATH and re-detects once the state is already
+    ``done``, so a test that asserts on the refresh right after :func:`_finish`
+    is racing those two awaits.
+    """
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{what} did not happen after the job finished")
+
+
 async def test_an_install_runs_the_official_command_and_logs_it(fakes):
     started = await manager.start("hermes", "install")
     assert started.state == "running"
@@ -137,7 +152,7 @@ async def test_an_install_runs_the_official_command_and_logs_it(fakes):
     done = await _finish("hermes")
     assert done.state == "done" and done.exit_code == 0
     assert any("installing" in line for line in done.to_dict()["log_tail"])
-    assert fakes["hermes"].refreshed >= 1
+    await _settled(lambda: fakes["hermes"].refreshed >= 1, "the post-install refresh")
 
 
 async def test_an_update_stops_the_runtime_first_and_reports_a_failure(fakes):
