@@ -62,6 +62,13 @@ _REQUEST_TEXT_CHARS = 1200
 # is not given a tool it was told to use says it does not exist (live
 # 2026-10-14, a busy catalog sorted show_on_screen past the budget).
 _PRIORITY_TOOLS = frozenset({"find-app-action", "run-app-action", *NAMED_TOOLS})
+# The reads a question about the user needs go ahead of even the app-steering
+# group. Live 2026-11-09 the group's two workspace tools weigh about 11 KB
+# (workspace-orchestrate alone 8.6 KB), so behind them the 24 KB budget ran
+# out before the memory tools and the model could not look anything up.
+_LOOKUP_TOOLS = frozenset(
+    {"memory-search", "memory-topics", "memory-history", "wiki-recall", "remember"}
+)
 # Declared under its canonical name in every mode (see ``declarations``).
 _DIRECT_TOOLS = frozenset({"computer", "take_appshot"})
 # One screen, one mouse: these never run side by side, and a result that
@@ -421,6 +428,7 @@ class LiveTools:
         ordered = sorted(
             catalog,
             key=lambda d: (
+                canonical(d.name).replace("_", "-") not in _LOOKUP_TOOLS,
                 d.name not in _PRIORITY_TOOLS,
                 rank.get(canonical(d.name), unranked),
                 d.name,
