@@ -16,6 +16,12 @@ What this does NOT do is guess. ``update`` and ``invalidate`` name a wiki
 page-shaped judge never saw a memory id. Picking the nearest one would silently
 close a fact that is still true, so those candidates are reported as deferred
 and nothing is written. Letting the judge see memory ids is its own step.
+
+For the same reason ``noop`` is NOT a verdict about the vault. It means the
+page needs no change, which the page's own contents decided; the vault is a
+different store and answers for itself, by content hash. Reading the page's
+verdict as the vault's is what left the vault empty of everything the user
+said on 2026-11-08.
 """
 from __future__ import annotations
 
@@ -68,6 +74,22 @@ FALLBACK_ORIGIN = "inferred"
 #: Decisions that name a wiki page rather than a memory, so the vault cannot
 #: act on them without guessing which memory is meant.
 NEEDS_MEMORY_ID = ("update", "invalidate")
+
+#: Decisions whose fact is offered to the vault.
+#:
+#: ``add`` is obvious. ``noop`` is here because the judge answers about the
+#: wiki PAGE -- "this page needs no change" -- and that verdict says nothing
+#: about a different store. Live 2026-11-08 proved the gap: of fifteen
+#: candidates, nine were judged ``noop``, among them every Xbox friend the
+#: user had just named. The page already listed them, so the judge kept
+#: nothing; the vault held none of them, and minutes later the user asked who
+#: his Xbox friends were and was told there was no information.
+#:
+#: Offering a noop costs no model call and cannot overwrite anything: the
+#: store dedupes by content hash and answers ``existing``, keeps a tombstoned
+#: fact closed unless the user themselves stated it again, and refuses
+#: anything shaped like a secret. The vault decides for the vault.
+_OFFER_TO_VAULT = ("add", "noop")
 
 #: Longest excerpt kept as the evidence for a memory.
 MAX_EVIDENCE_CHARS = 500
@@ -129,15 +151,17 @@ def source_of(candidate: Candidate) -> dict[str, Any]:
 
 
 def file_candidate(vault: Any, candidate: Candidate, decision: str) -> FilingResult:
-    """File one judged candidate. Writes only for ``add``; never guesses.
+    """File one judged candidate; never guesses.
+
+    Writes for ``add`` and for ``noop``: see :data:`_OFFER_TO_VAULT`. The
+    judge speaks for the wiki page, and a page that needs no change is not a
+    vault that already knows.
 
     ``vault`` is a :class:`~jarvis.memory.vault.store.MemoryVault`. Raises
     nothing the caller has to handle: a store error is the caller's to log, and
     everything this function decides against comes back as a result.
     """
     verdict = (decision or "").strip().lower()
-    if verdict == "noop":
-        return FilingResult("deferred", reason="the judge kept nothing")
     if verdict in NEEDS_MEMORY_ID:
         # Deliberate: see the module docstring. Nothing is written rather than
         # closing a memory the judge never saw.
@@ -145,7 +169,7 @@ def file_candidate(vault: Any, candidate: Candidate, decision: str) -> FilingRes
             "deferred",
             reason=f"{verdict} names a page, not a memory; the judge saw no memory ids",
         )
-    if verdict != "add":
+    if verdict not in _OFFER_TO_VAULT:
         return FilingResult("deferred", reason=f"unknown decision {verdict!r}")
 
     fact = " ".join((candidate.fact or "").split())

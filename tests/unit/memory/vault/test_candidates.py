@@ -175,11 +175,28 @@ def test_a_decision_that_names_a_page_closes_nothing(vault, decision: str) -> No
     assert vault.stats()["current"] == 1
 
 
-def test_a_noop_writes_nothing(vault) -> None:
+def test_a_noop_is_offered_to_the_vault_because_it_judged_the_page(vault) -> None:
+    """``noop`` means the wiki PAGE needs no change, not that the vault knows.
+
+    Live 2026-11-08: nine of fifteen candidates were judged noop, among them
+    every Xbox friend the user had just named. The page already listed them,
+    so the judge kept nothing. The vault held none of them, and minutes later
+    the user asked who his Xbox friends were and was told there was no
+    information.
+    """
     result = file_candidate(vault, FakeCandidate(), "noop")
 
-    assert result.action == "deferred"
-    assert vault.stats()["current"] == 0
+    assert result.action == "added"
+    assert vault.stats()["current"] == 1
+
+
+def test_the_vault_still_decides_for_itself_on_a_noop(vault) -> None:
+    """Offering it twice cannot duplicate it: the store dedupes by hash."""
+    assert file_candidate(vault, FakeCandidate(), "noop").action == "added"
+    again = file_candidate(vault, FakeCandidate(), "noop")
+
+    assert again.action == "existing"
+    assert vault.stats()["current"] == 1
 
 
 def test_an_unknown_decision_writes_nothing(vault) -> None:

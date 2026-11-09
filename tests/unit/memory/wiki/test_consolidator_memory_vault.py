@@ -202,3 +202,63 @@ async def test_a_failing_vault_leaves_the_page_and_the_journal_alone(stack) -> N
     assert label == "journal-batch:1"
     assert (vault_root / "entities" / "lena.md").is_file()
     assert journal.pending() == [], "the row stays closed; the page is already written"
+
+
+@pytest.mark.asyncio
+async def test_a_noop_still_reaches_the_memory_vault(stack, memory_vault) -> None:
+    """The judge speaks for the page; the vault answers for itself.
+
+    Live 2026-11-08, from the journal: of fifteen candidates nine closed as
+    ``noop``, among them "Marcel Dal, genannt Dallas, gehoert zur
+    Xbox-Freundesgruppe des Nutzers" and six more about the same group. The
+    wiki page already listed them, so the judge kept nothing and the noop
+    branch closed the row and moved on. The memory vault held none of them --
+    every row in it had come from the one-time legacy import -- and three
+    minutes later the user asked who his Xbox friends were and was told there
+    was no information.
+
+    So a noop must still offer the fact to the vault. No page is written for
+    it, which is the one thing this test pins besides the memory.
+    """
+    vault_root, _curator, journal = stack
+    cid = _queue(journal, "Lena plays on the Xbox with Marcel.")
+    brain = FakeBrain(
+        [
+            _judge_json(
+                [
+                    {
+                        "candidate_id": cid,
+                        "decision": "noop",
+                        "reason": "the page already says this",
+                    }
+                ]
+            )
+        ]
+    )
+    consolidator = _consolidator(stack, brain, vault_provider=lambda: memory_vault)
+
+    await consolidator.run_once()
+
+    assert not (vault_root / "entities" / "lena.md").exists(), (
+        "a noop must not write a page"
+    )
+    assert [m.text for m in memory_vault.list()] == ["Lena plays on the Xbox with Marcel."]
+    assert journal.pending() == [], "the journal row is still closed"
+
+
+@pytest.mark.asyncio
+async def test_a_noop_whose_fact_the_vault_already_holds_adds_nothing(
+    stack, memory_vault
+) -> None:
+    """The vault dedupes by content hash, so a repeat cannot pile up."""
+    vault_root, _curator, journal = stack
+    memory_vault.remember("Lena plays on the Xbox with Marcel.", "relationship")
+    cid = _queue(journal, "Lena plays on the Xbox with Marcel.")
+    brain = FakeBrain(
+        [_judge_json([{"candidate_id": cid, "decision": "noop", "reason": "known"}])]
+    )
+    consolidator = _consolidator(stack, brain, vault_provider=lambda: memory_vault)
+
+    await consolidator.run_once()
+
+    assert len(memory_vault.list()) == 1
