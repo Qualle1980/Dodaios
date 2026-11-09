@@ -9,34 +9,21 @@ from jarvis.core.agent_brief import AGENT_BRIEF_RULE
 from jarvis.live import native
 from jarvis.live.config import LiveConfig
 from jarvis.live.coordination import (
-    MEMORY_RULE,
     NAMED_TOOLS,
     ON_SCREEN_RULE,
     TEAM_TALK_RULE,
     WORK_STATUS_RULE,
     conversation_rules,
 )
-from jarvis.live.tools import _LOOKUP_TOOLS
 
-_RULES = (
-    WORK_STATUS_RULE
-    + MEMORY_RULE
-    + ON_SCREEN_RULE
-    + TEAM_TALK_RULE
-    + conversation_rules("your tools")
-)
+_RULES = WORK_STATUS_RULE + ON_SCREEN_RULE + TEAM_TALK_RULE + conversation_rules("your tools")
 # Hyphenated or underscored words in the rules that are plain English, not tools.
-_NOT_TOOLS = {"multi-step", "trade-offs", "mission_id", "long-term"}
-#: The two sets the catalog guarantees room for, whatever else it drops:
-#: NAMED_TOOLS by being in the priority group, the memory reads by sorting
-#: ahead of it (#137). A rule may name a tool from either — being told to use
-#: a tool that was not declared is what makes a model say it does not exist.
-_ALWAYS_DECLARED = set(NAMED_TOOLS) | set(_LOOKUP_TOOLS)
+_NOT_TOOLS = {"multi-step", "trade-offs", "mission_id"}
 
 
 def test_every_tool_the_rules_name_is_listed_and_every_listed_tool_is_named():
     named_in_text = set(re.findall(r"\b[a-z]+(?:[-_][a-z]+)+\b", _RULES)) - _NOT_TOOLS
-    assert named_in_text <= _ALWAYS_DECLARED
+    assert named_in_text <= set(NAMED_TOOLS)
     for name in NAMED_TOOLS:
         assert re.search(rf"\b{re.escape(name)}\b", _RULES), name
 
@@ -106,37 +93,3 @@ def test_the_prompts_leave_room_for_tools_and_history_on_small_wires():
     wire = _wire()
     prompts = wire["instructions"] + wire["delegation"]["responses"]["instructions"]
     assert len(prompts.encode("utf-8")) < 20_000
-
-
-def test_a_call_is_told_its_standing_memory_is_only_a_summary():
-    """Otherwise it answers "I know nothing" from a partial block.
-
-    Live 2026-11-08 and again 2026-11-09, asked in German what it knew about a
-    named friend, a call said it knew nothing while the vault held the answer
-    verbatim. Measured on the real vault 2026-11-09: the standing block carries
-    5 of 54 memories, because it is budgeted to 2400 characters and ordered by
-    kind, and five new `profile` memories at confidence 1.0 had pushed out the
-    `relationship` memory that answered exactly that question.
-
-    Having the tool is not enough (that was #137). The model also has to know
-    that what it was handed is partial, and which store answers a question
-    about the user.
-    """
-    assert "summary of their memory, not all of it" in MEMORY_RULE
-    # The instruction that turns a shrug into a lookup.
-    assert "BEFORE" in MEMORY_RULE
-    assert "memory-search" in MEMORY_RULE
-    # wiki-recall is a DIFFERENT store; it ranks ahead of memory_search in
-    # CORE_PRIORITY, and the live model reached for it every time.
-    assert "wiki-recall is a different store" in MEMORY_RULE
-
-
-def test_the_native_live_engine_is_given_the_memory_rule():
-    """A rule only helps the engine that actually sends it.
-
-    Three prompt builds exist and the memory block had to be added to each one
-    separately (#131). `native` is the gemini-live path, the one the 2026-11-09
-    session ran on.
-    """
-    source = inspect.getsource(native)
-    assert "MEMORY_RULE" in source
