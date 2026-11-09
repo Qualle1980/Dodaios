@@ -51,6 +51,15 @@ Look in this order, cheapest first:
 same gap, nothing to adopt" is a finding that justifies building; silence
 about it is not. State in one line what you took, adapted, or why nothing fit.
 
+**Search the FAILURE, not only the feature.** Before changing something, ask
+who has had this bug in this code before and how it was solved — in your own
+agent memory as well as the repo. On 2026-11-09 three tools with a required
+`query` field were declared to the live call and the model sent `args: {}` to
+one of them 177 times. That exact shape was recorded on 2026-11-07, when
+`search_web` took a list in the same required field and the tool stripped it;
+the note was linked from the acting agent's own memory index and never opened.
+The search that would have found it took seconds — run it before, not after.
+
 **Adapting is not copying.** Module layout, config keys, test helpers and
 names differ between trees. A file pasted in unchanged is worse than none.
 Add attribution only where the licence requires it (an MIT/Apache notice on a
@@ -164,6 +173,17 @@ attribution notices and factual dependency, integration and compatibility
 references; this rule never authorizes concealing code provenance. Competitor
 research stays out of the repo. `scripts/ci/check_design_references.py` checks
 staged lines at commit time and the whole tree in CI.
+
+**A new capability is RUN before it lands. Mandatory, not a tier.** Anything
+that changes what a model *does* — a tool declared to a surface, a prompt rule,
+a schema a model must fill — is exercised against a real turn before the PR
+merges. Passing unit tests are not that check. On 2026-11-09 two PRs landed
+with green tests that asserted exactly which tools a live call is given; the
+model then called one of them with `args: {}` 177 times at 3-4 calls a second,
+never spoke, and the app was unusable until both were reverted. No test in
+either PR executes a call, so none of them could see a loop. If the turn cannot
+be run, the PR stays a draft and says so. Never merge "correct by test" into
+the user's running app.
 
 **Proportionality.** You own the validation plan: the smallest set of checks
 that can detect a plausible regression from the diff. State the scope, what
