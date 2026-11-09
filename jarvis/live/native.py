@@ -19,7 +19,6 @@ from jarvis.core.runtime_refs import get_supervisor_tool_gateway
 from jarvis.core.tool_budget import VOICE_TOOL_BUDGET_S
 from jarvis.cu.direct import COMPUTER_CONTROL_RULES
 from jarvis.live.coordination import (
-    MEMORY_RULE,
     NAMED_TOOLS,
     ON_SCREEN_RULE,
     TEAM_TALK_RULE,
@@ -284,7 +283,6 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                     "Explicit references override the visible workspace; ask on ambiguity. "
                     "Do not switch the UI to address another workspace. Reuse request_id on "
                     "retries and never replay uncertain delivery. "
-                    + MEMORY_RULE
                     + WORK_STATUS_RULE
                     + ON_SCREEN_RULE
                     + TEAM_TALK_RULE
