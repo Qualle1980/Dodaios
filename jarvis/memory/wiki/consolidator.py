@@ -13,7 +13,9 @@ Decision semantics (vocab: ``constants.CURATOR_DECISIONS``):
 - ``add``      → create a new page (entities/concepts/projects).
 - ``update``   → merge the fact into an existing page IN PLACE; the
                  prompt requires every existing fact/section to survive.
-- ``noop``     → the vault already knows this; journal row closed.
+- ``noop``     → this wiki page needs no change; journal row closed. NOT a
+                 verdict about the memory vault, which is offered the fact
+                 anyway and decides by content hash (ADR-0044).
 - ``invalidate`` → the fact contradicts an existing page: the superseded
                  page gets frontmatter ``valid_until`` + ``superseded-by``
                  (set mechanically here, never by the LLM) — invalidate,
@@ -977,6 +979,21 @@ class Consolidator:
             if cid in noop_ids:
                 await self._mark([cid], status="consolidated", decision="noop")
                 telemetry.inc("wiki_consolidator_noop")
+                # A noop is the judge's verdict about the PAGE: it needs no
+                # change. The memory vault is a different store and answers
+                # for itself, so the fact is offered to it here too. Live
+                # 2026-11-08: nine of fifteen candidates were noop, among them
+                # every Xbox friend the user had just named, and this
+                # ``continue`` is where each of them stopped -- minutes before
+                # he asked who they were and was told there was no
+                # information.
+                #
+                # Unlike the branch below, no page write has landed, so the
+                # page validation has NOT run for this fact. The vault's own
+                # secret guard still has (``MemoryVault.remember`` refuses
+                # anything shaped like a credential, AP-2), and it dedupes by
+                # content hash, so this cannot duplicate or overwrite.
+                await self._file_in_vault(by_id[cid], "noop")
                 continue
             plan = write_plan.get(cid)
             if plan is None:
