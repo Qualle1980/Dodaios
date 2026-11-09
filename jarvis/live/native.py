@@ -427,10 +427,18 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 shown, total, budget, self.active_provider,
             )
             return
+        # "nothing is behind discover_tools" was FALSE, and it cost two days.
+        # Both numbers here come from the SAME list -- what ``declarations()``
+        # already returned -- so with no budget of our own they are always
+        # equal and say nothing about the catalog. Underneath, the catalog's
+        # own byte budget had silently dropped 24 of 47 tools, and the line
+        # read as proof that it had not. The catalog reports its own trim now
+        # (``LiveTools._report_catalog_surface``); this line no longer claims
+        # anything about it.
         log.info(
-            "Native voice declares %d of %d tools with no declaration budget "
-            "for %s; nothing is behind discover_tools",
-            shown, total, self.active_provider,
+            "Native voice declares all %d tools it was given, with no "
+            "declaration budget of its own for %s",
+            shown, self.active_provider,
         )
 
     async def _refuse_unless_duplex_ready(self) -> None:

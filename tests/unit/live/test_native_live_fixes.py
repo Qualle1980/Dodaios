@@ -8,8 +8,8 @@ engine, so every behaviour here is pinned on both connection shapes from
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -792,9 +792,17 @@ class TestTheLiveToolSurfaceIsAlwaysReported:
         with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
             fitted = session._tool_declarations()
         assert len(fitted) == 7
-        assert any("7 of 7" in record.getMessage() for record in caplog.records), (
+        # Not "7 of 7" any more. Both numbers came from the same list, so the
+        # pair was equal by construction and said nothing about the catalog --
+        # while the catalog's own byte budget had dropped half of it. The
+        # count is still reported; the false comparison is gone.
+        assert any("all 7 tools" in record.getMessage() for record in caplog.records), (
             "an unbounded tool surface must still say how many tools it declared"
         )
+        assert not any(
+            "nothing is behind discover_tools" in record.getMessage()
+            for record in caplog.records
+        ), "this layer cannot know what the catalog left behind, and must not claim it"
 
     def test_a_trimmed_surface_keeps_reporting(self, caplog) -> None:
         session = self._session(4, 7, caplog)

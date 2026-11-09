@@ -263,6 +263,7 @@ class LiveTools:
         self._pending: dict[str, tuple[UUID, str, dict, int]] = {}
         self._names: dict[str, str] = {}
         self._defer_catalog = False
+        self._catalog_surface_reported: tuple[int, int, int] | None = None
         self.end_requested = False
         self.accepting = True
 
@@ -352,7 +353,17 @@ class LiveTools:
         # Keep capture available even with a deferred catalog. Otherwise a live
         # model may reuse an old image or choose computer instead of the appshot
         # path that owns privacy filtering, the shutter effect and the receipt.
-        for descriptor in self.catalog():
+        # ONE catalog read for this whole pass instead of four. catalog()
+        # rebuilds every descriptor and declarations() runs on every rebuild,
+        # so the repeats were pure cost -- the same hot-path lesson
+        # _report_tool_surface records one layer up.
+        catalog = self.catalog()
+        # What follows the session built-ins is catalog, and only that is
+        # comparable to the catalog's own size. Counting the built-ins in
+        # would overstate the surface -- the exact kind of flattering number
+        # this whole report exists to replace.
+        builtins = len(definitions)
+        for descriptor in catalog:
             if descriptor.name not in _DIRECT_TOOLS:
                 continue
             definitions.append(
@@ -372,7 +383,7 @@ class LiveTools:
             )
             # A names-only index lets the same model choose an exact capability
             # without asking lexical search to infer the user's intent.
-            names = sorted(descriptor.name for descriptor in self.catalog())
+            names = sorted(descriptor.name for descriptor in catalog)
             definitions[1]["description"] += " Available tool names: " + ", ".join(names)
             held = set(names)
             hints = [
@@ -391,7 +402,30 @@ class LiveTools:
         # The tools that steer the app itself go first: sorted by name alone,
         # workspace-orchestrate fell past the budget and voice could not open
         # or brief a coding agent (live 2026-10-01).
-        ordered = sorted(self.catalog(), key=lambda d: (d.name not in _PRIORITY_TOOLS, d.name))
+        #
+        # Behind them the order is CORE_PRIORITY, the one curated order this
+        # repo already keeps for the text brain -- not the alphabet. Sorted by
+        # name, the budget cut the catalog at roughly "p" and silently took
+        # everything after it: remember, search-web, update_soul, wiki-recall.
+        # A call could not look anything up and said so honestly, which is how
+        # 2026-11-07 and 2026-11-08 were both spent (BUG: the alphabet is not
+        # a priority). What does not fit stays reachable through
+        # discover_tools, which searches the whole catalog.
+        #
+        # Imported here, not at module level: jarvis.live keeps the brain's
+        # shortlist off its import path.
+        from jarvis.brain.tool_shortlist import CORE_PRIORITY, canonical
+
+        rank = {name: index for index, name in enumerate(CORE_PRIORITY)}
+        unranked = len(rank)
+        ordered = sorted(
+            catalog,
+            key=lambda d: (
+                d.name not in _PRIORITY_TOOLS,
+                rank.get(canonical(d.name), unranked),
+                d.name,
+            ),
+        )
         for descriptor in ordered:
             if descriptor.name in _DIRECT_TOOLS:
                 continue
@@ -408,7 +442,28 @@ class LiveTools:
             used_bytes += size
             self._names[alias] = descriptor.name
             definitions.append(definition)
+        self._report_catalog_surface(len(definitions) - builtins, len(catalog), used_bytes)
         return definitions
+
+    def _report_catalog_surface(self, shown: int, total: int, used_bytes: int) -> None:
+        """Say how much of the catalog the declaration actually carries.
+
+        AP-30, the same lesson native.py already learned one level up: a
+        trimmed tool set looks exactly like a complete one. This loop drops
+        what does not fit with a bare ``continue``, so a call that could not
+        reach half its tools reported nothing at all, and the layer above it
+        logged "nothing is behind discover_tools" -- which was false. Reported
+        once per distinct surface: ``declarations`` runs on every rebuild.
+        """
+        state = (shown, total, used_bytes)
+        if self._catalog_surface_reported == state:
+            return
+        self._catalog_surface_reported = state
+        log.info(
+            "Live catalog declares %d of %d tools in %d of %d bytes; "
+            "the rest stay reachable through discover_tools",
+            shown, total, used_bytes, _CATALOG_BYTE_BUDGET,
+        )
 
     def _alias(self, name: str) -> str:
         """The function name a catalog tool is declared under: readable and unique.
