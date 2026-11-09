@@ -39,6 +39,32 @@ ON_SCREEN_RULE: Final[str] = (
 )
 
 
+#: For the model that executes tools: the standing block is a summary, not all
+#: of the user's memory, and a call has to know that before it answers "I don't
+#: know". Live 2026-11-08 and again 2026-11-09, asked in German what it knew
+#: about a named friend, a call answered that it knew nothing while the vault
+#: held the answer verbatim. Nothing told the model that what it had been handed
+#: was partial, so it answered from the block alone and never looked.
+#:
+#: Measured 2026-11-09 on the real vault: the block carries 5 of 54 memories.
+#: It is budgeted to 2400 characters and ordered by kind (``_PROFILE_ORDER``
+#: puts profile first, relationship fourth), so five new `profile` memories at
+#: confidence 1.0 pushed out the `relationship` memory that answered the very
+#: question that failed. Enlarging the block only moves which line falls out; a
+#: call that knows to look does not depend on where the cut lands.
+MEMORY_RULE: Final[str] = (
+    "What you were given about the user is a summary of their memory, not all of it: "
+    "it holds the few things that come up most often. So when the user asks what you "
+    "know about a person, place, project or preference that is not already in front of "
+    "you, call memory-search with one to four keywords BEFORE answering. Never say you "
+    "know nothing about something until that search has come back empty -- the answer "
+    "is usually stored. memory-topics names everything the memory holds anything about, "
+    "and memory-history is for how one fact changed over time. wiki-recall is a "
+    "different store: it searches the user's own notes and documents, not what is known "
+    "about them, so a question about the user goes to memory-search first. "
+)
+
+
 #: For the model that executes tools: talking with one of the user's agents.
 TEAM_TALK_RULE: Final[str] = (
     "When the user wants to talk with or ask one of their named agents, use ask_agent: "
@@ -95,6 +121,7 @@ def conversation_rules(executor: str) -> str:
 
 
 __all__ = [
+    "MEMORY_RULE",
     "NAMED_TOOLS",
     "ON_SCREEN_RULE",
     "TEAM_TALK_RULE",
