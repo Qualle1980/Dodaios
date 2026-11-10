@@ -21,6 +21,17 @@ An install that never connected a subscription is unaffected: its keys stay
 usable for background work, so a single-key download keeps a working product
 (AGENTS.md "any single key must work").
 
+The rule had one cost its author did not intend. On an install that HAS
+connected a subscription but whose working credentials are free-tier API keys,
+background work waits for ever: the subscription is remembered, the keys are
+refused, and nothing is left. Measured 2026-11-10 — a full day of use and zero
+new memories, because the memory learning loop is background work. The owner can
+therefore state that an API key of theirs may do that work
+(``[brain] background_may_use_api_key``, :func:`api_keys_allowed`). That switch
+widens WHO may be billed; it names no provider and no model, and it is not a
+capability gate, because whether an account sits on a free tier is not
+observable from here. It is off by default (AP-23).
+
 Provider membership comes from the provider cards' billing mode, never a name
 list (AP-21), so a new subscription CLI or local runtime joins by shipping a
 card.
@@ -220,6 +231,27 @@ def subscription_mode(candidates: Iterable[str] = ()) -> bool:
     return any(ts >= cutoff for ts in _read_markers().values())
 
 
+def api_keys_allowed() -> bool:
+    """Whether the owner has said an API key of theirs may do background work.
+
+    ``[brain] background_may_use_api_key``. This is not a capability probe and
+    names no provider: whether an API account sits on a free tier, or a Google
+    Cloud project has billing enabled, is not observable from here — only the
+    account holder knows. Default false, so an arbitrary downloader keeps the
+    protection (AP-23).
+
+    An unreadable configuration answers *false*: the safe direction is to wait
+    rather than to bill.
+    """
+    try:
+        from jarvis.core.config import load_config
+
+        return bool(getattr(load_config().brain, "background_may_use_api_key", False))
+    except Exception:  # noqa: BLE001 — an unreadable config must not open the purse
+        log.debug("background policy: config unreadable, API keys stay disallowed", exc_info=True)
+        return False
+
+
 def background_providers(
     candidates: Iterable[str], *, primary: str | None = None
 ) -> BackgroundProviders:
@@ -235,6 +267,7 @@ def background_providers(
     ordered = seat_successors(primary, ordered)
     if not subscription_mode(ordered):
         return BackgroundProviders(False, tuple(ordered), "no subscription connected")
+    api_ok = api_keys_allowed()
     allowed: list[str] = []
     for name in ordered:
         billing = _billing(name)
@@ -244,9 +277,25 @@ def background_providers(
             allowed.append(name)
         elif billing == "subscription_or_api" and login_state(name) is True:
             allowed.append(name)
-    reason = "subscriptions and local models only" if allowed else (
-        "subscription connected but not usable right now; waiting instead of using an API key"
-    )
+        elif billing == "api" and api_ok:
+            # The owner has said an API key of theirs may do background work.
+            # Without this, an install whose only credentials are free-tier API
+            # keys has no background worker at all: the learning loop defers for
+            # ever and the assistant never learns about its user again (measured
+            # 2026-11-10 — a full day of use, zero new memories).
+            allowed.append(name)
+    if allowed:
+        reason = (
+            "subscriptions, local models and the API keys you allowed"
+            if api_ok
+            else "subscriptions and local models only"
+        )
+    elif api_ok:
+        reason = "no subscription, local model or allowed API key is usable right now"
+    else:
+        reason = (
+            "subscription connected but not usable right now; waiting instead of using an API key"
+        )
     return BackgroundProviders(True, tuple(allowed), reason)
 
 
