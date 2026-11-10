@@ -210,6 +210,35 @@ def set_brain_primary(name: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     _sync_brain_primary_drift_soll(name)  # i18n-allow
 
 
+def set_background_may_use_api_key(
+    allowed: bool, *, path: Path = DEFAULT_CONFIG_FILE
+) -> None:
+    """Set ``[brain] background_may_use_api_key``: may an API key of the owner's
+    do work nobody asked for.
+
+    Background work normally runs on subscriptions and free local models only
+    and WAITS rather than touch a per-token key
+    (:mod:`jarvis.brain.background_policy`). On an install whose only usable
+    credentials are free-tier API keys that leaves nothing at all, so the memory
+    learning loop defers for ever and the assistant stops learning about its
+    user.
+
+    This is the AUTHORITATIVE writer for that choice, so nobody has to hand-edit
+    ``jarvis.toml`` for it (AGENTS.md §2, AP-7). Only layer 1 is written: unlike
+    the provider choice, this key has no drift-guard desired-state entry and no
+    override for this key, so writing the other two layers would invent state
+    nothing reads. If either is ever added for this field, mirror
+    :func:`set_brain_primary` here.
+
+    An absent config file is CREATED empty, with a warning naming the path —
+    the shared behaviour of ``_ensure_writable_config_path`` for a first run on
+    a fresh machine. Verified rather than assumed: the sibling writers'
+    docstrings claim a ``FileNotFoundError`` here, and that is no longer what
+    happens.
+    """
+    _patch_table(path, "brain", "background_may_use_api_key", bool(allowed))
+
+
 def set_worker_provider(
     name: str, *, path: Path = DEFAULT_CONFIG_FILE, previous_provider: str | None = None
 ) -> str:
