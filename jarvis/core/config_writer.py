@@ -226,9 +226,9 @@ def set_background_may_use_api_key(
     This is the AUTHORITATIVE writer for that choice, so nobody has to hand-edit
     ``jarvis.toml`` for it (AGENTS.md §2, AP-7). Only layer 1 is written: unlike
     the provider choice, this key has no drift-guard desired-state entry and no
-    override for this key, so writing the other two layers would invent state
-    nothing reads. If either is ever added for this field, mirror
-    :func:`set_brain_primary` here.
+    ``JARVIS__``-prefixed environment override, so writing the other two layers
+    would invent state nothing reads. If either is ever added for this field,
+    mirror :func:`set_brain_primary` here.
 
     An absent config file is CREATED empty, with a warning naming the path —
     the shared behaviour of ``_ensure_writable_config_path`` for a first run on
