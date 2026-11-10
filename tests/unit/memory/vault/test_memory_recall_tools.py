@@ -151,7 +151,7 @@ async def test_topics_says_so_while_the_vault_is_empty(vault) -> None:
 
 
 async def test_topics_takes_no_arguments(filled) -> None:
-    assert MemoryTopicsTool().input_schema["properties"] == {}
+    assert MemoryTopicsTool().schema["properties"] == {}
 
 
 # -- what the model must never see --------------------------------------
