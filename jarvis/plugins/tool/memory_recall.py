@@ -76,7 +76,7 @@ class MemorySearchTool:
         "their life you do not already have in front of you. Give one to four "
         "keywords, not a sentence."
     )
-    input_schema: dict[str, Any] = {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "query": {
@@ -118,7 +118,7 @@ class MemoryHistoryTool:
         "'where did I live before', 'what did I use to drive', 'when did that "
         "change'. Give the person, place or thing it is about."
     )
-    input_schema: dict[str, Any] = {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "topic": {
@@ -170,7 +170,7 @@ class MemoryTopicsTool:
         "know or remember about them in general, before searching for a "
         "specific thing. Takes no arguments."
     )
-    input_schema: dict[str, Any] = {"type": "object", "properties": {}}
+    schema: dict[str, Any] = {"type": "object", "properties": {}}
 
     async def execute(self, args: dict[str, Any], ctx: Any) -> ToolResult:  # noqa: ARG002
         import asyncio
