@@ -63,6 +63,17 @@ _DIRECT_TOOL_LIMIT = 12
 _COMPACT_DESCRIPTION_CHARS = 240
 _DIRECT_TOOL_PREFERENCE = (
     *(name for name in NAMED_TOOLS if name not in _SESSION_TOOLS),
+    # The personal memory vault, read side (ADR-0044). First of the catalog
+    # tools because the budget cuts from the tail: with 12 direct slots and a
+    # byte budget that the mid-weight steering tools already fill (measured
+    # 15833 of 24000 B ahead of them), an unranked memory tool is declared on
+    # no live call at all, and "what do you know about me" is among the most
+    # frequent spoken turns. Their schema field was the 2026-11-09 loop
+    # (fixed in #142); being absent HERE is why a correct schema still never
+    # reached a live model.
+    "memory-search",
+    "memory-history",
+    "memory-topics",
     "find-app-action",
     "run-app-action",
     "search_web",
