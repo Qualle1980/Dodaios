@@ -210,6 +210,17 @@ SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "wiki-recall": ("obsidian", "vault", "notes", "notizen"),  # i18n-allow: DE input word
 }
 
+# Spoken words that should lead discover_tools to any held github/* MCP tool.
+# The catalog names already contain "github"; these bridge "PR" / "pull request"
+# when the model only reads the names-only index under defer_catalog (F-2 / #601).
+_GITHUB_SUBJECT_WORDS: tuple[str, ...] = (
+    "pull request",
+    "pr",
+    "repo",
+    "repository",
+    "issue",
+)
+
 
 class LiveTools:
     """Single execution owner, including when both RTC and sideband see events.
@@ -391,6 +402,18 @@ class LiveTools:
                 for tool, words in sorted(SUBJECT_ALIASES.items())
                 if tool in held
             ]
+            github_held = sorted(
+                name
+                for name in held
+                if name.startswith("github/") or name.startswith("github_")
+            )
+            if github_held:
+                shown = ", ".join(github_held[:6])
+                if len(github_held) > 6:
+                    shown += ", …"
+                hints.append(
+                    f"{'/'.join(_GITHUB_SUBJECT_WORDS)} -> {shown}"
+                )
             if hints:
                 definitions[1]["description"] += (
                     ". Words naming a tool whose own name does not: " + "; ".join(hints) + "."
