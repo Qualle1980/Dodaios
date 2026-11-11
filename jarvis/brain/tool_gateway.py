@@ -206,6 +206,11 @@ class BrainSupervisorToolGateway:
         # The live prompt carries only a short product brief; exact how-to
         # answers come from the built-in guide on demand.
         tools["product_help"] = ProductHelpTool()
+        # Deployment identity for "are you on the server?" — same facts as
+        # /api/health; voice-only so the model cannot invent a host.
+        from jarvis.plugins.tool.runtime_location import RuntimeLocationTool
+
+        tools[RuntimeLocationTool.name] = RuntimeLocationTool()
         # A spoken "remember this" in a live call is saved while the call
         # runs, into the MEMORY.md every later conversation reads. Voice-only
         # like the tools above: the router stays a pure dispatcher (ADR-0011).

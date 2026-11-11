@@ -76,6 +76,7 @@ _DIRECT_TOOL_PREFERENCE = (
     "home_assistant",
     "wiki-recall",
     "product_help",
+    "runtime_location",
 )
 
 

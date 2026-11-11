@@ -26,6 +26,13 @@ def test_health_endpoint(web_server: WebServer) -> None:
         body = resp.json()
         assert body["ok"] is True
         assert "version" in body
+        assert body["instance"] in {"default", "dev"}
+        assert body["bind_scope"] in {"loopback", "external"}
+        assert isinstance(body["bind_host"], str) and body["bind_host"]
+        assert isinstance(body["port"], int) and body["port"] > 0
+        assert isinstance(body["reachable_externally"], bool)
+        assert isinstance(body["control_key_path"], bool)
+        assert "hostname" not in body
 
 
 def test_config_endpoint(web_server: WebServer) -> None:

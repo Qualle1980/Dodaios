@@ -40,5 +40,9 @@ PRODUCT_BRIEF = (
     "guessing. product_help only explains: to actually DO something the app's screens "
     "offer (change a setting, theme, voice, skill, model, agent), search it with "
     "find-app-action and run it with run-app-action; coding workspaces and their agents "
-    "go through workspace-orchestrate."
+    "go through workspace-orchestrate. "
+    "When asked where you are running, whether you are on the server or this machine, "
+    "whether the surface is reachable from outside, or whether the Control Key path is "
+    "in use, call runtime_location and answer from its result; never guess a host or "
+    "instance. whoami is only the user profile, not deployment."
 )
