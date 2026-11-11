@@ -104,13 +104,14 @@ class WikiListTool:
 
     async def execute(self, args: dict[str, Any], ctx: Any) -> ToolResult:
         root = self._vault_root
+        # Absent vault ≠ empty vault (align with wiki-recall). Disclose the
+        # resolved root so a worktree install cannot be mistaken for the
+        # owner's personal vault without saying which path was read.
         if not root.is_dir():
             return ToolResult(
-                success=True,
-                output=(
-                    "The wiki vault directory does not exist yet — the wiki "
-                    "is empty. Nothing has been saved so far."
-                ),
+                success=False,
+                output="",
+                error=f"vault unavailable at {root}",
             )
 
         pages: list[tuple[str, int]] = []
@@ -134,10 +135,13 @@ class WikiListTool:
         if not pages:
             return ToolResult(
                 success=True,
-                output="The wiki vault is empty — no markdown pages exist yet.",
+                output=(
+                    f"The wiki vault at {root} is empty — no markdown pages "
+                    "exist yet."
+                ),
             )
 
-        lines = [f"Wiki vault listing ({len(pages)} page(s)):"]
+        lines = [f"Wiki vault listing at {root} ({len(pages)} page(s)):"]
         for rel_posix, size in pages:
             heading, is_meta = _first_heading_and_meta(root / rel_posix)
             suffix = f" — {heading}" if heading else ""
