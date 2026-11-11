@@ -768,6 +768,11 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             if self._closing:
                 return
             result = await self._send_tool_images(result)
+            from jarvis.live.tools import annotate_failed_tool_result
+
+            result = annotate_failed_tool_result(result)
+            if result.get("success") is False or result.get("speak_failure"):
+                self._turn_failed_tools.add(str(event.tool_name or ""))
             self._native_turn_complete = False
             await self._connection.send_tool_result(event.call_id, event.tool_name, result)
             if self._tools.end_requested:

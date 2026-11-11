@@ -214,6 +214,9 @@ class LiveVoiceSession:
         self._task_report_told: BackgroundTask | None = None
         self._resampler = StreamingPcm16Resampler(48000, 24000)
         self._captions = {"user": "", "assistant": ""}
+        # Tool names that returned success=False this spoken turn. Feeds the
+        # success-over-failure measure in ``_report_capability_denial``.
+        self._turn_failed_tools: set[str] = set()
         from jarvis.live.transcript import LiveTranscript
 
         self._transcript = LiveTranscript()
@@ -652,6 +655,7 @@ class LiveVoiceSession:
         if ended_speech:
             await self._emit_indicator({"type": "tts_end"})
         self._report_capability_denial()
+        self._turn_failed_tools.clear()
         await self._emit_indicator({"type": "turn_complete"})
 
     def _report_capability_denial(self) -> None:
@@ -673,6 +677,7 @@ class LiveVoiceSession:
         spoken = self._captions.get("assistant") or ""
         if not spoken:
             return
+        self._report_success_over_tool_failure(spoken)
         terms = capability_denial_terms(spoken)
         if not terms:
             return
@@ -690,6 +695,32 @@ class LiveVoiceSession:
             "capability denied over voice while %d tools were attached: terms=%s",
             len(names),
             ",".join(terms),
+        )
+
+    def _report_success_over_tool_failure(self, spoken: str) -> None:
+        """Measure a success claim spoken after a failed tool this turn.
+
+        Failed receipts already carry a speak-failure mandate for the model.
+        When captions still narrate success without naming the failure, log
+        it — native audio cannot be rewritten after the fact (same constraint
+        as capability-denial measurement).
+        """
+        failed = getattr(self, "_turn_failed_tools", None) or ()
+        if not failed:
+            return
+        from jarvis.brain.action_honesty import (
+            acknowledges_tool_failure,
+            claimed_result_families,
+            has_false_completion_claim,
+        )
+
+        if acknowledges_tool_failure(spoken):
+            return
+        if not (claimed_result_families(spoken) or has_false_completion_claim(spoken)):
+            return
+        log.warning(
+            "success claimed over voice after failed tools: tools=%s",
+            ",".join(sorted(str(name) for name in failed)),
         )
 
     async def wait_finished(self) -> None:
@@ -1721,6 +1752,11 @@ class LiveVoiceSession:
                     result = {"success": False, "error": "Invalid function arguments."}
                 if self._closing:
                     return
+                from jarvis.live.tools import annotate_failed_tool_result
+
+                result = annotate_failed_tool_result(result)
+                if result.get("success") is False or result.get("speak_failure"):
+                    self._turn_failed_tools.add(str(item.get("name") or ""))
                 image_inputs.extend(take_images(result))
                 await self._connection.send(
                     {
