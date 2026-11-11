@@ -208,6 +208,15 @@ def _board_section(section: str, output: Any) -> Any:
 # read back from the index still dispatches.
 SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "wiki-recall": ("obsidian", "vault", "notes", "notizen"),  # i18n-allow: DE input word
+    # The memory names say "memory", but nobody asks for a memory: they ask
+    # what you know about them, or where they used to live. Without the
+    # bridge the subject of ADR-0044's read tools lives only in their
+    # descriptions, which a names-only index does not show.
+    "memory-search": ("remember", "about me", "gedächtnis", "erinnerst", "über mich"),  # i18n-allow: DE input words
+    "memory-history": ("before", "used to", "changed", "früher", "vorher", "damals"),  # i18n-allow: DE input words
+    # The name already carries "topics"; only the German word needs a bridge.
+    # i18n-allow: DE input word
+    "memory-topics": ("themen",),
 }
 
 
