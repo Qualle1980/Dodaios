@@ -61,7 +61,34 @@ _REQUEST_TEXT_CHARS = 1200
 # app-steering tools and every tool the conversation rules name. A model that
 # is not given a tool it was told to use says it does not exist (live
 # 2026-10-14, a busy catalog sorted show_on_screen past the budget).
-_PRIORITY_TOOLS = frozenset({"find-app-action", "run-app-action", *NAMED_TOOLS})
+_PRIORITY_TOOLS = frozenset(
+    {
+        "find-app-action",
+        "run-app-action",
+        # The personal memory vault's read side (ADR-0044). Measured on a live
+        # gemini-live call 2026-11-11: the declaration carried 13 of 146 tools
+        # in 23977 of 24000 bytes, and all three of these were skipped at
+        # 541 / 504 / 360 bytes while screen_snapshot (275 B, CORE_PRIORITY
+        # rank 16) still fit -- the budget loop drops what does not fit with a
+        # bare ``continue``, so a heavy tool loses its slot to a lighter one
+        # that ranks far behind it. "What do you know about me" answered from
+        # the standing identity card alone and got two of three questions
+        # wrong, with function_calls=0 on every turn. Being ranked in
+        # CORE_PRIORITY is not enough; only this set survives the cut.
+        "memory-search",
+        "memory-history",
+        "memory-topics",
+        # Web search, for the same reason and found by the same log line: once
+        # the three memory reads were pinned, search_web was the tool that lost
+        # its slot (it held position 11 on the call before). It is CORE_PRIORITY
+        # rank 0, the grounding capability for any public fact
+        # (turn_planner.PUBLIC_FACT_GROUNDING_CAPABILITY), and a live call
+        # without it claimed outright to have no internet access (2026-11-07).
+        # A ranked tool is not a declared tool; only this set is.
+        "search_web",
+        *NAMED_TOOLS,
+    }
+)
 # Declared under its canonical name in every mode (see ``declarations``).
 _DIRECT_TOOLS = frozenset({"computer", "take_appshot"})
 # One screen, one mouse: these never run side by side, and a result that
@@ -435,26 +462,69 @@ class LiveTools:
                 d.name,
             ),
         )
-        for descriptor in ordered:
-            if descriptor.name in _DIRECT_TOOLS:
-                continue
-            alias = self._alias(descriptor.name)
-            definition = {
-                "type": "function",
-                "name": alias,
-                "description": f"{descriptor.name}: {descriptor.description}",
-                "parameters": descriptor.input_schema,
-            }
-            size = _wire_size(definition) + 2
-            if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
-                continue
-            used_bytes += size
-            self._names[alias] = descriptor.name
-            definitions.append(definition)
-        self._report_catalog_surface(len(definitions) - builtins, len(catalog), used_bytes)
+        # Two phases, because one pass cannot keep both promises at once.
+        #
+        # Phase 1 packs the promised tools -- _PRIORITY_TOOLS: the app-steering
+        # pair, the memory reads, search_web and every NAMED_TOOLS entry the
+        # conversation rules tell the model to use. They are declared whatever
+        # they weigh, and one that still does not fit is logged as a fault
+        # rather than dropped in silence.
+        #
+        # Phase 2 packs the rest in CORE_PRIORITY order and STOPS at the first
+        # tool that does not fit. A bare ``continue`` here was the defect
+        # measured on 2026-11-11: it skips the tool that is too heavy and keeps
+        # filling the remaining bytes from further down the order, so a light
+        # tool at rank 16 took the slot of a heavy one at rank 3. Three tools
+        # were evicted that way in one session, and the third
+        # (workspace-orchestrate) is why a voice turn could not delegate at
+        # all. Stopping is rank-respecting; skipping is not.
+        #
+        # The stop applies only to phase 2, so one oversized tool can cost the
+        # tools behind it their slots but can never cost a promised tool its
+        # own -- the risk a plain ``break`` over the whole order would carry.
+        for promised in (True, False):
+            for descriptor in ordered:
+                if descriptor.name in _DIRECT_TOOLS:
+                    continue
+                if (descriptor.name in _PRIORITY_TOOLS) is not promised:
+                    continue
+                alias = self._alias(descriptor.name)
+                definition = {
+                    "type": "function",
+                    "name": alias,
+                    "description": f"{descriptor.name}: {descriptor.description}",
+                    "parameters": descriptor.input_schema,
+                }
+                size = _wire_size(definition) + 2
+                if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
+                    if promised:
+                        # AP-30: a promised tool that cannot be declared is a
+                        # fault in the budget, not a routine skip. A model
+                        # told to use a tool it was never given says the tool
+                        # does not exist.
+                        log.error(
+                            "Live catalog cannot declare promised tool %s "
+                            "(%d B, %d of %d B used, %d definitions): raise "
+                            "the budget or shrink its schema",
+                            descriptor.name, size, used_bytes,
+                            _CATALOG_BYTE_BUDGET, len(definitions),
+                        )
+                        continue
+                    break
+                used_bytes += size
+                self._names[alias] = descriptor.name
+                definitions.append(definition)
+        declared = [
+            str(d.get("description", "")).split(": ", 1)[0] for d in definitions[builtins:]
+        ]
+        self._report_catalog_surface(
+            len(definitions) - builtins, len(catalog), used_bytes, declared
+        )
         return definitions
 
-    def _report_catalog_surface(self, shown: int, total: int, used_bytes: int) -> None:
+    def _report_catalog_surface(
+        self, shown: int, total: int, used_bytes: int, declared: list[str] | None = None
+    ) -> None:
         """Say how much of the catalog the declaration actually carries.
 
         AP-30, the same lesson native.py already learned one level up: a
@@ -473,6 +543,12 @@ class LiveTools:
             "the rest stay reachable through discover_tools",
             shown, total, used_bytes, _CATALOG_BYTE_BUDGET,
         )
+        # A count cannot say WHICH tools were cut, and "13 of 146" looked the
+        # same on the call where the memory reads were declared and on the one
+        # where they were not. Naming them is the only line that can disagree
+        # with a theory about the cut (2026-11-07, 2026-11-11).
+        if declared is not None:
+            log.info("Live catalog declared, in order: %s", ", ".join(declared) or "nothing")
 
     def _alias(self, name: str) -> str:
         """The function name a catalog tool is declared under: readable and unique.
