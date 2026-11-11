@@ -981,6 +981,10 @@ def test_conversation_scores_no_machine_reason(utterance: str) -> None:
         "where is the wake word setting",
         "how do I connect a Claude subscription",
         "How do WebSocket tickets work in this app?",
+        # The B2 live shape, in the spellings people actually use: the
+        # hyphenated form once fell through the topic rule (F-1).
+        "Why does our server issue no WebSocket-tickets without HTTPS?",
+        "Warum gibt unser Server ohne HTTPS keine WebSocket-Tickets aus?",  # i18n-allow: spoken fixture
         "Wo finde ich den Control Key?",  # i18n-allow: spoken fixture
     ],
 )
