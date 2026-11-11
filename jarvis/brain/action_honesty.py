@@ -429,16 +429,257 @@ def action_not_started_phrase(language: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Claim families that need a tool ABOUT that claim (live 2026-11-11 E1/E2).
+#
+# Adapted from upstream Dodaios/Dodaios ``agent_chat/turn_verify.py`` (action
+# receipts / lead claim check): a successful tool of the wrong kind must not
+# clear a result claim. This tree already has ``action_honesty`` wired into
+# the brain path; we extend it instead of porting the trust-receipt stack.
+# ---------------------------------------------------------------------------
+
+_CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
+    # Live E2: "the result has been accepted" after UI navigation / wiki reads.
+    "accepted": (
+        re.compile(
+            r"(?:"
+            r"\b(?:has\s+been|was|is|got)\s+accepted\b|"
+            r"\bacceptance\s+(?:passed|confirmed|complete|done)\b|"
+            r"\b(?:result|change|work|job|pr|patch)\s+(?:has\s+been|was|is)\s+"
+            r"(?:accepted|approved|verified)\b|"
+            r"\b(?:wurde|ist)\s+(?:akzeptiert|angenommen|abgenommen|"  # i18n-allow: DE
+            r"freigegeben|bestanden)\b|"  # i18n-allow: DE
+            r"\b(?:akzeptiert|angenommen|abgenommen)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-git", "workspace_git", "git", "pytest", "test",
+            "acceptance", "delegation_acceptance",
+        ),
+    ),
+    # A coding / agent handoff that never called the delegation tools.
+    "delegated": (
+        re.compile(
+            r"(?:"
+            r"\b(?:i(?:'ve|\s+have)?|i\s+just)\s+"
+            r"(?:delegated|dispatched|handed\s+off|spawned|assigned)\b|"
+            r"\b(?:delegated|dispatched|handed\s+off)\s+(?:the\s+)?(?:task|job|work)\b|"
+            r"\b(?:coding\s+)?(?:agent|worker|mission)\s+(?:is\s+|was\s+|has\s+been\s+)?"
+            r"(?:started|running|spawned)\b|"
+            r"\bich\s+habe\b[^.\n]{0,80}\b(?:delegiert|beauftragt|ubergeben|"  # i18n-allow: DE
+            r"gestartet)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-orchestrate", "workspace_orchestrate", "orchestrate",
+            "ask_agent", "ask-agent", "delegate", "dispatch", "spawn",
+            "mission", "worker", "message_agent", "message-agent",
+            "delegate_to_agent", "delegate-to-agent",
+        ),
+    ),
+    # Live E1: wiki_ingest wrote a vault note; speech said "the documents".
+    # Wiki / memory tools deliberately do NOT satisfy this family.
+    "documents_written": (
+        re.compile(
+            r"(?:"
+            r"\b(?:entered|written|saved|added)\s+(?:it\s+|them\s+|your\s+\w+\s+)?"
+            r"(?:into|in|to)\s+(?:the\s+)?(?:documents|docs|documentation)\b|"
+            r"\b(?:documents|docs|documentation)\s+(?:were|was|have\s+been)\s+"
+            r"(?:updated|written|saved|changed)\b|"
+            r"\b(?:full\s+name|line)\s+was\s+successfully\s+entered\b|"
+            r"\bin\s+(?:die|den|das)\s+(?:dokumente|unterlagen|docs)\b|"  # i18n-allow: DE
+            r"\b(?:dokumente|unterlagen)\s+(?:wurden|wurde)\s+"  # i18n-allow: DE
+            r"(?:aktualisiert|geschrieben|gespeichert)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-git", "workspace_git", "workspace-orchestrate",
+            "workspace_orchestrate", "git", "shell", "bash", "run_shell",
+            "run-shell", "write", "edit", "patch", "apply_patch", "apply-patch",
+            "str_replace", "str-replace",
+        ),
+    ),
+    "sent": (
+        re.compile(
+            r"(?:"
+            r"\b(?:i(?:'ve|\s+have)?|i\s+just)\s+"
+            r"(?:sent|emailed|messaged|replied|posted)\b|"
+            r"\bich\s+habe\b[^.\n]{0,80}\b(?:gesendet|geschickt|verschickt|"  # i18n-allow: DE
+            r"gepostet|beantwortet)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "send", "mail", "gmail", "email", "message", "reply", "post",
+            "slack", "chat", "notify", "whatsapp", "telegram",
+        ),
+    ),
+    "played": (
+        re.compile(
+            r"(?:"
+            r"\bi(?:'m|\s+am)\s+playing\s+(?:you\s+)?(?:a|the|your)\b|"
+            r"\bi(?:'ve|\s+have)\s+(?:just\s+)?(?:played|started)\s+"
+            r"(?:you\s+)?(?:a|the|your)\b|"
+            r"\bplaying\s+you\s+(?:a|the)\b|"
+            r"\b(?:is|are)\s+(?:playing|running)\s+(?:now|already)\b|"
+            r"\bich\s+(?:spiele?|habe\s+(?:dir|fur\s+dich)\s+"  # i18n-allow: DE
+            r"(?:gerade\s+)?.{0,48}(?:gespielt|abgespielt|angemacht|"  # i18n-allow: DE
+            r"aufgelegt))\b|"  # i18n-allow: DE
+            r"\b(?:laufen|lauft|spielt)\s+(?:jetzt|gerade|nun)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "youtube_music", "youtube-music", "spotify", "music", "play",
+            "media", "sonos",
+        ),
+    ),
+}
+
+_UNBACKED_RESULT_PHRASES: dict[str, str] = {
+    "de": (
+        "Ich kann das Ergebnis nicht bestätigen: für diese Behauptung "  # i18n-allow
+        "fehlt ein passendes Werkzeug-Ergebnis in diesem Turn."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": (
+        "I cannot confirm that result: this turn has no matching tool "
+        "evidence for that claim."
+    ),
+    "es": (
+        "No puedo confirmar ese resultado: en este turno no hay evidencia "
+        "de herramienta que respalde esa afirmación."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Não posso confirmar esse resultado: neste turno não há evidência "
+        "de ferramenta que suporte essa afirmação."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+_TOOL_FAILURE_PHRASES: dict[str, str] = {
+    "de": (
+        "Eine Werkzeug-Aktion ist fehlgeschlagen; ich melde keinen Erfolg."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": "A tool action failed; I am not reporting success.",
+    "es": (
+        "Una acción de herramienta falló; no estoy informando éxito."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Uma ação de ferramenta falhou; não estou a reportar sucesso."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+_FAILURE_ACK_RE = re.compile(
+    r"(?:"
+    r"\b(?:failed|failure|error|unsuccessful|did\s+not\s+(?:work|succeed)|"
+    r"could\s+not|couldn't|cannot\s+confirm|not\s+accepted|"
+    r"was\s+not\s+(?:accepted|saved|written|delegated))\b|"
+    r"\b(?:fehlgeschlagen|fehler|nicht\s+(?:geklappt|gelungen|"  # i18n-allow: DE
+    r"akzeptiert|gespeichert|geschrieben|delegiert)|"  # i18n-allow: DE
+    r"kann\s+(?:das\s+)?nicht\s+bestatigen)\b"  # i18n-allow: DE
+    r")",
+    re.I,
+)
+
+
+def claimed_result_families(text: str) -> tuple[str, ...]:
+    """Result families the reply claims, in stable order."""
+    normalized = _normalize(text or "")
+    if not normalized.strip():
+        return ()
+    return tuple(
+        name for name, (pattern, _) in _CLAIM_FAMILIES.items()
+        if pattern.search(normalized)
+    )
+
+
+def _tool_tokens(name: str) -> str:
+    return _normalize(str(name or "")).replace("-", "_")
+
+
+def tools_satisfy_family(family: str, executed_tools: Collection[str]) -> bool:
+    """True when a successful tool name carries a word for ``family``."""
+    words = _CLAIM_FAMILIES[family][1]
+    haystacks = [_tool_tokens(name) for name in executed_tools if name]
+    if not haystacks:
+        return False
+    for word in words:
+        needle = _tool_tokens(word)
+        if not needle:
+            continue
+        for hay in haystacks:
+            if needle in hay:
+                return True
+    return False
+
+
+def unbacked_result_families(
+    text: str,
+    executed_tools: Collection[str],
+) -> tuple[str, ...]:
+    """Claim families present in ``text`` with no matching successful tool."""
+    return tuple(
+        family
+        for family in claimed_result_families(text)
+        if not tools_satisfy_family(family, executed_tools)
+    )
+
+
+def unbacked_result_phrase(language: str) -> str:
+    """Honest fallback when a result claim has no domain-matching tool."""
+    return _UNBACKED_RESULT_PHRASES.get(
+        str(language or "").strip().lower(),
+        _UNBACKED_RESULT_PHRASES["en"],
+    )
+
+
+def tool_failure_phrase(language: str) -> str:
+    """Honest clause when a tool failed and the reply still claims success."""
+    return _TOOL_FAILURE_PHRASES.get(
+        str(language or "").strip().lower(),
+        _TOOL_FAILURE_PHRASES["en"],
+    )
+
+
+def acknowledges_tool_failure(text: str) -> bool:
+    """Whether the reply already names a failure or withheld confirmation."""
+    return _FAILURE_ACK_RE.search(_normalize(text or "")) is not None
+
+
 def replace_unbacked_action_claim(
     text: str,
     *,
     executed_tools: Collection[str],
     language: str,
+    failed_tools: Collection[str] = (),
 ) -> str:
-    """Drop an unbacked promise without ever dropping a delivered answer."""
+    """Drop an unbacked promise or wrong-domain success claim.
+
+    A successful tool clears only claims it can evidence. Wiki ingest must
+    not license "the documents were updated"; UI navigation must not license
+    "accepted". When tools failed and the reply still narrates success
+    without acknowledging the failure, the failure clause wins.
+    """
+    missing = unbacked_result_families(text, executed_tools)
+    # Wrong-domain success (wiki_ingest vs "the documents") is the live hole:
+    # any successful tool used to clear the rewrite. Only a matching tool
+    # clears a result family. When nothing ran at all, the legacy
+    # not-started phrase below still owns the zero-tool path.
+    if missing and executed_tools:
+        return unbacked_result_phrase(language)
+
+    if (
+        failed_tools
+        and (claimed_result_families(text) or has_false_completion_claim(text))
+        and not acknowledges_tool_failure(text)
+    ):
+        return tool_failure_phrase(language)
+
     if executed_tools:
         return text
-    if has_false_completion_claim(text):
+    if has_false_completion_claim(text) or missing:
         return action_not_started_phrase(language)
     analysis = _analyse(text)
     if analysis.kind == "bare":
@@ -540,10 +781,16 @@ def capability_denial_terms(text: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "acknowledges_tool_failure",
     "action_not_started_phrase",
     "capability_denial_terms",
+    "claimed_result_families",
     "has_deferred_action_claim",
     "has_false_completion_claim",
     "has_unbacked_action_claim",
     "replace_unbacked_action_claim",
+    "tool_failure_phrase",
+    "tools_satisfy_family",
+    "unbacked_result_families",
+    "unbacked_result_phrase",
 ]

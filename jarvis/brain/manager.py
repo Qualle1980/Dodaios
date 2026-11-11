@@ -12570,6 +12570,7 @@ class BrainManager:
         used_provider: str | None = None
         used_model: str | None = None
         _turn_executed: set[str] = set()  # tools that REALLY ran this turn
+        _turn_failed: set[str] = set()  # tools that ran and returned success=False
         # AI Pointer (deictic push): launch the cursor-element resolution BEFORE
         # the vision-image await so it overlaps with it instead of running serially
         # after (AP-9: keep the deictic turn off the serial hot path). The task does
@@ -13182,8 +13183,10 @@ class BrainManager:
                 )
                 # Remember the tools that REALLY ran so the post-recovery
                 # evidence-gate enforcement (below) can tell whether a mandated
-                # tool was actually called this turn.
+                # tool was actually called this turn. Failed names feed the
+                # honesty rewrite so a spoken success cannot ignore them.
                 _turn_executed = set(executed)
+                _turn_failed = set(getattr(agg, "failed_tool_names", None) or ())
                 used_provider, used_model = prov_name, model
                 if turn_override is None:
                     _health_ledger.record_success(
@@ -13492,6 +13495,7 @@ class BrainManager:
             response_text,
             executed_tools=execution_evidence,
             language=honesty_lang,
+            failed_tools=_turn_failed,
         )
         if honest_response != response_text:
             log.warning(

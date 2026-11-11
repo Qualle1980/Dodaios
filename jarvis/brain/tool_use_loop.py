@@ -1620,6 +1620,8 @@ class ToolUseLoop:
                     # turn that only searched for the mail tool.
                     if result.success and not getattr(tool, "is_lookup_only", False):
                         final_agg.executed_tool_names.add(tool_name)
+                    elif not result.success:
+                        final_agg.failed_tool_names.add(tool_name)
                     # suppress_response=True: tool provides its own final response,
                     # the second brain iteration is skipped (fix for 1-3 s stall
                     # after fire-and-forget tool calls like spawn_worker).

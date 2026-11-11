@@ -343,3 +343,74 @@ def test_a_send_off_alone_does_not_rescue_a_false_completion() -> None:
         )
         is True
     )
+
+
+def test_wiki_ingest_does_not_license_a_documents_claim() -> None:
+    """Live 2026-11-11 E1: wiki_ingest success must not clear a docs claim.
+
+    The unfixed guard returned the spoken lie unchanged whenever ANY tool
+    had run. This assertion is red on origin/main and green with
+    claim-scoped evidence (uses only the pre-existing public API so the
+    base run can collect the test).
+    """
+    text = "Your full name was successfully entered into the documents."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"jarvis_wiki_ingest"},
+        language="en",
+    )
+    assert honest != text
+
+
+def test_matching_repo_tools_ground_a_documents_claim() -> None:
+    text = "Your full name was successfully entered into the documents."
+    assert (
+        replace_unbacked_action_claim(
+            text,
+            executed_tools={"workspace-git"},
+            language="en",
+        )
+        == text
+    )
+
+
+def test_ui_navigation_does_not_license_an_acceptance_claim() -> None:
+    """Live 2026-11-11 E2: finding an app action is not acceptance evidence."""
+    text = "The result has been accepted."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"wiki_list", "find_app_action", "run_app_action"},
+        language="en",
+    )
+    assert honest != text
+
+
+def test_failed_tool_forces_an_honest_failure_clause() -> None:
+    """A success narration while any tool failed must not reach the user.
+
+    Live 2026-11-11 E1/E2 showed "A tool action failed" in the UI while the
+    spoken answer claimed success. Matching evidence for the claim is not
+    enough when the turn also recorded a failure.
+    """
+    text = "I'm playing you a playlist of 2010s hits."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"youtube_music"},
+        failed_tools={"screen_snapshot"},
+        language="en",
+    )
+    assert honest != text
+    assert "failed" in honest.lower()
+
+
+def test_failed_tool_keeps_a_reply_that_already_names_the_failure() -> None:
+    text = "YouTube Music failed; I could not start the playlist."
+    assert (
+        replace_unbacked_action_claim(
+            text,
+            executed_tools=(),
+            failed_tools={"youtube_music"},
+            language="en",
+        )
+        == text
+    )

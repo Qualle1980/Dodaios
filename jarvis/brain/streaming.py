@@ -29,6 +29,10 @@ class StreamingAggregate:
     #: instead of a clarifying question after a wordless desktop action" net)
     #: must read this, never ``tool_calls`` (2026-06-09).
     executed_tool_names: set[str] = field(default_factory=set)
+    #: Names of tools that ran and returned ``success=False`` this turn. The
+    #: honesty backstop uses these so a spoken success claim cannot ignore a
+    #: failure the UI already showed as "A tool action failed" (live 2026-11-11).
+    failed_tool_names: set[str] = field(default_factory=set)
     #: Set when a consequential tool was DEFERRED for two-turn voice/chat
     #: confirmation (the executor returned ``VOICE_CONFIRM_SENTINEL``). Carries
     #: ``{"trace_id": str, "tool_name": str}`` so the BrainManager can resume the
