@@ -209,7 +209,7 @@ _PUBLIC_FACT_REQUEST_RE = re.compile(
 _SELF_KNOWLEDGE_TOPIC_RE = re.compile(
     r"\b(?:"
     r"control\s+key|assistant(?:'s)?\s+key|"
-    r"websocket[\s-]?tickets?|ws[\s-]?tickets?|"
+    r"web[\s-]?socket[\s-]?tickets?|ws[\s-]?tickets?|"
     r"wake[\s-]?word|api[\s-]?keys?|"
     r"(?:claude|chatgpt|openai)\s+subscription|"
     r"chatgpt\s+plan|provider(?:s)?|"

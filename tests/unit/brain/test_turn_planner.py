@@ -985,6 +985,10 @@ def test_conversation_scores_no_machine_reason(utterance: str) -> None:
         # hyphenated form once fell through the topic rule (F-1).
         "Why does our server issue no WebSocket-tickets without HTTPS?",
         "Warum gibt unser Server ohne HTTPS keine WebSocket-Tickets aus?",  # i18n-allow: spoken fixture
+        # Exactly as speech-to-text transcribed the live B2 turn on
+        # 2026-11-11: "Web-Socket" hyphenated inside the word, and the
+        # sentence split by a question mark. It reached no tool.
+        "Warum gibt uns der Server ohne HTTPS? Keine Web-Socket-Tickets aus?",  # i18n-allow: spoken fixture
         "Wo finde ich den Control Key?",  # i18n-allow: spoken fixture
     ],
 )
