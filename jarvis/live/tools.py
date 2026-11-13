@@ -247,6 +247,60 @@ SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+# How much of a promised tool's description its short declaration keeps.
+_COMPACT_DESCRIPTION_CHARS = 240
+
+
+def compact_declaration(declaration: dict) -> dict:
+    """The same tool in short: its first sentences, and its arguments without prose.
+
+    Names, types, enums and required fields stay, so a call built from it is
+    valid; discover_tools still returns the full schema.
+    """
+    text = str(declaration.get("description", ""))
+    short = text[:_COMPACT_DESCRIPTION_CHARS]
+    if len(text) > len(short):
+        cut = short.rfind(". ")
+        short = (short[: cut + 1] if cut > 0 else short) + " Full schema: discover_tools."
+    return {
+        **declaration,
+        "description": short,
+        "parameters": _without_prose(declaration.get("parameters", {})),
+    }
+
+
+# Annotations and value limits a short declaration leaves out. The full schema
+# still validates every call, and a refused call names the accepted arguments.
+_SCHEMA_PROSE = frozenset({
+    "description", "examples", "title", "$comment", "default",
+    "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "pattern",
+    "format",
+})
+
+
+def _without_prose(schema: Any) -> Any:
+    """A JSON schema with its prose and value limits removed, structure kept.
+
+    Only annotations go: a ``properties`` map keeps every argument, also one
+    that is itself called description or title.
+    """
+    if isinstance(schema, list):
+        return [_without_prose(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    kept: dict = {}
+    for key, value in schema.items():
+        if key in _SCHEMA_PROSE:
+            continue
+        if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(
+            value, dict
+        ):
+            kept[key] = {name: _without_prose(sub) for name, sub in value.items()}
+        else:
+            kept[key] = _without_prose(value)
+    return kept
+
+
 class LiveTools:
     """Single execution owner, including when both RTC and sideband see events.
 
@@ -498,15 +552,37 @@ class LiveTools:
                 size = _wire_size(definition) + 2
                 if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
                     if promised:
+                        # A promised tool is declared in short before it is
+                        # dropped: workspace-orchestrate alone weighs 8662 B
+                        # of the 24000 and lost its slot the moment the memory
+                        # reads were pinned ahead of it (live 2026-11-12). Its
+                        # arguments stay valid without their prose, and
+                        # discover_tools still returns the full schema. The
+                        # same trade native.py already makes one level up.
+                        short = compact_declaration(definition)
+                        short_size = _wire_size(short) + 2
+                        if (
+                            len(definitions) < 52
+                            and used_bytes + short_size <= _CATALOG_BYTE_BUDGET
+                        ):
+                            log.info(
+                                "Live catalog declares promised tool %s in "
+                                "short: %d B instead of %d B",
+                                descriptor.name, short_size, size,
+                            )
+                            used_bytes += short_size
+                            self._names[alias] = descriptor.name
+                            definitions.append(short)
+                            continue
                         # AP-30: a promised tool that cannot be declared is a
                         # fault in the budget, not a routine skip. A model
                         # told to use a tool it was never given says the tool
                         # does not exist.
                         log.error(
                             "Live catalog cannot declare promised tool %s "
-                            "(%d B, %d of %d B used, %d definitions): raise "
-                            "the budget or shrink its schema",
-                            descriptor.name, size, used_bytes,
+                            "(%d B, %d B in short, %d of %d B used, %d "
+                            "definitions): raise the budget or shrink its schema",
+                            descriptor.name, size, short_size, used_bytes,
                             _CATALOG_BYTE_BUDGET, len(definitions),
                         )
                         continue
