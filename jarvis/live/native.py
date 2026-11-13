@@ -501,6 +501,73 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             }
         )
 
+    async def _apply_planner_grounding(self, text: str) -> None:
+        """When the planner requires product_help, run it and inject the result.
+
+        Gemini Live cannot force a tool call (``required_tool`` is dropped on
+        ``request_response``), and the measured B2 failure was exactly
+        ``function_calls=0`` with a textbook answer. The app therefore owns the
+        lookup once per user turn and hands the trusted guide to the model as
+        context before it answers. Weather and empty plans leave the wire alone.
+        """
+        if self._tools is None or self._connection is None or self._closing:
+            return
+        try:
+            result = await self._tools.ground_self_knowledge_once(text)
+        except Exception:  # noqa: BLE001 — never end the call for a planner miss
+            log.warning(
+                "Native voice planner grounding failed; answering without it",
+                exc_info=True,
+            )
+            return
+        if result is None:
+            return
+        directive = (
+            "This turn needs the built-in product guide. A trusted product_help "
+            "result follows as application context; answer from it and do not "
+            "call product_help again for this turn."
+        )
+        update = getattr(self._connection, "update_session", None)
+        if callable(update):
+            try:
+                await update(turn_directive=directive)
+            except TypeError:
+                # Adapter predates turn_directive — context injection below still helps.
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning(
+                    "Native voice turn_directive for product_help failed; "
+                    "injecting guide context anyway",
+                    exc_info=True,
+                )
+        prompt = self._tools.format_self_knowledge_context(result)
+        try:
+            await self._connection.send_text(prompt)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning(
+                "Native voice could not inject product_help context",
+                exc_info=True,
+            )
+            return
+        log.info(
+            "Native voice injected planner product_help grounding (%d chars) "
+            "before the model answer",
+            len(prompt),
+        )
+
+    async def _ground_then_maybe_respond(self, language: str, text: str) -> None:
+        """Ground self-knowledge first; request a response only when the provider waits."""
+        await self._apply_planner_grounding(text)
+        if self._closing or self._connection is None:
+            return
+        if getattr(self._connection, "creates_responses_automatically", True):
+            return
+        await self._request_native_response(language)
+
     async def _request_native_response(self, language: str = "") -> None:
         # The turn's language is decided once (``turn_language``); a provider
         # that can take it per session hears it before it answers.
@@ -596,10 +663,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                         conversation_language=self._language,
                     )
                     self._tools.language = self._language
-                    if not getattr(self._connection, "creates_responses_automatically", True):
-                        task = asyncio.create_task(self._request_native_response(self._language))
-                        self._control_tasks.add(task)
-                        task.add_done_callback(self._control_tasks.discard)
+                    # Plan the final transcript before the model answers: when
+                    # product_help is required, the app runs it once and injects
+                    # the guide (Gemini Live cannot be forced to call a tool).
+                    task = asyncio.create_task(
+                        self._ground_then_maybe_respond(
+                            self._language, event.text or ""
+                        )
+                    )
+                    self._control_tasks.add(task)
+                    task.add_done_callback(self._control_tasks.discard)
             if role == "assistant":
                 self._report_started()
             if role == "assistant" or event.is_final:
@@ -800,14 +873,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             return
         if message.get("type") == "text_input" and self._connection is not None:
             self._native_turn_complete = False
+            text = str(message.get("text", ""))
             if self._tools is not None:
-                self._tools.user_text = str(message.get("text", ""))
+                self._tools.user_text = text
                 self._tools.revision += 1
                 if not self._recovering:
                     self._resume_needs_input = False
                     self._tools.accept_new_input()
                     self._reconnect_attempts = 0
-            await self._connection.send_text(str(message.get("text", "")))
+                await self._apply_planner_grounding(text)
+            await self._connection.send_text(text)
         else:
             await super().handle_control(message)
 
