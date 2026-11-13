@@ -174,6 +174,7 @@ def _build_search_instance() -> VaultSearch:
 
     raw: str | Path | None = None
     sources: tuple = ()
+    verified_only = False
     try:
         from jarvis.core import config as cfg
 
@@ -183,6 +184,7 @@ def _build_search_instance() -> VaultSearch:
         wiki_cfg = getattr(loaded, "wiki_integration", None)
         if wiki_cfg is not None:
             raw = wiki_cfg.vault_root
+            verified_only = bool(getattr(wiki_cfg, "verified_only", False))
     except Exception as exc:  # noqa: BLE001
         log.debug("wiki-recall: config load skipped: %s", exc)
 
@@ -194,4 +196,8 @@ def _build_search_instance() -> VaultSearch:
             resolved,
         )
 
-    return VaultSearch(resolved, external_sources=sources)
+    return VaultSearch(
+        resolved,
+        external_sources=sources,
+        verified_only=verified_only,
+    )

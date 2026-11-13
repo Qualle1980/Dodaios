@@ -1381,7 +1381,14 @@ def _phase2_full_brain(
                 vault_path = _resolve_wiki_vault_root(config)
                 from jarvis.memory.wiki.external_sources import registered
 
-                search = VaultSearch(vault_path, external_sources=registered())
+                integration_cfg = getattr(config, "wiki_integration", None)
+                search = VaultSearch(
+                    vault_path,
+                    external_sources=registered(),
+                    verified_only=bool(
+                        getattr(integration_cfg, "verified_only", False)
+                    ),
+                )
                 # Warm the lazy SQLite connection off the critical path
                 # (AP-26): the first per-turn search otherwise pays the
                 # open+schema check against its own latency budget.
