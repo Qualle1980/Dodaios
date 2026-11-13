@@ -30,7 +30,7 @@ from jarvis.live.runtime import claim, register, unregister
 from jarvis.live.session import LiveVoiceSession, _identity
 from jarvis.live.state import LiveLedger, TranscriptFragment
 from jarvis.live.tasks import BackgroundTask, report_prompt
-from jarvis.live.tools import LiveTools, take_images
+from jarvis.live.tools import LiveTools, compact_declaration, take_images
 from jarvis.realtime.audio import StreamingPcm16Resampler
 from jarvis.realtime.protocol import RealtimeSessionConfig, RealtimeUnavailableError
 
@@ -59,10 +59,19 @@ _SESSION_TOOLS = frozenset({
 # conversation rules call by name comes before them: a small model that does
 # not see a named tool declares it missing instead of discovering it.
 _DIRECT_TOOL_LIMIT = 12
-# How much of a named tool's description its short declaration keeps.
-_COMPACT_DESCRIPTION_CHARS = 240
 _DIRECT_TOOL_PREFERENCE = (
     *(name for name in NAMED_TOOLS if name not in _SESSION_TOOLS),
+    # The personal memory vault, read side (ADR-0044). First of the catalog
+    # tools because the budget cuts from the tail: with 12 direct slots and a
+    # byte budget that the mid-weight steering tools already fill (measured
+    # 15833 of 24000 B ahead of them), an unranked memory tool is declared on
+    # no live call at all, and "what do you know about me" is among the most
+    # frequent spoken turns. Their schema field was the 2026-11-09 loop
+    # (fixed in #142); being absent HERE is why a correct schema still never
+    # reached a live model.
+    "memory-search",
+    "memory-history",
+    "memory-topics",
     "find-app-action",
     "run-app-action",
     "search_web",
@@ -119,63 +128,13 @@ def _fit_declarations(
         if _declared_name(declaration) in NAMED_TOOLS:
             # A tool the rules call by name is always declared, in short:
             # workspace-orchestrate alone outgrew a small model's whole budget.
-            declaration = _compact(declaration)
+            declaration = compact_declaration(declaration)
         size = len(json.dumps(declaration))
         if used + size > budget_chars:
             continue
         used += size
         direct.append(declaration)
     return (*session, *direct)
-
-
-def _compact(declaration: dict) -> dict:
-    """The same tool in short: its first sentences, and its arguments without prose.
-
-    Names, types, enums and required fields stay, so a call built from it is
-    valid; discover_tools still returns the full schema.
-    """
-    text = str(declaration.get("description", ""))
-    short = text[:_COMPACT_DESCRIPTION_CHARS]
-    if len(text) > len(short):
-        cut = short.rfind(". ")
-        short = (short[: cut + 1] if cut > 0 else short) + " Full schema: discover_tools."
-    return {
-        **declaration,
-        "description": short,
-        "parameters": _without_prose(declaration.get("parameters", {})),
-    }
-
-
-# Annotations and value limits a short declaration leaves out. The full schema
-# still validates every call, and a refused call names the accepted arguments.
-_SCHEMA_PROSE = frozenset({
-    "description", "examples", "title", "$comment", "default",
-    "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "pattern",
-    "format",
-})
-
-
-def _without_prose(schema: Any) -> Any:
-    """A JSON schema with its prose and value limits removed, structure kept.
-
-    Only annotations go: a ``properties`` map keeps every argument, also one
-    that is itself called description or title.
-    """
-    if isinstance(schema, list):
-        return [_without_prose(item) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
-    kept: dict = {}
-    for key, value in schema.items():
-        if key in _SCHEMA_PROSE:
-            continue
-        if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(
-            value, dict
-        ):
-            kept[key] = {name: _without_prose(sub) for name, sub in value.items()}
-        else:
-            kept[key] = _without_prose(value)
-    return kept
 
 
 def _log_late_probe(task: asyncio.Future) -> None:
