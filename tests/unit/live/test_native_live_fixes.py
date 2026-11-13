@@ -20,7 +20,7 @@ from jarvis.live import native, runtime
 from jarvis.live.coordination import NAMED_TOOLS
 from jarvis.live.native import NativeLiveVoiceSession
 from jarvis.live.state import LiveLedger
-from jarvis.live.tools import LiveTools
+from jarvis.live.tools import LiveTools, compact_declaration
 from jarvis.realtime.protocol import RealtimeEvent, RealtimeUnavailableError
 from tests.fakes.fake_native_voice import (
     FakeNativeConnection,
@@ -668,7 +668,7 @@ def test_a_short_declaration_keeps_every_argument_and_drops_only_prose():
             "description": "Arguments.",
         },
     }
-    short = native._compact(declaration)
+    short = compact_declaration(declaration)
     params = short["parameters"]
     assert set(params["properties"]) == {"title", "description", "kind", "items"}
     assert params["required"] == ["title"] and params["properties"]["kind"]["enum"] == ["a", "b"]
@@ -680,7 +680,7 @@ def test_a_short_declaration_keeps_every_argument_and_drops_only_prose():
     assert len(short["description"]) < len(declaration["description"])
     # A short description stays as it is.
     tiny = {"name": "t", "description": "t: Does t.", "parameters": {"type": "object"}}
-    assert native._compact(tiny)["description"] == "t: Does t."
+    assert compact_declaration(tiny)["description"] == "t: Does t."
 
 
 @both_providers
