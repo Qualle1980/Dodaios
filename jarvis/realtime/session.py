@@ -7769,6 +7769,22 @@ class RealtimeVoiceSession:
             return True
         return bool(self._executed_tool_names - set(instruction_only))
 
+    def _spoken_claim_lacks_matching_evidence(self) -> bool:
+        """True when the probe claims a result no matching tool evidenced.
+
+        Any successful tool used to clear recovery entirely. Live 2026-11-11
+        E1 showed that a wiki ingest success must not license "entered into
+        the documents"; claim families need domain-matching evidence.
+        """
+        from jarvis.brain.action_honesty import unbacked_result_families
+
+        probe = self._provider_output_probe
+        if unbacked_result_families(probe, self._executed_tool_names):
+            return True
+        if self._has_execution_evidence():
+            return False
+        return has_unbacked_action_claim(probe)
+
     async def _recover_unbacked_action_claim(self) -> bool:
         """Turn a provider's unsupported action promise into a real outcome.
 
@@ -7781,10 +7797,9 @@ class RealtimeVoiceSession:
         """
         if (
             self._external_update is not None
-            or self._has_execution_evidence()
             or self._native_tools_in_flight
             or self._delegate_delivery_started()
-            or not has_unbacked_action_claim(self._provider_output_probe)
+            or not self._spoken_claim_lacks_matching_evidence()
         ):
             return False
 

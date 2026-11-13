@@ -28,6 +28,14 @@ from jarvis.speech.hangup import (
 
 log = logging.getLogger(__name__)
 
+# Appended to every failed live tool receipt so the model must speak the
+# failure before it narrates success. The UI already shows "A tool action
+# failed"; without this line the spoken answer ignored those failures
+# (live 2026-11-11 E1/E2).
+_SPEAK_FAILURE_MANDATE = (
+    "Speak this failure to the user now. Do not claim the action succeeded."
+)
+
 # Docs about this app itself. The shared planner (F-1) puts this in
 # ``required_capabilities`` for SELF_KNOWLEDGE turns; Gemini Live cannot be
 # forced to call it (``required_tool`` is dropped), so the live path runs the
@@ -38,6 +46,29 @@ _GROUNDING_RESULT_CHARS = 8_000
 # A session.started event includes its declarations. Keep room for prompts and
 # history inside the 64 KiB message limit of smaller WebRTC clients.
 _CATALOG_BYTE_BUDGET = 24_000
+
+
+def annotate_failed_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Mark a failed live receipt so the next spoken turn must name the failure.
+
+    Pending background releases stay untouched: they are not failures, and
+    they already carry their own "never say it is done" instruction.
+    """
+    if not isinstance(result, dict):
+        return result
+    if result.get("pending"):
+        return result
+    failed = result.get("success") is False or result.get("verified") is False
+    if not failed:
+        return result
+    error = str(result.get("error") or "A tool action failed.").strip()
+    if _SPEAK_FAILURE_MANDATE in error:
+        return result
+    return {
+        **result,
+        "error": f"{error} {_SPEAK_FAILURE_MANDATE}".strip(),
+        "speak_failure": True,
+    }
 _BUILTIN_TOOLS = frozenset(
     {"discover_tools", "call_tool", "confirm_action", "end_call", "task_status"}
 )
@@ -1065,6 +1096,7 @@ class LiveTools:
                 "task_revision": revision,
                 "current_revision": self.revision,
             }
+        result = annotate_failed_tool_result(result)
         receipt = dict(result)
         if isinstance(receipt.get("output"), dict):
             receipt["output"] = {k: v for k, v in receipt["output"].items() if k != "_image"}
