@@ -116,7 +116,7 @@ class WikiRecallTool:
             return ToolResult(
                 success=False,
                 output="",
-                error="vault unavailable",
+                error=f"vault unavailable at {vault_root}",
             )
 
         hits = self._search.search(query, k=k)
@@ -130,7 +130,9 @@ class WikiRecallTool:
         if not hits:
             return ToolResult(
                 success=True,
-                output=f'No wiki matches found for "{query}".',
+                output=(
+                    f'No wiki matches found for "{query}" in {vault_root}.'
+                ),
             )
 
         lines: list[str] = [f'## Wiki hits for "{query}"']

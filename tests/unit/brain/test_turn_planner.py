@@ -7,10 +7,12 @@ import pytest
 from jarvis.brain.turn_planner import (
     PUBLIC_FACT_GROUNDING_CAPABILITY,
     PUBLIC_FACT_GROUNDING_TIMEOUT_S,
+    SELF_KNOWLEDGE_CAPABILITY,
     GroundingFailurePolicy,
     TurnPath,
     TurnReason,
     is_public_fact_question,
+    is_self_knowledge_question,
     plan_turn,
 )
 from jarvis.core.capabilities import Capability, CapabilityRegistry
@@ -963,3 +965,68 @@ def test_a_question_about_the_users_machine_is_local_state(utterance: str) -> No
 )
 def test_conversation_scores_no_machine_reason(utterance: str) -> None:
     assert TurnReason.LOCAL_STATE not in plan_turn(utterance).reasons
+
+
+# ---------------------------------------------------------------------------
+# F-1 — self-knowledge grounding (product_help), live B2 2026-11-11
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        # Verbatim B2 shape from the live finding.
+        "why does our server issue no WebSocket tickets without HTTPS",
+        "Why does the Control Key matter for LAN access?",
+        "where is the wake word setting",
+        "how do I connect a Claude subscription",
+        "How do WebSocket tickets work in this app?",
+        # The B2 live shape, in the spellings people actually use: the
+        # hyphenated form once fell through the topic rule (F-1).
+        "Why does our server issue no WebSocket-tickets without HTTPS?",
+        "Warum gibt unser Server ohne HTTPS keine WebSocket-Tickets aus?",  # i18n-allow: spoken fixture
+        # Exactly as speech-to-text transcribed the live B2 turn on
+        # 2026-11-11: "Web-Socket" hyphenated inside the word, and the
+        # sentence split by a question mark. It reached no tool.
+        "Warum gibt uns der Server ohne HTTPS? Keine Web-Socket-Tickets aus?",  # i18n-allow: spoken fixture
+        "Wo finde ich den Control Key?",  # i18n-allow: spoken fixture
+    ],
+)
+def test_self_knowledge_questions_require_product_help(utterance: str) -> None:
+    assert is_self_knowledge_question(utterance)
+    plan = plan_turn(utterance)
+    assert plan.path is TurnPath.ORCHESTRATOR
+    assert TurnReason.SELF_KNOWLEDGE in plan.reasons
+    assert SELF_KNOWLEDGE_CAPABILITY in plan.required_capabilities
+    assert plan.requires_evidence is True
+
+
+def test_local_state_does_not_suppress_self_knowledge() -> None:
+    """A settings question may also be LOCAL_STATE; product_help must remain."""
+    utterance = "where is the wake word setting"
+    plan = plan_turn(utterance)
+    assert TurnReason.LOCAL_STATE in plan.reasons
+    assert TurnReason.SELF_KNOWLEDGE in plan.reasons
+    assert SELF_KNOWLEDGE_CAPABILITY in plan.required_capabilities
+    assert plan.requires_public_fact_grounding is False
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "is my PC overloaded",
+        "How is my CPU doing right now?",
+        "why is our server slow",
+        "what time is it",
+        "Who wrote Hamlet?",
+        "Explain how DNS works.",
+        "Tell me a joke.",
+    ],
+)
+def test_ordinary_ops_and_world_questions_skip_self_knowledge(
+    utterance: str,
+) -> None:
+    assert not is_self_knowledge_question(utterance)
+    plan = plan_turn(utterance)
+    assert TurnReason.SELF_KNOWLEDGE not in plan.reasons
+    assert SELF_KNOWLEDGE_CAPABILITY not in plan.required_capabilities

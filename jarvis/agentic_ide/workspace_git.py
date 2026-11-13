@@ -108,7 +108,7 @@ def _pull_requests(folder: str) -> dict[str, Any]:
             **({"here": True} if pr.head == seen.branch else {}),
         })
     listed = sorted(rows.values(), key=lambda row: (not row.get("here"), -row["number"]))
-    return {
+    payload: dict[str, Any] = {
         "branch": seen.branch,
         "github": (
             {"connected": True, "repository": seen.github.repo}
@@ -118,6 +118,16 @@ def _pull_requests(folder: str) -> dict[str, Any]:
         "pull_requests": listed[:_PULL_REQUESTS],
         "more_pull_requests": max(0, len(listed) - _PULL_REQUESTS),
     }
+    # Account-level GitHub lives on the marketplace plugin. When this folder
+    # has no GitHub link, steer the model to discover/call_tool instead of
+    # treating the empty workspace answer as final (live C2 / F-2).
+    if not seen.github.available:
+        payload["next_step"] = (
+            "This coding workspace is not linked to GitHub. For pull requests or "
+            "repos on the user's GitHub account, call discover_tools with query "
+            "'pull request' or 'github', then call_tool on a github/* tool."
+        )
+    return payload
 
 
 def _perform(op: str, folder: str, args: dict[str, Any], open_folders: list[str]) -> dict[str, Any]:
@@ -199,10 +209,23 @@ async def run(orchestrator: Any, args: dict[str, Any]) -> dict[str, Any]:
         result = await asyncio.to_thread(_perform, op, workspace["folder"], args, open_folders)
     except GitError as exc:
         # Git's own refusal, in one sentence: nothing else happened.
-        return {
+        refusal: dict[str, Any] = {
             "status": "not_accepted", "success": False, "op": op,
             "code": exc.code, "reason": str(exc), **target,
         }
+        # Workspace-git only covers the open folder. A missing repo or GitHub
+        # link must not end a voice turn that asked about the user's GitHub
+        # account — the marketplace github/* tools are the fallback (F-2).
+        if op in {"pull_requests", "pull_request"} or exc.code in {
+            "not_repo",
+            "needs_repo",
+            "missing",
+        }:
+            refusal["next_step"] = (
+                "Call discover_tools with query 'pull request' or 'github', "
+                "then call_tool on a github/* tool for the user's GitHub account."
+            )
+        return refusal
     return {"status": "ok", "op": op, **target, **result}
 
 

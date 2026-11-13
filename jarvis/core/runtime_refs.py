@@ -126,6 +126,29 @@ def get_api_base_url() -> str | None:
     return _API_BASE_URL[0] if _API_BASE_URL else None
 
 
+# The address/port uvicorn (or the fast-boot bootstrap) actually bound. Distinct
+# from ``_API_BASE_URL``, which is always a loopback URL children use to call
+# back — a VPS bind of ``0.0.0.0`` must still report itself as external.
+_LISTEN_HOST: list[str] = []
+_LISTEN_PORT: list[int] = []
+
+
+def set_listen_endpoint(host: str, port: int) -> None:
+    """Record the host:port this process' HTTP surface bound."""
+    _set(_LISTEN_HOST, str(host))
+    _set(_LISTEN_PORT, int(port))
+
+
+def get_listen_host() -> str | None:
+    """Bound listen host, or ``None`` before the server bound."""
+    return _LISTEN_HOST[0] if _LISTEN_HOST else None
+
+
+def get_listen_port() -> int | None:
+    """Bound listen port, or ``None`` before the server bound."""
+    return _LISTEN_PORT[0] if _LISTEN_PORT else None
+
+
 # The live FastAPI app (set by WebServer._build_app). The ``app-command`` tool
 # executes Command-Registry commands through it in-process (httpx ASGI
 # transport — full route validation, no TCP), so a voice command runs the

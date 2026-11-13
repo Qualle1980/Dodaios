@@ -1207,19 +1207,20 @@ class WebServer:
     # ------------------------------------------------------------------
 
     def _register_rest_routes(self, app: FastAPI) -> None:
-        from jarvis.core.instance import current_instance as _ci
-
-        def _instance_name() -> str:
-            return _ci().name
-
         cfg = self.cfg
         bus = self.bus
 
         @app.get("/api/health")
         async def health() -> dict[str, Any]:
-            # ``instance`` lets the frontend badge a dev window as such
-            # (``jarvis.core.instance``): "default" or "dev".
-            return {"ok": True, "version": __version__, "instance": _instance_name()}
+            # Deployment facts for the UI badge and the voice ``runtime_location``
+            # tool. Derived from instance / bind / browser-lock helpers only —
+            # no OS hostname, no secrets (this route stays open_access).
+            from jarvis.core.runtime_location import runtime_location_facts
+
+            return runtime_location_facts(
+                version=__version__,
+                configured_port=cfg.ui.admin_api_port,
+            )
 
         @app.post("/api/ui/shell-painted", status_code=204, response_model=None)
         async def shell_painted() -> Response:
@@ -2857,6 +2858,7 @@ class WebServer:
         from jarvis.core import runtime_refs as _runtime_refs
 
         _runtime_refs.set_api_base_url(f"http://127.0.0.1:{resolved_port}")
+        _runtime_refs.set_listen_endpoint(host, resolved_port)
         # Announce each change of the passive provider-health record on the bus;
         # the existing /ws fan-out carries it to every open window, whose status
         # dots then re-read (no poll, no extra socket — AP-33). Registering is

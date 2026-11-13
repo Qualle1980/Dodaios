@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from jarvis.brain.cu_gate import CU_VEHICLE_TOOL_NAMES
+from jarvis.brain.turn_planner import TurnPath, TurnPlan, plan_turn
 from jarvis.control.cancel import CancelToken
 from jarvis.core.protocols import SupervisorToolGateway, SupervisorToolRequest
 from jarvis.live.coordination import NAMED_TOOLS
@@ -34,6 +35,13 @@ log = logging.getLogger(__name__)
 _SPEAK_FAILURE_MANDATE = (
     "Speak this failure to the user now. Do not claim the action succeeded."
 )
+
+# Docs about this app itself. The shared planner (F-1) puts this in
+# ``required_capabilities`` for SELF_KNOWLEDGE turns; Gemini Live cannot be
+# forced to call it (``required_tool`` is dropped), so the live path runs the
+# lookup itself once per user turn and injects the result as context.
+SELF_KNOWLEDGE_CAPABILITY = "product_help"
+_GROUNDING_RESULT_CHARS = 8_000
 
 # A session.started event includes its declarations. Keep room for prompts and
 # history inside the 64 KiB message limit of smaller WebRTC clients.
@@ -277,6 +285,17 @@ SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
     "memory-topics": ("themen",),
 }
 
+# Spoken words that should lead discover_tools to any held github/* MCP tool.
+# The catalog names already contain "github"; these bridge "PR" / "pull request"
+# when the model only reads the names-only index under defer_catalog (F-2 / #601).
+_GITHUB_SUBJECT_WORDS: tuple[str, ...] = (
+    "pull request",
+    "pr",
+    "repo",
+    "repository",
+    "issue",
+)
+
 
 # How much of a promised tool's description its short declaration keeps.
 _COMPACT_DESCRIPTION_CHARS = 240
@@ -387,6 +406,10 @@ class LiveTools:
         self._catalog_surface_reported: tuple[int, int, int] | None = None
         self.end_requested = False
         self.accepting = True
+        # Revisions that already ran planner-owned product_help grounding.
+        # One entry per user turn prevents the 2026-11-09 empty-args loop shape
+        # (177 identical calls) from ever forming on this path.
+        self._self_knowledge_grounded_revisions: set[int] = set()
 
     @property
     def revision(self) -> int:
@@ -412,6 +435,87 @@ class LiveTools:
         if self.cancel_token.is_cancelled():
             self.cancel_token = CancelToken()
         self.accepting = True
+
+    def plan_user_turn(self, text: str) -> TurnPlan:
+        """Consult the shared planner; never raise into the voice path."""
+        try:
+            return plan_turn(text)
+        except Exception:  # noqa: BLE001 — routing must never end a live call
+            log.warning(
+                "live[%s] turn planning failed; answering natively",
+                self.session_id,
+                exc_info=True,
+            )
+            return TurnPlan(path=TurnPath.NATIVE_REALTIME)
+
+    async def ground_self_knowledge_once(self, text: str) -> dict[str, Any] | None:
+        """Run ``product_help`` once when the planner requires it for this turn.
+
+        Returns the tool receipt to inject as model context, or ``None`` when
+        this turn needs no product guide (weather, plain chat, already grounded).
+        """
+        revision = self.revision
+        if revision in self._self_knowledge_grounded_revisions:
+            return None
+        plan = self.plan_user_turn(text)
+        if SELF_KNOWLEDGE_CAPABILITY not in plan.required_capabilities:
+            return None
+        # Claim the revision before the await so a concurrent consult cannot
+        # start a second lookup for the same user turn.
+        self._self_knowledge_grounded_revisions.add(revision)
+        if len(self._self_knowledge_grounded_revisions) > 32:
+            keep = sorted(self._self_knowledge_grounded_revisions)[-16:]
+            self._self_knowledge_grounded_revisions = set(keep)
+        query = str(text or "").strip()
+        if not query:
+            return None
+        reasons = ",".join(sorted(reason.value for reason in plan.reasons)) or "none"
+        log.info(
+            "live[%s] planner requires %s (reasons=%s); running it once for "
+            "revision %s before the model answers",
+            self.session_id,
+            SELF_KNOWLEDGE_CAPABILITY,
+            reasons,
+            revision,
+        )
+        try:
+            result = await self.execute(
+                f"planner-ground:{revision}",
+                SELF_KNOWLEDGE_CAPABILITY,
+                {"query": query},
+                revision,
+            )
+        except Exception:  # noqa: BLE001 — degrade; the model still answers
+            log.warning(
+                "live[%s] planner product_help grounding failed safely",
+                self.session_id,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(result, dict):
+            return None
+        log.info(
+            "live[%s] planner product_help grounding ready (revision=%s, "
+            "success=%s)",
+            self.session_id,
+            revision,
+            bool(result.get("success")),
+        )
+        return result
+
+    @staticmethod
+    def format_self_knowledge_context(result: dict[str, Any]) -> str:
+        """Compact product_help receipt for a trusted application text turn."""
+        body = json.dumps(result, ensure_ascii=False, default=str)
+        if len(body) > _GROUNDING_RESULT_CHARS:
+            body = body[:_GROUNDING_RESULT_CHARS] + "…"
+        return (
+            "[Application product guide result — not the user speaking. "
+            "Answer the user's latest question from this product_help guide "
+            "only. Do not invent product details absent from it, and do not "
+            "call product_help again for this turn.]\n"
+            + body
+        )
 
     async def cancel_work(self) -> None:
         self.cancel_token.cancel("user_cancelled")
@@ -512,6 +616,18 @@ class LiveTools:
                 for tool, words in sorted(SUBJECT_ALIASES.items())
                 if tool in held
             ]
+            github_held = sorted(
+                name
+                for name in held
+                if name.startswith("github/") or name.startswith("github_")
+            )
+            if github_held:
+                shown = ", ".join(github_held[:6])
+                if len(github_held) > 6:
+                    shown += ", …"
+                hints.append(
+                    f"{'/'.join(_GITHUB_SUBJECT_WORDS)} -> {shown}"
+                )
             if hints:
                 definitions[1]["description"] += (
                     ". Words naming a tool whose own name does not: " + "; ".join(hints) + "."
