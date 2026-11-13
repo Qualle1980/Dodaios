@@ -856,6 +856,34 @@ class LiveVoiceSession:
 
                 self._offer_future.set_result(validate_webrtc_offer_sdp(message.get("sdp")))
             return
+        if kind == "playback_overrun":
+            # See ``playback_diag`` below. The browser's playback ring is
+            # bounded (ten seconds) and drops the OLDEST samples when a
+            # provider outruns playback, which is audible as the answer
+            # jumping forward mid-word.
+            log.info(
+                "live[%s] browser playback OVERRUN: dropped=%s total=%s rate=%s",
+                self.session_id,
+                message.get("dropped"),
+                message.get("total"),
+                message.get("rate"),
+            )
+            return
+        if kind == "playback_diag":
+            # Diagnosis only (2026-11-13): a long spoken answer was heard with
+            # words running over each other while the backend log proved a
+            # single generation produced them, and no client-side signal
+            # existed to say whether the browser had joined the ordered
+            # timeline (``handleUntimedAudio``) or was playing every arriving
+            # frame at once. The client reports that once per connection.
+            log.info(
+                "live[%s] browser playback: ordered=%s timed_output=%s detail=%s",
+                self.session_id,
+                message.get("ordered"),
+                message.get("timed_output"),
+                str(message.get("detail", ""))[:120],
+            )
+            return
         if kind == "playback_state":
             if type(message.get("active")) is bool:
                 await self._playback_changed(message["active"])

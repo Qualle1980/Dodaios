@@ -234,6 +234,53 @@ describe("realtime audio client", () => {
     await client.disconnect();
   });
 
+  it("orders the native path's untimed audio even with no WebRTC offer", async () => {
+    // The native live path (jarvis/live/native.py) negotiates no WebRTC at
+    // all: it answers ``requires_webrtc_answer: false`` and sends every PCM
+    // block as a raw binary frame, so the playback worklet is the only sink
+    // and there is no ``audio_transport`` message either. Reported 2026-11-13
+    // as words running over each other on every long answer, in two separate
+    // calls, while the backend log proved a single generation produced them.
+    // The ordered timeline from 2026-11-07 must therefore be reachable from
+    // the ``audio_ready`` announcement alone, on a client that was never
+    // asked for an offer.
+    installVoiceBrowserFakes();
+    vi.stubGlobal("Audio", class {
+      muted = false;
+      play = async () => undefined;
+      pause = () => undefined;
+    });
+    const client = new RealtimeAudioClient({}, { browserAudio: true, requiresWebRtcOffer: false });
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({
+      type: "audio_ready", requires_webrtc_answer: false,
+      output_transport: "timed_pcm", output_sample_rate: 24000,
+    });
+    await connecting;
+    const playback = FakeAudioNode.instances.find(node => node.name === "pcm-playback")!;
+    const pcmPackets = () =>
+      playback.port.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "pcm");
+
+    // Three half-second blocks of one answer, as the native wire delivers them.
+    socket.receiveBinary(new Int16Array(12000).fill(400).buffer);
+    socket.receiveBinary(new Int16Array(12000).fill(500).buffer);
+    socket.receiveBinary(new Int16Array(12000).fill(600).buffer);
+
+    const packets = pcmPackets();
+    expect(packets).toHaveLength(3);
+    // Each block must start where the previous one ended. Equal start times
+    // are the defect: the worklet then renders them on top of each other.
+    expect(packets.map(m => [m.startMs, m.endMs])).toEqual([
+      [0, 500], [500, 1000], [1000, 1500],
+    ]);
+
+    socket.receive({ type: "audio_closed" });
+    await client.disconnect();
+  });
+
   it("plays timed source audio once and highlights only at the device clock", async () => {
     installVoiceBrowserFakes();
     const speakers: { muted: boolean }[] = [];

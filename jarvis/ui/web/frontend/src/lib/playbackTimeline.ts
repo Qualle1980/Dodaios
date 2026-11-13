@@ -19,11 +19,14 @@ export class TimedPcmQueue {
 
   clear(): void { this.audio.clear(); this.spans = []; }
 
-  enqueue(samples: Int16Array, timing?: AudioInterval): void {
-    if (!samples.length) return;
+  /** Returns how many samples the bounded ring had to throw away, if any. */
+  enqueue(samples: Int16Array, timing?: AudioInterval): number {
+    if (!samples.length) return 0;
     this.spans.push({ frames: samples.length, consumed: 0,
       timing: timing && validAudioInterval(timing.startMs, timing.endMs) ? timing : undefined });
-    this.consume(this.audio.enqueue(samples)); // Overrun discards audio, never counts it as heard.
+    const dropped = this.audio.enqueue(samples); // Overrun discards audio, never counts it as heard.
+    this.consume(dropped);
+    return dropped;
   }
 
   render(output: Float32Array, contextStart: number): RenderedAudioInterval[] {

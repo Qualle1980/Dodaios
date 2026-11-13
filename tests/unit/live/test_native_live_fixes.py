@@ -809,3 +809,27 @@ class TestTheLiveToolSurfaceIsAlwaysReported:
         with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
             session._tool_declarations()
         assert any("of 7" in record.getMessage() for record in caplog.records)
+
+
+@both_providers
+@pytest.mark.asyncio
+async def test_audio_ready_announces_the_timed_playback_transport(call, make_provider):
+    """The browser must be told to queue this path's audio, not play it at once.
+
+    The native path negotiates no WebRTC, so its PCM arrives as untimed binary
+    frames and the playback worklet is the only sink. The client keeps
+    ``timedOutput`` false until a payload names the transport, and then plays
+    every frame the moment it arrives, on top of what is already scheduled.
+    On 2026-11-13 that was audible as words running over each other on every
+    long answer, in two separate calls, while the log proved a single
+    generation produced them.
+    """
+    live = call(make_provider())
+    await live.start()
+    try:
+        ready = live.sent("audio_ready")
+        assert len(ready) == 1
+        assert ready[0]["requires_webrtc_answer"] is False
+        assert ready[0]["output_transport"] == "timed_pcm"
+    finally:
+        await live.session.end()
