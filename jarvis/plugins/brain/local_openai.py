@@ -112,6 +112,29 @@ class LocalOpenAIBrain:
             return False
         return bool(ep.base_url)
 
+    @staticmethod
+    def runtime_reachable() -> bool:
+        """Whether the configured OpenAI-compatible server lists models.
+
+        Free ``GET /v1/models`` — no generation, no token spend. Missing URL
+        or a refused connection are both ``False`` so the worker chain walks on.
+        """
+        from jarvis.local_models.runtime_reachable import http_get_ok
+
+        try:
+            ep = cfg.resolve_provider_endpoint("local-openai", vendor_default_base_url=None)
+        except Exception:  # noqa: BLE001 — unreadable endpoint is not reachable
+            log.debug("local-openai runtime_reachable: endpoint unreadable", exc_info=True)
+            return False
+        if not ep.base_url:
+            return False
+        root = normalize_server_root(ep.base_url)
+        headers: dict[str, str] = {}
+        key = ep.credential or cfg.get_secret("local_openai_api_key", "LOCAL_OPENAI_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        return http_get_ok(f"{root}/v1/models", headers=headers or None)
+
     def _resolve_root(self) -> str:
         if self._server_root is None:
             ep = cfg.resolve_provider_endpoint("local-openai", vendor_default_base_url=None)
