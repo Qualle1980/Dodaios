@@ -76,3 +76,17 @@ def test_every_alias_names_a_real_capability_word() -> None:
         for word in words:
             assert word == word.casefold(), f"{word} is not folded"
             assert word not in tool, f"{word} is already in the name {tool}"
+
+
+def test_github_tools_get_a_pull_request_hint_when_held() -> None:
+    text = _discover_description(
+        ["wiki-recall", "github/list_pull_requests", "github/search_issues"]
+    )
+    assert "pull request" in text.lower()
+    assert "github/list_pull_requests" in text
+
+
+def test_github_hint_absent_when_no_github_tool_is_held() -> None:
+    text = _discover_description(["wiki-recall", "gmail"])
+    assert "pull request" not in text.lower()
+    assert "github/" not in text
