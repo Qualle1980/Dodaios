@@ -6,10 +6,12 @@ import pytest
 
 from jarvis.brain.action_honesty import (
     action_not_started_phrase,
+    claimed_result_families,
     has_deferred_action_claim,
     has_false_completion_claim,
     has_unbacked_action_claim,
     replace_unbacked_action_claim,
+    unbacked_result_families,
 )
 from jarvis.brain.manager import BrainManager
 from jarvis.core.bus import EventBus
@@ -414,3 +416,60 @@ def test_failed_tool_keeps_a_reply_that_already_names_the_failure() -> None:
         )
         == text
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Declined and singular German forms, and both word orders. Each of
+        # these escaped the single "in (die|den|das) dokumente" form and was  # i18n-allow: quoted DE pattern
+        # measured as an unnoticed pass on 2026-11-13.
+        "Ich habe die Zeile in docs hinzugefügt.",  # i18n-allow: German runtime fixture
+        "Die Zeile wurde erfolgreich in das Dokument eingefügt.",  # i18n-allow: German runtime fixture
+        "Die Testmarke steht jetzt in den Dokumenten.",  # i18n-allow: German runtime fixture
+        "Ich habe das in den Unterlagen ergänzt.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_german_write_claim_is_unbacked_after_only_a_vault_note(text: str) -> None:
+    """A wiki note never licenses "it is in the documents", whatever the case.
+
+    The family matched only one spelling, so three natural German phrasings
+    reported success with no document write behind them.
+    """
+    assert claimed_result_families(text) == ("documents_written",)
+    assert unbacked_result_families(text, {"wiki_ingest", "remember"}) == (
+        "documents_written",
+    )
+    assert unbacked_result_families(text, {"workspace-orchestrate"}) == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # "hat die Abnahme bestanden" carries the claim in a noun: the
+        # "(wurde|ist) bestanden" form never saw it.  # i18n-allow: quoted DE pattern
+        "Das Ergebnis hat die Abnahme bestanden.",  # i18n-allow: German runtime fixture
+        "Die Abnahme ist erfolgreich.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_german_acceptance_claim_needs_acceptance_evidence(text: str) -> None:
+    assert claimed_result_families(text) == ("accepted",)
+    assert unbacked_result_families(text, {"wiki_list"}) == ("accepted",)
+    assert unbacked_result_families(text, {"workspace-git", "pytest"}) == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Reading, asking and denying are not write claims. Requiring a write
+        # verb (or "steht in") is what keeps the widened family honest.
+        "Ich habe in den Dokumenten gesucht und nichts gefunden.",  # i18n-allow: German runtime fixture
+        "Soll ich das in die Dokumente schreiben?",  # i18n-allow: German runtime fixture
+        "In den Dokumenten steht dazu nichts.",  # i18n-allow: German runtime fixture
+        "Ich kann docs nicht bearbeiten; ich habe nichts geschrieben.",  # i18n-allow: German runtime fixture
+        "Die Abnahme steht noch aus.",  # i18n-allow: German runtime fixture
+        "Das ist nur eine Notiz im Gedächtnis, nicht die Dokumente.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_reading_or_refusing_is_not_a_result_claim(text: str) -> None:
+    assert claimed_result_families(text) == ()
