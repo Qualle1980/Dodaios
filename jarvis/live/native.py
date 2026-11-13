@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import json
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from uuid import uuid4
 
+from jarvis.audio import echo_reference
 from jarvis.brain.identity import name_directive
 from jarvis.core.agent_brief import AGENT_BRIEF_RULE
 from jarvis.core.paths import user_data_dir
@@ -33,8 +35,59 @@ from jarvis.live.tasks import BackgroundTask, report_prompt
 from jarvis.live.tools import LiveTools, compact_declaration, take_images
 from jarvis.realtime.audio import StreamingPcm16Resampler
 from jarvis.realtime.protocol import RealtimeSessionConfig, RealtimeUnavailableError
+from jarvis.speech.echo_guard import SelfEchoGuard
 
 log = logging.getLogger(__name__)
+
+# Mic frames quieter than this fraction of the recent played peak while the
+# echo reference is armed are held back so Gemini never hears our own
+# speakers. Louder frames still travel — that is a real barge-in.
+_ECHO_MIC_HOLD_RATIO = 0.5
+_ECHO_MIC_HOLD_FLOOR = 0.02
+_ECHO_REFERENCE_ACTIVE_RMS = 0.01
+_ECHO_REFERENCE_WINDOW_S = 2.0
+
+
+def _pcm16_rms(pcm: bytes) -> float:
+    """RMS of little-endian int16 PCM, normalized to 0..1."""
+    if len(pcm) < 2:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return 0.0
+    mean_sq = sum(int(sample) * int(sample) for sample in samples) / len(samples)
+    return (mean_sq ** 0.5) / 32768.0
+
+
+def _record_played_pcm(pcm: bytes, sample_rate: int) -> None:
+    """Append one outbound PCM block to the process-local echo envelope.
+
+    Live plays through the browser, not ``AudioPlayer``, so the player tap
+    never sees these bytes. Recording them here is what makes
+    ``echo_reference`` reachable on the native live path (BUG-101 shape).
+    """
+    if sample_rate <= 0 or len(pcm) < 2:
+        return
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return
+    mean_sq = sum(int(sample) * int(sample) for sample in samples) / len(samples)
+    rms = (mean_sq ** 0.5) / 32768.0
+    echo_reference.record(rms, len(samples) / float(sample_rate))
+
+
+def _echo_reference_recently_active(
+    *, window_s: float = _ECHO_REFERENCE_WINDOW_S
+) -> bool:
+    """True when the speakers recently emitted audible energy."""
+    try:
+        reference = echo_reference.snapshot(window_s)
+    except Exception:  # noqa: BLE001 — echo gate must never break the call
+        log.debug("live.native echo-reference snapshot failed", exc_info=True)
+        return False
+    return any(rms >= _ECHO_REFERENCE_ACTIVE_RMS for _ts, _dur, rms in reference)
 
 # How long a provider's readiness probe may take before the call is refused
 # (release SLO: an honest refusal within one second, spoken and visible).
@@ -181,6 +234,11 @@ class NativeLiveVoiceSession(LiveVoiceSession):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._native_turn_complete = True
+        # Same text backstop the realtime session uses (BUG-089): register
+        # every assistant transcript and drop provider-transcribed self-echo
+        # before it becomes a user turn. The acoustic envelope
+        # (``echo_reference``) arms the short-utterance judgment.
+        self._echo_guard = SelfEchoGuard()
 
     async def _start(self, message: dict) -> None:
         self._adopt_desktop_session()
@@ -458,6 +516,26 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         self.playback_active = False
         await self._emit_indicator({"type": "audio_clear"})
 
+    def _echo_should_hold_mic(self, pcm: bytes) -> bool:
+        """Hold quiet mic frames while our own speakers are in the envelope.
+
+        Adapts the desktop barge-in energy floor (``desktop.py``): without
+        local candidate-frame correlation on this path, low mic energy during
+        recent played output is treated as speaker bleed and never reaches
+        Gemini. A louder frame fails open — that is the barge-in path.
+        """
+        try:
+            reference = echo_reference.snapshot(_ECHO_REFERENCE_WINDOW_S)
+        except Exception:  # noqa: BLE001 — never block the mic on a snapshot error
+            log.debug("live.native echo-reference mic hold failed", exc_info=True)
+            return False
+        peaks = [rms for _ts, _dur, rms in reference if rms >= _ECHO_REFERENCE_ACTIVE_RMS]
+        if not peaks:
+            return False
+        mic_rms = _pcm16_rms(pcm)
+        threshold = max(_ECHO_MIC_HOLD_FLOOR, max(peaks) * _ECHO_MIC_HOLD_RATIO)
+        return mic_rms < threshold
+
     async def handle_audio_frame(self, pcm: bytes) -> None:
         if (
             self._connection is not None
@@ -465,6 +543,8 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             and not self._recovering
             and not self._input_muted
         ):
+            if self._echo_should_hold_mic(pcm):
+                return
             audio = self._resampler.process(pcm)
             if audio:
                 try:
@@ -477,6 +557,36 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 except Exception:
                     log.debug("Native audio send failed; closing transport", exc_info=True)
                     await self._connection.close()
+
+    def _is_provider_self_echo(self, text: str) -> bool:
+        """True when a final input transcript is our own recent speech.
+
+        ``judge_short`` is armed only while the echo envelope (or the session's
+        speaking/playback flags) says we were just audible — that is the
+        truncated-echo window from BUG-101. Novel user words fail open.
+        """
+        probe = str(text or "").strip()
+        if not probe:
+            return False
+        judge_short = self._output_was_running() or _echo_reference_recently_active()
+        try:
+            return bool(self._echo_guard.is_echo(probe, judge_short=judge_short))
+        except Exception:  # noqa: BLE001 — echo guard must never break barge-in
+            log.debug("live.native self-echo judgment failed", exc_info=True)
+            return False
+
+    async def _drop_self_echo_transcript(self, text: str) -> None:
+        """Swallow a provider-transcribed echo and stop any auto-answer to it."""
+        log.info(
+            "live.native[%s] dropped provider-transcribed self-echo "
+            "before it became a turn: %r",
+            self.session_id,
+            text[:80],
+        )
+        # Gemini Live creates responses automatically: the server may already
+        # be answering its own echo. Interrupt that generation; a genuine
+        # later user turn opens a fresh one.
+        await self._interrupt_reply()
 
     async def _open_replacement(self, history: list[dict]) -> None:
         native_history = tuple(
@@ -639,7 +749,21 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         if event.type == "audio_delta" and event.audio is not None:
             self._report_started()
             await self._note_speaking()
-            await self._send_binary(event.audio.pcm)
+            pcm = event.audio.pcm
+            rate = int(
+                getattr(event.audio, "sample_rate", 0)
+                or getattr(self._provider, "output_sample_rate", 0)
+                or 24_000
+            )
+            _record_played_pcm(pcm, rate)
+            # Date the text echo guard forward by this chunk's duration so
+            # short trailing echoes after the last transcript still match.
+            duration_s = (len(pcm) / 2) / float(rate) if rate > 0 else 0.0
+            if duration_s > 0.0:
+                self._echo_guard.touch(
+                    time.time_ns() + int(duration_s * 1e9)
+                )
+            await self._send_binary(pcm)
         elif event.type in {"input_transcript", "output_transcript_delta"}:
             role: Literal["user", "assistant"] = (
                 "user" if event.type == "input_transcript" else "assistant"
@@ -651,15 +775,20 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 text = event.text or ""
                 log.info(
                     "live.native[%s] input_transcript chars=%d final=%s "
-                    "output_running=%s speaking=%s playback_active=%s text=%r",
+                    "output_running=%s speaking=%s playback_active=%s "
+                    "echo_ref_active=%s text=%r",
                     self.session_id,
                     len(text),
                     bool(event.is_final),
                     self._output_was_running(),
                     bool(self._speaking),
                     bool(self.playback_active),
+                    _echo_reference_recently_active(),
                     text[:120],
                 )
+                if event.is_final and self._is_provider_self_echo(text):
+                    await self._drop_self_echo_transcript(text)
+                    return
                 self._tools.user_text = text
                 if event.is_final:
                     self._tools.revision += 1
@@ -695,6 +824,9 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                     task.add_done_callback(self._control_tasks.discard)
             if role == "assistant":
                 self._report_started()
+                assistant_text = event.text or ""
+                if assistant_text.strip():
+                    self._echo_guard.register(assistant_text, slot="assistant")
             if role == "assistant" or event.is_final:
                 stamp = time.monotonic_ns() // 1_000_000
                 await asyncio.to_thread(
