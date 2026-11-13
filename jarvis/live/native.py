@@ -626,6 +626,10 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             self._notify_ended()
             self._closed.set()
 
+    def _output_was_running(self) -> bool:
+        """Whether the assistant was audibly producing output right now."""
+        return bool(self._speaking or self.playback_active)
+
     async def _native_event(self, event: Any) -> None:
         assert self._tools is not None and self._ledger is not None
         if event.type in {
@@ -641,7 +645,22 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 "user" if event.type == "input_transcript" else "assistant"
             )
             if role == "user":
-                self._tools.user_text = event.text or ""
+                # Diagnose speaker-echo turns from the log alone: previously
+                # these only appeared as chat "user" lines (e.g. garbled
+                # fragments of our own reply) with no matching log entry.
+                text = event.text or ""
+                log.info(
+                    "live.native[%s] input_transcript chars=%d final=%s "
+                    "output_running=%s speaking=%s playback_active=%s text=%r",
+                    self.session_id,
+                    len(text),
+                    bool(event.is_final),
+                    self._output_was_running(),
+                    bool(self._speaking),
+                    bool(self.playback_active),
+                    text[:120],
+                )
+                self._tools.user_text = text
                 if event.is_final:
                     self._tools.revision += 1
                     if self._bus is not None:
@@ -722,8 +741,35 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         elif event.type in {"interrupted", "speech_started"}:
             # A barge-in into a report: the user heard its start and chose to
             # talk. The report is in the model's context for follow-ups.
+            superseded = bool(getattr(event, "superseded", False))
+            self_initiated = bool(getattr(event, "self_initiated", False))
+            output_running = self._output_was_running()
+            barge_in = event.type == "speech_started" and output_running
+            # Name the trigger so a chopped reply can be attributed from the
+            # log: provider barge-in, our own cancel, or a superseded regen.
+            if event.type == "interrupted":
+                if self_initiated:
+                    cause = "self_initiated_cancel"
+                elif superseded:
+                    cause = "provider_superseded_regen"
+                else:
+                    cause = "provider_interrupted"
+            else:
+                cause = "speech_started_barge_in" if barge_in else "speech_started_idle"
+            log.info(
+                "live.native[%s] abort cause=%s event=%s superseded=%s "
+                "self_initiated=%s output_running=%s speaking=%s "
+                "playback_active=%s",
+                self.session_id,
+                cause,
+                event.type,
+                superseded,
+                self_initiated,
+                output_running,
+                bool(self._speaking),
+                bool(self.playback_active),
+            )
             self._report_finished(delivered=True)
-            barge_in = event.type == "speech_started" and (self._speaking or self.playback_active)
             self._speaking = False
             self._thinking = False
             if barge_in:
