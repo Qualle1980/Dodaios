@@ -7,15 +7,19 @@ subscription. Mirrors :mod:`jarvis.codex_auth` for the Google side.
 Cross-platform (CLOUD.md Rule #1): pure stdlib, ``pathlib``-only, honors
 ``$GEMINI_HOME``, degrades to a clean "not installed" snapshot when no binary
 resolves. **No token value is ever read into business logic or logged** — only
-the *presence* of ``oauth_creds.json`` and the public ``selectedType`` decide
-the connection state (Google ToS: never scrape the token into our own client).
+on-disk login-file presence, the public ``selectedType``, and (for agy 1.5+
+keyring logins) a capability probe via ``agy models`` decide the connection
+state (Google ToS: never scrape the token into our own client; AP-21).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,6 +29,8 @@ from jarvis.core.interactive_terminal import (
     InteractiveTerminalUnavailable,
     launch_interactive_terminal,
 )
+from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
+from jarvis.google_cli.agy_models import parse_agy_models
 from jarvis.google_cli.resolver import GoogleCli, resolve_google_cli
 
 log = logging.getLogger(__name__)
@@ -81,6 +87,107 @@ def _oauth_login_present(home: Path) -> bool:
         except OSError:
             continue
     return False
+
+
+# agy 1.5+ keeps its OAuth login in the OS keyring and writes none of the files
+# above (verified live 2026-11-10 with agy 1.5.4: ``ChainedAuth: authenticated
+# via keyring``). Presence of a Credential Manager target would still guess
+# where the credential lives (upstream #1029). Instead we ask the CLI for a
+# capability: a non-empty ``agy models`` list means the account can fetch
+# models, which requires a live personal login (AP-21). Exit 0 with an empty
+# list is the unauthenticated case — so exit code alone is not the signal.
+_AGY_AUTH_PROBE_TTL_S = 30.0
+_AGY_AUTH_PROBE_TIMEOUT_S = 8.0
+_agy_auth_probe_lock = threading.Lock()
+_agy_auth_probe_cache: dict[str, tuple[float, bool]] = {}
+
+# Windows Credential Manager target used by agy for the keyring login. Used
+# only on logout so Disconnect clears the entry; status never reads it.
+_AGY_KEYRING_TARGET = "gemini:antigravity"
+_CRED_TYPE_GENERIC = 1
+_ERROR_NOT_FOUND = 1168
+
+
+def clear_agy_auth_probe_cache() -> None:
+    """Drop cached ``agy models`` auth probes (tests / login or logout)."""
+    with _agy_auth_probe_lock:
+        _agy_auth_probe_cache.clear()
+
+
+def _agy_auth_probe_cache_key(cli: GoogleCli) -> str:
+    return "\0".join(cli.argv_prefix) + "\0" + os.environ.get("GEMINI_HOME", "")
+
+
+def _probe_agy_subscription_via_models(cli: GoogleCli) -> bool:
+    """True when ``agy models`` returns a non-empty model list.
+
+    Cached with a short TTL: the status endpoint is polled by the UI and the
+    command hits the network (~seconds). Failures (missing binary, timeout,
+    non-zero exit, empty list) all report not-authenticated — never a crash
+    and never a false connected.
+    """
+    if cli.kind != "agy":
+        return False
+    key = _agy_auth_probe_cache_key(cli)
+    now = time.monotonic()
+    with _agy_auth_probe_lock:
+        cached = _agy_auth_probe_cache.get(key)
+        if cached is not None and now - cached[0] < _AGY_AUTH_PROBE_TTL_S:
+            return cached[1]
+
+    authenticated = False
+    try:
+        proc = subprocess.run(  # noqa: S603 — fixed argv from resolved CLI
+            [*cli.argv_prefix, "models"],
+            capture_output=True,
+            timeout=_AGY_AUTH_PROBE_TIMEOUT_S,
+            encoding="utf-8",
+            errors="replace",
+            text=True,
+            creationflags=NO_WINDOW_CREATIONFLAGS,
+        )
+        if proc.returncode == 0:
+            authenticated = bool(parse_agy_models(proc.stdout or ""))
+        else:
+            log.debug(
+                "agy models auth probe exited %s (stderr=%r)",
+                proc.returncode,
+                (proc.stderr or "")[:200],
+            )
+    except subprocess.TimeoutExpired as exc:
+        log.warning(
+            "agy models auth probe timed out after %.1fs: %s",
+            _AGY_AUTH_PROBE_TIMEOUT_S,
+            exc,
+        )
+    except OSError as exc:
+        log.warning("agy models auth probe failed to spawn: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — probe degrades, never raises into status
+        log.warning("agy models auth probe unexpected failure: %s", exc)
+
+    with _agy_auth_probe_lock:
+        _agy_auth_probe_cache[key] = (now, authenticated)
+    return authenticated
+
+
+def _advapi32() -> Any:
+    import ctypes
+
+    return ctypes.WinDLL("advapi32", use_last_error=True)
+
+
+def _delete_agy_keyring_login() -> None:
+    """Remove agy's Credential Manager login entry; absent is not an error."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    advapi32 = _advapi32()
+    if advapi32.CredDeleteW(ctypes.c_wchar_p(_AGY_KEYRING_TARGET), _CRED_TYPE_GENERIC, 0):
+        return
+    err = ctypes.get_last_error()
+    if err != _ERROR_NOT_FOUND:
+        raise OSError(err, f"could not remove the {_AGY_KEYRING_TARGET} credential")
 
 
 def _derive_google_auth(
@@ -214,6 +321,10 @@ class GoogleCliAuthService:
         connected, mode = _derive_google_auth(
             creds_present=creds_present, settings=self._read_json("settings.json")
         )
+        # File absence is not enough for agy 1.5+: the login may live only in
+        # the OS keyring. Ask the CLI whether it can list models (capability).
+        if not connected and _probe_agy_subscription_via_models(cli):
+            connected, mode = True, "oauth-personal"
         email = _email_from_accounts(_gemini_home()) if connected else None
 
         # Name WHAT was detected: the card is titled "Antigravity", but the
@@ -273,6 +384,8 @@ class GoogleCliAuthService:
             raise FileNotFoundError(
                 f"No Google CLI found. {antigravity_install_hint()}"
             )
+        # Next status must re-probe after the interactive login finishes.
+        clear_agy_auth_probe_cache()
         argv = list(cli.argv_prefix)  # bare interactive run — no `login` subcommand
         log.info("Starting Google CLI login (interactive bare run, kind=%s)", cli.kind)
         try:
@@ -291,13 +404,18 @@ class GoogleCliAuthService:
         the disconnect; this clears BOTH the Gemini CLI's ``oauth_creds.json`` and
         the agy token under ``antigravity-cli/`` (else Disconnect is a no-op for an
         agy login). The isolated brain home re-syncs to the absent login on the
-        next turn (see ``isolated_home``), so agy logs out there too.
+        next turn (see ``isolated_home``), so agy logs out there too. agy 1.5+
+        logs in through the OS keyring instead, so its Credential Manager entry
+        is removed as well (adapted from upstream #1029); the capability-probe
+        cache is cleared so the next status does not reuse a stale "connected".
 
         Returns ``(ok, error)``; ``ok`` is True when the login files are gone.
         """
         try:
             for path in _oauth_login_paths(_gemini_home()):
                 path.unlink(missing_ok=True)
+            _delete_agy_keyring_login()
+            clear_agy_auth_probe_cache()
             return True, None
         except OSError as exc:
             return False, str(exc)
