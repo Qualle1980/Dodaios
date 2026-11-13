@@ -277,6 +277,30 @@ async def test_speech_while_silent_does_not_interrupt(tmp_path, make_provider):
         session._ledger.close()
 
 
+@both_providers
+@pytest.mark.asyncio
+async def test_provider_interrupted_while_speaking_still_flushes_browser_playback(
+    tmp_path, make_provider
+):
+    """Gemini's ``interrupted`` edge is not ``speech_started``.
+
+    Measured 2026-11-13: the adapter logged ``interrupted`` with 6.8 s of
+    audio already buffered. The native handler must still emit ``tts_cancel``
+    so the browser flushes; only ``speech_started`` takes the ``audio_clear``
+    barge-in path. Real user barge-in stays intact either way.
+    """
+    session, connection, frames = _in_call(make_provider(), tmp_path)
+    try:
+        session._speaking = True
+        await session._native_event(RealtimeEvent(type="interrupted"))
+        assert "interrupt" not in connection.names()
+        assert all(frame["type"] != "audio_clear" for frame in frames)
+        assert any(frame["type"] == "tts_cancel" for frame in frames)
+        assert not session._speaking
+    finally:
+        session._ledger.close()
+
+
 # 4. Tool deadline ----------------------------------------------------------------
 
 

@@ -127,19 +127,15 @@ class PcmPlayback extends AudioWorkletProcessor {
         this.generation = msg.generation ?? this.generation + 1;
       }
       else if (msg.type === "pcm" && msg.data && !this.muted) {
-        // The bounded ring keeps the newest audio if a provider outruns
-        // playback for more than ten seconds. enqueue() drops the oldest
-        // samples on overrun, preventing stale latency and unbounded memory.
+        // The ring keeps already-queued audio contiguous. enqueue() refuses
+        // the newest samples when full (measured fix 2026-11-13: dropping
+        // the oldest jumped the playhead and sounded like overlap).
         const dropped = this.queue.enqueue(
           new Int16Array(msg.data),
           msg.startMs !== undefined && msg.endMs !== undefined
             ? { startMs: msg.startMs, endMs: msg.endMs } : undefined,
         );
         if (dropped > 0) {
-          // Diagnosis (2026-11-13): dropping the OLDEST audio jumps the
-          // answer forward mid-word, which a listener hears as speech
-          // running over itself. Nothing counted these, so the overlap
-          // could not be attributed to playback at all.
           this.droppedSamples += dropped;
           this.port.postMessage({
             type: "overrun", dropped, total: this.droppedSamples, rate: sampleRate,

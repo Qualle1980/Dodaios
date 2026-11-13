@@ -281,6 +281,40 @@ describe("realtime audio client", () => {
     await client.disconnect();
   });
 
+  it("flushes native playback on tts_cancel without an epoch so barge-in stays instant", async () => {
+    // Native interrupted edges emit tts_cancel with no epoch (see
+    // jarvis/live/native.py). The overlap fix must not break that flush:
+    // a real barge-in has to clear the ring, not keep speaking under the user.
+    installVoiceBrowserFakes();
+    vi.stubGlobal("Audio", class {
+      muted = false;
+      play = async () => undefined;
+      pause = () => undefined;
+    });
+    const client = new RealtimeAudioClient({}, { browserAudio: true, requiresWebRtcOffer: false });
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({
+      type: "audio_ready", requires_webrtc_answer: false,
+      output_transport: "timed_pcm", output_sample_rate: 24000,
+    });
+    await connecting;
+    const playback = FakeAudioNode.instances.find(node => node.name === "pcm-playback")!;
+    socket.receiveBinary(new Int16Array(12000).fill(400).buffer);
+    const before = playback.port.postMessage.mock.calls.length;
+    socket.receive({ type: "tts_cancel" });
+    const afterCancel = playback.port.postMessage.mock.calls.map(([m]) => m).slice(before);
+    expect(afterCancel.some((m) => m.type === "flush")).toBe(true);
+    socket.receiveBinary(new Int16Array(12000).fill(500).buffer);
+    const pcmAfter = playback.port.postMessage.mock.calls.map(([m]) => m)
+      .filter((m) => m.type === "pcm");
+    expect(pcmAfter.at(-1)?.startMs).toBe(0);
+    socket.receive({ type: "audio_closed" });
+    await client.disconnect();
+  });
+
   it("plays timed source audio once and highlights only at the device clock", async () => {
     installVoiceBrowserFakes();
     const speakers: { muted: boolean }[] = [];

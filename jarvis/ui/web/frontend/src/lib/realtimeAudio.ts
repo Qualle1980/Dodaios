@@ -567,6 +567,7 @@ export class RealtimeAudioClient {
 
   private flushPlayback(): void {
     this.playbackGeneration += 1;
+    this.lastTimedAudioEnd = -1;
     this.deviceTimeline.clear();
     this.speechTimeline.clear();
     this.playbackNode?.port.postMessage({ type: "flush", generation: this.playbackGeneration });
