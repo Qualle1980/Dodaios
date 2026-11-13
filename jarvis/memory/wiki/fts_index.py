@@ -409,6 +409,14 @@ def _parse_page_data(
             fm_parts.append(" ".join(str(item) for item in v if item is not None))
         else:
             fm_parts.append(str(v))
+    # Exact machine-readable markers preserve the frontmatter key/value pair.
+    # Plain flattened values cannot distinguish ``status: verified`` from a
+    # different field that happens to contain the word "verified".
+    for key in ("status", "note_type"):
+        value = str(frontmatter.get(key, "")).strip().casefold()
+        marker_value = re.sub(r"[^a-z0-9_-]+", "_", value).strip("_")
+        if marker_value:
+            fm_parts.append(f"__fm_{key}_{marker_value}__")
     # The filename stem is searchable too: a page is often asked for by its
     # file name, whose words need not appear in the H1. The boot reconcile
     # rebuilds the whole index, so existing databases pick this up on restart.
