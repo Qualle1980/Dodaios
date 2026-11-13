@@ -2,9 +2,8 @@
 
 Live 2026-11-11 E1 asked for a line in docs/; the model wrote a vault note
 via wiki_ingest and called it "the documents". F-0 (catalog packing that
-stops instead of skipping) makes workspace-orchestrate reachable when it
-lands, but that packing fix is not on origin/main for this branch, and even
-with it the speech lie needs claim-scoped honesty (part a).
+stops instead of skipping) landed via #145; claim-scoped honesty (part a)
+still catches the wiki-as-documents speech lie even when packing is fixed.
 """
 
 from __future__ import annotations
@@ -13,16 +12,22 @@ from jarvis.brain.action_honesty import replace_unbacked_action_claim
 from jarvis.live.config import LiveConfig
 
 
-def test_f0_packing_stop_is_not_on_this_tree() -> None:
-    """Document that (c) is not cured by F-0 here: packing still continues."""
+def test_f0_packing_stop_is_on_this_tree() -> None:
+    """#145 landed F-0: non-promised packing breaks instead of skipping."""
+    import re
     from pathlib import Path
 
     tools_src = Path(__file__).resolve().parents[3] / "jarvis" / "live" / "tools.py"
     text = tools_src.read_text(encoding="utf-8")
-    # Unfixed packing drops an oversized tool with continue and keeps filling.
-    assert "used_bytes + size > _CATALOG_BYTE_BUDGET" in text
-    budget_block = text.split("used_bytes + size > _CATALOG_BYTE_BUDGET", 1)[1][:200]
-    assert "continue" in budget_block
+    # Promised tools may still continue (short form / fault log); phase-2
+    # unpromised packing must stop so a light low-rank tool cannot steal the
+    # slot of a heavy high-rank one.
+    assert re.search(
+        r"used_bytes \+ size > _CATALOG_BYTE_BUDGET:\s*"
+        r"if promised:.*?continue.*?break",
+        text,
+        re.DOTALL,
+    ), "phase-2 packing must break after the promised short-path, not skip"
 
 
 def test_live_instructions_refuse_wiki_as_documents_substitute() -> None:
