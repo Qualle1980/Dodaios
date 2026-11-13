@@ -50,6 +50,8 @@ def _port_from_api_base() -> int | None:
     try:
         port = urlsplit(base).port
     except ValueError:
+        # A malformed authority has no port to report; "unknown" is the honest
+        # answer and the caller already treats None as "not listening yet".
         return None
     return int(port) if port else None
 

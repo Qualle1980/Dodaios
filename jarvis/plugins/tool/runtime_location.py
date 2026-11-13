@@ -41,6 +41,8 @@ class RuntimeLocationTool:
         try:
             facts = runtime_location_facts(version=version)
         except Exception as exc:  # noqa: BLE001
+            # Not silence: the failure is handed to the caller as a failed
+            # ToolResult carrying the exception type and message.
             return ToolResult(
                 success=False,
                 output=None,
