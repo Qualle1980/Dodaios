@@ -560,11 +560,14 @@ export class RealtimeAudioClient {
   private timedEpoch = 0;
   private playbackGeneration = 0;
   private lastTimedAudioEnd = -1;
+  private playbackDiagSent = false;
+  private lastOverrunReportAt = 0;
   private readonly deviceTimeline = new DevicePlaybackTimeline();
   private readonly speechTimeline = new TimedSpeechTracker();
 
   private flushPlayback(): void {
     this.playbackGeneration += 1;
+    this.lastTimedAudioEnd = -1;
     this.deviceTimeline.clear();
     this.speechTimeline.clear();
     this.playbackNode?.port.postMessage({ type: "flush", generation: this.playbackGeneration });
@@ -857,6 +860,11 @@ export class RealtimeAudioClient {
         // RTP is measured by pcm-level. The unused PCM queue produces zeros
         // and must not erase the real output meter thirty times per second.
         if (this.options.browserAudio && this.options.requiresWebRtcOffer && !this.timedOutput) return;
+        if (event.data?.type === "overrun") {
+          const o = event.data as { dropped?: number; total?: number; rate?: number };
+          this.reportOverrun(Number(o.dropped ?? 0), Number(o.total ?? 0), Number(o.rate ?? 0));
+          return;
+        }
         if (event.data?.type === "playback") {
           if (!this.ctx || this.outputMuted || event.data.generation !== this.playbackGeneration) return;
           this.deviceTimeline.rendered(event.data.spans as RenderedAudioInterval[]);
@@ -1316,14 +1324,50 @@ export class RealtimeAudioClient {
    */
   private handleUntimedAudio(pcm: ArrayBuffer): void {
     if (!this.timedOutput || !pcm.byteLength) {
+      this.reportPlaybackOnce(false, pcm.byteLength ? "no timed session" : "empty frame");
       this.handleAudio(pcm);
       return;
     }
+    this.reportPlaybackOnce(true, "untimed frame joined the timeline");
     const startMs = Math.max(0, this.lastTimedAudioEnd);
     // The wire is PCM16 at the session's output rate; two bytes per sample.
     const endMs = startMs + (pcm.byteLength / 2) * 1000 / UNTIMED_PCM_SAMPLE_RATE;
     this.lastTimedAudioEnd = endMs;
     this.handleAudio(pcm, { startMs, endMs });
+  }
+
+  /** Say once per connection whether raw frames join the ordered timeline.
+   *
+   * Diagnosis only. A long answer was heard with words over each other while
+   * the backend log proved one generation produced them (2026-11-13), and
+   * nothing told us which half failed: the app is a WebView with no console,
+   * and the server could not see whether its transport announcement had
+   * reached ``selectOutputTransport`` before audio started.
+   */
+  /** Forward a playback overrun to the backend log, at most once a second. */
+  private reportOverrun(dropped: number, total: number, rate: number): void {
+    const now = performance.now();
+    if (now - this.lastOverrunReportAt < 1000) return;
+    this.lastOverrunReportAt = now;
+    try {
+      this.ws?.send(JSON.stringify({
+        type: "playback_overrun", dropped, total, rate,
+      }));
+    } catch {
+      // A closed socket must never cost audio; the line is diagnostic.
+    }
+  }
+
+  private reportPlaybackOnce(ordered: boolean, detail: string): void {
+    if (this.playbackDiagSent) return;
+    this.playbackDiagSent = true;
+    try {
+      this.ws?.send(JSON.stringify({
+        type: "playback_diag", ordered, timed_output: this.timedOutput, detail,
+      }));
+    } catch {
+      // A closed socket must never cost audio; the line is diagnostic.
+    }
   }
 
   private handleAudio(pcm: ArrayBuffer, timing?: AudioInterval): void {

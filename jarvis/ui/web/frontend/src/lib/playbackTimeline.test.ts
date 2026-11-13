@@ -82,9 +82,14 @@ describe("source audio to device to transcript", () => {
     device.clear();
     tracker.played(device.advance(600));
     expect(readTimedSpeechPlayback("cut")?.chars).toBe(5);
-    const queue = new TimedPcmQueue(1000);
-    queue.enqueue(new Int16Array(12_000), { startMs: 0, endMs: 12_000 });
-    expect(queue.render(new Float32Array(1000), 0)[0].startMs).toBe(2000);
+    // A burst larger than the ring keeps the contiguous prefix (startMs 0).
+    // Drop-oldest used to jump the highlight to 2000 ms; that jump was the
+    // audible overlap. Force a tiny ring via the sample rate so the refusal
+    // path is exercised without depending on the production buffer length.
+    const queue = new TimedPcmQueue(100);
+    expect(queue.enqueue(new Int16Array(12_000), { startMs: 0, endMs: 12_000 }))
+      .toBeGreaterThan(0);
+    expect(queue.render(new Float32Array(100), 0)[0].startMs).toBe(0);
     const dropped = new TimedSpeechTracker();
     dropped.text(cue("dropped", "Not heard", 0, 1000));
     dropped.played([{ startMs: 2000, endMs: 3000 }]);

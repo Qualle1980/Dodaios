@@ -4,12 +4,15 @@ export const CAPTURE_PACKET_SECONDS = 0.02;
 /**
  * Maximum playback backlog retained inside the AudioWorklet.
  *
- * Ten seconds absorbs substantial scheduler/network jitter while keeping the
- * queue below 1 MiB at 48 kHz (PCM16). If a provider outruns playback beyond
- * this bound, the queue drops its oldest samples so latency cannot grow
- * without limit.
+ * Sized for a long spoken Live answer that arrives faster than realtime.
+ * Measured 2026-11-13: Gemini Live delivered 6.8 s of PCM in 0.99 s of wall
+ * clock; a ~27 s answer therefore outruns a ten-second ring. Dropping the
+ * oldest samples to stay inside that ring jumped the playhead mid-word and
+ * listeners heard words on top of each other. Sixty seconds holds a long
+ * answer (~5.8 MiB PCM16 at 48 kHz) without that jump; a still-larger burst
+ * refuses the newest samples instead (see BoundedPcm16Queue.enqueue).
  */
-export const MAX_PLAYBACK_BUFFER_SECONDS = 10;
+export const MAX_PLAYBACK_BUFFER_SECONDS = 60;
 
 /**
  * Jitter reserve banked before playback starts and after a true underrun.
@@ -103,9 +106,12 @@ export class Pcm16Packetizer {
 /**
  * Fixed-capacity PCM16 ring used by the playback render thread.
  *
- * On overrun, enqueue() drops the oldest queued samples and returns the number
- * dropped. Retained samples always preserve their original order. This favors
- * current speech over an ever-growing stale backlog.
+ * On overrun, enqueue() keeps the samples already queued (and the prefix of
+ * the new chunk that still fits) and returns how many NEW samples were
+ * refused. Advancing the read cursor used to drop the oldest audio instead;
+ * that jump was the live overlap of 2026-11-13. Refusing the newest audio
+ * leaves a contiguous answer on the speaker; barge-in still clears the ring
+ * through the existing flush path.
  */
 export class BoundedPcm16Queue {
   private readonly samples: Int16Array;
@@ -133,29 +139,21 @@ export class BoundedPcm16Queue {
   enqueue(input: Int16Array): number {
     if (input.length === 0) return 0;
 
-    if (input.length >= this.capacity) {
-      const dropped = this.queued + input.length - this.capacity;
-      this.samples.set(input.subarray(input.length - this.capacity));
-      this.readIndex = 0;
-      this.writeIndex = 0;
-      this.queued = this.capacity;
-      return dropped;
-    }
+    const free = this.capacity - this.queued;
+    if (free <= 0) return input.length;
 
-    const dropped = Math.max(0, this.queued + input.length - this.capacity);
-    if (dropped > 0) {
-      this.readIndex = (this.readIndex + dropped) % this.capacity;
-      this.queued -= dropped;
-    }
+    const accepted = Math.min(input.length, free);
+    const refused = input.length - accepted;
+    const chunk = accepted === input.length ? input : input.subarray(0, accepted);
 
-    const firstCopy = Math.min(input.length, this.capacity - this.writeIndex);
-    this.samples.set(input.subarray(0, firstCopy), this.writeIndex);
-    if (firstCopy < input.length) {
-      this.samples.set(input.subarray(firstCopy), 0);
+    const firstCopy = Math.min(chunk.length, this.capacity - this.writeIndex);
+    this.samples.set(chunk.subarray(0, firstCopy), this.writeIndex);
+    if (firstCopy < chunk.length) {
+      this.samples.set(chunk.subarray(firstCopy), 0);
     }
-    this.writeIndex = (this.writeIndex + input.length) % this.capacity;
-    this.queued += input.length;
-    return dropped;
+    this.writeIndex = (this.writeIndex + chunk.length) % this.capacity;
+    this.queued += chunk.length;
+    return refused;
   }
 
   dequeueInto(output: Float32Array): number {
