@@ -828,6 +828,13 @@ class LiveVoiceSession:
         if levels.playback_active:
             level_tap.publish(levels.output_level)
             level_tap.note_playing(0.3)
+            # Live plays in the browser, so AudioPlayer never records the
+            # envelope. Feed the process-local echo reference from the page's
+            # own output meter (~100 ms cadence) so the native path can arm
+            # its speaker-echo gates the way desktop barge-in does.
+            from jarvis.audio import echo_reference
+
+            echo_reference.record(float(levels.output_level), 0.1)
         elif previous_playback:
             level_tap.reset_playing()
         if meter_owned:
