@@ -30,6 +30,7 @@ from contextlib import suppress
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
 from jarvis.core.protocols import BrainDelta, BrainRequest
+from jarvis.google_cli.agy_models import parse_agy_models
 from jarvis.google_cli.isolated_home import (
     ensure_isolated_home as _ensure_isolated_home,
 )
@@ -241,24 +242,6 @@ def _is_model_rejection(message: str) -> bool:
     """Whether a failed run failed because of the MODEL, not the subscription."""
     lowered = message.lower()
     return any(marker in lowered for marker in _MODEL_REJECTION_MARKERS)
-
-
-def parse_agy_models(stdout: str) -> tuple[str, ...]:
-    """Model ids from ``agy models`` output (``id<TAB>display name`` per line).
-
-    Tolerant on purpose: the command prints a progress line to stderr and may
-    gain columns, so only the first tab-separated field of plausible lines is
-    read.
-    """
-    ids: list[str] = []
-    for raw in stdout.splitlines():
-        line = raw.strip()
-        if not line or "	" not in line:
-            continue
-        candidate = line.split("	", 1)[0].strip()
-        if candidate and " " not in candidate:
-            ids.append(candidate)
-    return tuple(ids)
 
 
 #: Model ids reported by ``agy models``, cached per process. The command does a

@@ -72,9 +72,16 @@ async def antigravity_test() -> dict[str, Any]:
 
 @router.post("/antigravity/login")
 async def antigravity_login() -> dict[str, Any]:
-    """Start the interactive Google login in a terminal. 409 if no CLI is found."""
+    """Start the interactive Google login in a terminal. 409 if no CLI is found.
+
+    Off the event loop: ``status()`` may spawn the Google CLI (keyring probe)
+    for up to several seconds when no on-disk token is present — exactly the
+    state a user is in when they press Connect. On the loop that pause froze
+    everything else in this process, including the realtime voice socket
+    (forensic 2026-07-27; same reason as :func:`antigravity_status`).
+    """
     service = GoogleCliAuthService()
-    status = service.status()
+    status = await asyncio.to_thread(service.status)
     if not status.installed:
         raise HTTPException(
             status_code=409,
