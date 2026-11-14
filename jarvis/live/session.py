@@ -1783,6 +1783,13 @@ class LiveVoiceSession:
                 from jarvis.live.tools import annotate_failed_tool_result
 
                 result = annotate_failed_tool_result(result)
+                if result.get("withhold_tool_response"):
+                    log.warning(
+                        "Live session withholding tool response for %s "
+                        "(identical-call storm ended)",
+                        item.get("name"),
+                    )
+                    continue
                 if result.get("success") is False or result.get("speak_failure"):
                     self._turn_failed_tools.add(str(item.get("name") or ""))
                 image_inputs.extend(take_images(result))
@@ -2064,6 +2071,10 @@ class LiveVoiceSession:
         # Marked before the wire: the model's answer can arrive while the
         # send is still being awaited, and must count as this report's.
         self._report_sent()
+        # Application events skip a revision bump; drop stale read receipts (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send(
                 {

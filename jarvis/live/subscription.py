@@ -208,6 +208,12 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
                 self._tools.accept_new_input()
                 self._resume_needs_input = False
                 self._reconnect_attempts = 0
+            else:
+                # Application events skip the revision bump; still drop stale
+                # identical-call receipts so follow-up reads see new state (F4).
+                invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+                if callable(invalidate):
+                    invalidate(reset_waves=True)
             revision = self._tools.revision
             prompt = str(
                 event.get("prompt")
