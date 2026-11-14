@@ -35,6 +35,21 @@ log = logging.getLogger(__name__)
 _SPEAK_FAILURE_MANDATE = (
     "Speak this failure to the user now. Do not claim the action succeeded."
 )
+# Returned when the model re-issues the exact same call in one user turn
+# (live 2026-11-14: workspace-orchestrate status / run_app_action loops at
+# 2–3 calls/s with almost no speech). Distinct from a progressing chain
+# (discover_tools → call_tool, or the same tool with different args).
+_REPEAT_SPEAK_NOW = (
+    "This exact tool call already returned for this user turn. "
+    "Use the prior receipt below. Speak the answer to the user now; "
+    "do not call this tool again with the same arguments."
+)
+# Hang-up, approval and live task status must see a fresh turn. Screen
+# tools intentionally re-issue the same screenshot/click shape across
+# rounds. Every other identical call is answered from the prior receipt.
+_IDENTITY_REPLAY_EXCLUDED = frozenset({"end_call", "confirm_action", "task_status"})
+_ARGS_LOG_CHARS = 240
+_ERROR_LOG_CHARS = 160
 
 # Docs about this app itself. The shared planner (F-1) puts this in
 # ``required_capabilities`` for SELF_KNOWLEDGE turns; Gemini Live cannot be
@@ -406,6 +421,16 @@ class LiveTools:
         self._catalog_surface_reported: tuple[int, int, int] | None = None
         self.end_requested = False
         self.accepting = True
+        # Finished receipts keyed by (revision, tool+args identity). A second
+        # identical call in the same user turn returns the prior receipt
+        # instead of re-running (PR #142 deferred this; live 2026-11-14).
+        self._finished_by_identity: dict[tuple[int, str], dict] = {}
+        # Identical calls still running. Tools outside ``_lane`` (the live
+        # 2026-11-14 storm was lane-free ``workspace-orchestrate`` and
+        # ``jarvis_run_app_action``) run concurrently, so a 2-3/s burst would
+        # pass the finished-receipt cache before the first call recorded one.
+        # A repeat awaits the running call and answers from its receipt.
+        self._inflight_by_identity: dict[tuple[int, str], asyncio.Future] = {}
         # Revisions that already ran planner-owned product_help grounding.
         # One entry per user turn prevents the 2026-11-09 empty-args loop shape
         # (177 identical calls) from ever forming on this path.
@@ -421,6 +446,11 @@ class LiveTools:
         if value == self._revision:
             return
         self._revision = value
+        # A new user request may legitimately re-ask; drop the prior turn's
+        # identical-call cache so progress is not blocked across turns.
+        self._finished_by_identity.clear()
+        # Running calls keep their own future; only the lookup is dropped.
+        self._inflight_by_identity.clear()
         waiters, self._revision_waiters = self._revision_waiters, []
         for waiter in waiters:
             if not waiter.done():
@@ -1058,6 +1088,50 @@ class LiveTools:
             }
         if not self.accepting:
             return {"success": False, "status": "voice_closed_before_execution"}
+        self._log_tool_call(name, args)
+        # Progress vs repeat: an identical (tool, args) pair that already
+        # finished in this revision returns its receipt; a new argument set
+        # still runs. Consent, task_status and screen tools are excluded.
+        repeated = self._replay_identical_receipt(name, args, revision)
+        if repeated is not None:
+            self._log_tool_result(name, repeated)
+            return repeated
+        identity = self._tool_call_identity(name, args)
+        key = (revision, identity) if identity is not None else None
+        running = self._inflight_by_identity.get(key) if key is not None else None
+        if running is not None:
+            log.info(
+                "Live tool %s is already running with identical arguments in "
+                "revision %s; awaiting that call",
+                name, revision,
+            )
+            prior = await asyncio.shield(running)
+            out = self._as_identical_repeat(prior)
+            self._log_tool_result(name, out)
+            return out
+        inflight: asyncio.Future | None = None
+        if key is not None:
+            inflight = asyncio.get_running_loop().create_future()
+            self._inflight_by_identity[key] = inflight
+        try:
+            result, receipt = await self._claim_and_run(
+                call_id, name, args, revision, replay_result,
+            )
+        except BaseException:
+            if inflight is not None and not inflight.done():
+                inflight.cancel()
+            raise
+        finally:
+            if key is not None:
+                self._inflight_by_identity.pop(key, None)
+        if inflight is not None and not inflight.done():
+            inflight.set_result(receipt)
+        return result
+
+    async def _claim_and_run(
+        self, call_id: str, name: str, args: dict, revision: int, replay_result: dict | None,
+    ) -> tuple[dict, dict]:
+        """Run one claimed call; returns its result and the recorded receipt."""
         receipt = await asyncio.to_thread(
             self.ledger.claim,
             self.session_id,
@@ -1067,7 +1141,8 @@ class LiveTools:
             revision,
         )
         if receipt is not None:
-            return receipt
+            self._log_tool_result(name, receipt)
+            return receipt, receipt
         try:
             if replay_result is not None and self.steering_replay_key(name, args) is None:
                 result = {
@@ -1102,7 +1177,94 @@ class LiveTools:
             receipt["output"] = {k: v for k, v in receipt["output"].items() if k != "_image"}
         take_images(receipt)
         await asyncio.to_thread(self.ledger.finish, self.session_id, call_id, receipt)
-        return result
+        self._remember_identical_receipt(name, args, revision, receipt)
+        self._log_tool_result(name, receipt)
+        return result, receipt
+
+    def _tool_call_identity(self, name: str, args: dict) -> str | None:
+        """Stable identity of a call, or None when the call must stay fresh."""
+        call = self._replay_call(name, args)
+        if call is None:
+            return None
+        resolved, resolved_args = call
+        if resolved in _IDENTITY_REPLAY_EXCLUDED or resolved in _SCREEN_TOOLS:
+            return None
+        return json.dumps([resolved, resolved_args], sort_keys=True, default=str)
+
+    def _replay_identical_receipt(
+        self, name: str, args: dict, revision: int,
+    ) -> dict | None:
+        """Prior finished receipt for this exact call in this user turn, if any."""
+        identity = self._tool_call_identity(name, args)
+        if identity is None:
+            return None
+        prior = self._finished_by_identity.get((revision, identity))
+        if prior is None:
+            return None
+        log.info(
+            "Live tool %s repeated with identical arguments in revision %s; "
+            "returning prior receipt",
+            name, revision,
+        )
+        return self._as_identical_repeat(prior)
+
+    def _as_identical_repeat(self, prior: dict) -> dict:
+        """A prior receipt handed back to an identical repeat, with speak-now."""
+        out = {
+            **prior,
+            "reused_receipt": True,
+            "repeat_of_identical_call": True,
+            "next_step": _REPEAT_SPEAK_NOW,
+        }
+        # Failures keep their speak-failure mandate; successes need an
+        # explicit speak-now cue so the model stops chaining tools.
+        if out.get("success") is not False:
+            notice = str(out.get("notice") or "").strip()
+            out["notice"] = (
+                f"{notice} {_REPEAT_SPEAK_NOW}".strip() if notice else _REPEAT_SPEAK_NOW
+            )
+        else:
+            error = str(out.get("error") or "").strip()
+            if _REPEAT_SPEAK_NOW not in error:
+                out["error"] = f"{error} {_REPEAT_SPEAK_NOW}".strip()
+        return annotate_failed_tool_result(out)
+
+    def _remember_identical_receipt(
+        self, name: str, args: dict, revision: int, receipt: dict,
+    ) -> None:
+        identity = self._tool_call_identity(name, args)
+        if identity is None:
+            return
+        # Store a copy without image bytes; take_images already stripped them.
+        self._finished_by_identity[(revision, identity)] = dict(receipt)
+
+    def _log_tool_call(self, name: str, args: dict) -> None:
+        """Args preview for diagnosis; redacted and length-capped (no secrets)."""
+        from jarvis.core.redact import safe_preview
+
+        log.info(
+            "Live tool call %s args=%s",
+            name,
+            safe_preview(args, max_chars=_ARGS_LOG_CHARS),
+        )
+
+    def _log_tool_result(self, name: str, result: dict) -> None:
+        """Outcome summary: success, short error, payload size, reuse flag."""
+        from jarvis.core.redact import safe_preview
+
+        try:
+            payload_bytes = len(json.dumps(result, default=str))
+        except Exception:  # noqa: BLE001 — logging must never break the call
+            log.warning("Live tool result size encoding failed for %s", name, exc_info=True)
+            payload_bytes = -1
+        log.info(
+            "Live tool result %s success=%s error=%s bytes=%s reused=%s",
+            name,
+            result.get("success"),
+            safe_preview(result.get("error") or "", max_chars=_ERROR_LOG_CHARS),
+            payload_bytes,
+            bool(result.get("reused_receipt") or result.get("repeat_of_identical_call")),
+        )
 
     async def _execute(
         self, name: str, args: dict, revision: int, *, call_id: str = "",
