@@ -99,6 +99,9 @@ DEFAULT_RECHECK_INTERVAL_S = 300.0
 #: are allowed to spend the character budget. A strict subset of
 #: ``jarvis.memory.wiki.profile.PROFILE_SECTIONS`` (guarded by a parity test):
 #: "Decisions" and "Sources" are episodic bookkeeping, not who someone is.
+#: "Relationships" is excluded on purpose: the standing block rides every
+#: live turn to a cloud provider, and third-party personal facts must not
+#: (live 2026-11-14). Those notes stay in the vault for deliberate recall.
 PROFILE_SECTION_PRIORITY: tuple[str, ...] = (
     "Summary",
     "Identity",
@@ -106,7 +109,6 @@ PROFILE_SECTION_PRIORITY: tuple[str, ...] = (
     "Work style",
     "Values",
     "Active projects",
-    "Relationships",
 )
 
 #: Entries per group. One verbose section must not be able to eat the card.
@@ -129,6 +131,44 @@ _HEADING_RE = re.compile(r"\A\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*\Z")
 _EMPHASIS_RE = re.compile(r"[*_`~]{1,3}")
 _WS_RE = re.compile(r"\s+")
 _KEY_NOISE_RE = re.compile(r"[^\w]+", re.UNICODE)
+#: "Birthday: 1 January" / "favourite dish: pasta" — field-level dedupe key.
+_FIELD_LABEL_RE = re.compile(
+    r"\A(name|birthday|birth\s*date|date\s*of\s*birth|favourite\s*dish|"
+    r"favorite\s*dish|github|language|languages|speaks|reply\s*language|"
+    r"primary\s*language|answers?\s*in|project|goal)\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+_GENERIC_NAMES = frozenset({"user", "the user", "me", "owner"})
+#: Lines that set how the assistant should speak / which language the user uses.
+_LANGUAGE_LINE_RE = re.compile(
+    r"(?:"
+    r"\b(?:primary|main|default|reply|output|answer|spoken)?\s*languages?\b"
+    r"|\bspeaks?\b"
+    r"|\banswers?\s+in\b"
+    r"|\breply(?:\s+in)?\b"
+    r"|\bdeutsch\b|\bgerman\b|\benglish\b|\barabic\b|\bspanish\b|\bportuguese\b"
+    r")",
+    re.IGNORECASE,
+)
+#: Reply/output pins beat "primary language" / "speaks …" lists when both exist.
+_LANGUAGE_REPLY_PIN_RE = re.compile(
+    r"\b(?:reply|output|answer)\s*languages?\b|\banswers?\s+in\b|\breply\s+in\b",
+    re.IGNORECASE,
+)
+#: Conservative third-party markers for vault sentences (not the user).
+_THIRD_PARTY_RE = re.compile(
+    r"(?:"
+    r"\b(?:partner|spouse|wife|husband|girlfriend|boyfriend|mother|father|"
+    r"brother|sister|sibling|friend|colleague|coworker|child|son|daughter|"
+    r"relationship)\b"
+    r"|\b(?:he|she)\s+(?:is|has|was|prefers|likes|lives)\b"
+    r")",
+    re.IGNORECASE,
+)
+_QUESTION_NAME_RE = re.compile(
+    r"[?¿؟]|^\s*(?:what|who|wie|was|wer|wo|wann|warum|which|where|when|why)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,16 +227,99 @@ def _key(text: str) -> str:
     return _KEY_NOISE_RE.sub("", text.casefold())
 
 
+#: Synonyms collapse to one field key so "Birthday" / "Date of birth" / "Birth
+#: date" cannot each take a card slot with the same fact.
+_FIELD_ALIASES: dict[str, str] = {
+    "birthday": "birthday",
+    "birthdate": "birthday",
+    "dateofbirth": "birthday",
+    "favouritedish": "favourite_dish",
+    "favoritedish": "favourite_dish",
+    "language": "language",
+    "languages": "language",
+    "speaks": "language",
+    "replylanguage": "language",
+    "primarylanguage": "language",
+    "answersin": "language",
+    "github": "github",
+    "name": "name",
+    "project": "project",
+    "goal": "goal",
+}
+
+
+def _field_key(text: str) -> str | None:
+    """Canonical field name for ``Key: value`` lines, else None."""
+    match = _FIELD_LABEL_RE.match(text)
+    if match is None:
+        return None
+    raw = _key(match.group(1))
+    return _FIELD_ALIASES.get(raw, raw)
+
+
+def _is_language_line(text: str) -> bool:
+    return bool(_LANGUAGE_LINE_RE.search(text))
+
+
+def _is_junk_name(text: str) -> bool:
+    """Reject placeholder / interrogative names that pollute the Name group."""
+    folded = text.casefold().strip()
+    if folded in _GENERIC_NAMES:
+        return True
+    if _QUESTION_NAME_RE.search(text):
+        return True
+    if len(folded) > 40:
+        return True
+    return False
+
+
+def _is_third_party_line(text: str) -> bool:
+    """Conservative: personal facts that read as about someone else."""
+    return bool(_THIRD_PARTY_RE.search(text))
+
+
 class _Collector:
     """Ordered, deduplicated groups of card entries."""
 
     def __init__(self) -> None:
         self._groups: dict[str, list[str]] = {}
         self._keys: list[str] = []
+        self._field_keys: set[str] = set()
+        self._language_kept: bool = False
+        self._language_is_reply_pin: bool = False
+        self._language_source: str = ""
+        self._language_label: str = ""
+        self._language_text: str = ""
 
     def add(self, label: str, value: object) -> None:
         text = _clean(value)
         if not text:
+            return
+        name_field = _FIELD_LABEL_RE.match(text)
+        name_value = text
+        if name_field and _key(name_field.group(1)) == "name":
+            name_value = text[name_field.end() :].strip()
+        if label == "Name" and _is_junk_name(text):
+            return
+        if name_field and _key(name_field.group(1)) == "name" and _is_junk_name(name_value):
+            return
+        if _is_third_party_line(text):
+            return
+        if _is_language_line(text):
+            is_pin = bool(_LANGUAGE_REPLY_PIN_RE.search(text))
+            if self._language_kept and not (is_pin and not self._language_is_reply_pin):
+                return
+            if self._language_kept and is_pin and not self._language_is_reply_pin:
+                self._drop_language_line()
+            annotated = f"{text} (from {label})"
+            self._language_kept = True
+            self._language_is_reply_pin = is_pin
+            self._language_source = label
+            self._language_label = label
+            self._language_text = annotated
+            text = annotated
+        field = _field_key(text)
+        if field and field in self._field_keys:
             return
         key = _key(text)
         if not key or self._is_duplicate(key):
@@ -205,7 +328,24 @@ class _Collector:
         if len(bucket) >= _MAX_ENTRIES_PER_GROUP:
             return
         self._keys.append(key)
+        if field:
+            self._field_keys.add(field)
         bucket.append(text)
+
+    def _drop_language_line(self) -> None:
+        """Remove a weaker language line so a reply pin can replace it."""
+        if not self._language_text:
+            return
+        label = self._language_label
+        old = self._language_text
+        bucket = self._groups.get(label)
+        if bucket and old in bucket:
+            bucket.remove(old)
+        old_key = _key(old)
+        self._keys = [k for k in self._keys if k != old_key]
+        field = _field_key(old)
+        if field:
+            self._field_keys.discard(field)
 
     def _is_duplicate(self, key: str) -> bool:
         for seen in self._keys:
@@ -220,6 +360,15 @@ class _Collector:
 
     def groups(self) -> list[tuple[str, list[str]]]:
         return [(label, list(entries)) for label, entries in self._groups.items() if entries]
+
+    @property
+    def language_source(self) -> str:
+        return self._language_source
+
+    def mark_language_resolved(self, source: str) -> None:
+        """A prior source already fixed the language line (e.g. memory-vault)."""
+        self._language_kept = True
+        self._language_source = source
 
 
 # ---------------------------------------------------------------------------
@@ -338,12 +487,18 @@ def distill_identity_card(
     """
     lines: list[str] = []
     used = 0
+    language_kept = False
 
     for _section, sentences in vault_sections:
         for sentence in sentences:
             text = " ".join(str(sentence).split())
-            if not text:
+            if not text or _is_third_party_line(text):
                 continue
+            if _is_language_line(text):
+                if language_kept:
+                    continue
+                text = f"{text} (from memory-vault)"
+                language_kept = True
             line = f"- {text}"
             projected = used + (1 if lines else 0) + len(line)
             if projected > max_chars:
@@ -352,6 +507,8 @@ def distill_identity_card(
             lines.append(line)
 
     collector = _Collector()
+    if language_kept:
+        collector.mark_language_resolved("memory-vault")
     _collect_profile(collector, profile_markdown or "")
     _collect_core_memory(collector, core_memory)
 
@@ -438,7 +595,6 @@ def _vault_profile_path(config: Any) -> Path | None:
 _NAME_FACT_RE = re.compile(r"^\s*[-*]\s*name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _ALIASES_RE = re.compile(r"^aliases\s*:\s*\[([^\]]*)\]", re.IGNORECASE | re.MULTILINE)
 _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
-_GENERIC_NAMES = frozenset({"user", "the user", "me", "owner"})
 
 
 def _plausible_name(raw: str) -> str | None:

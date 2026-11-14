@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import sys
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from jarvis.brain.cu_gate import CU_VEHICLE_TOOL_NAMES
@@ -122,38 +122,48 @@ _GO_AHEAD_WORDS = frozenset(
 _APPROVAL_LOCALES = ("de", "en", "es", "pt")
 _RECENT_SEGMENTS = 4
 _REQUEST_TEXT_CHARS = 1200
-# Declared before every other tool so the size budget never drops them: the
-# app-steering tools and every tool the conversation rules name. A model that
-# is not given a tool it was told to use says it does not exist (live
-# 2026-10-14, a busy catalog sorted show_on_screen past the budget).
-_PRIORITY_TOOLS = frozenset(
-    {
-        "find-app-action",
-        "run-app-action",
-        # The personal memory vault's read side (ADR-0044). Measured on a live
-        # gemini-live call 2026-11-11: the declaration carried 13 of 146 tools
-        # in 23977 of 24000 bytes, and all three of these were skipped at
-        # 541 / 504 / 360 bytes while screen_snapshot (275 B, CORE_PRIORITY
-        # rank 16) still fit -- the budget loop drops what does not fit with a
-        # bare ``continue``, so a heavy tool loses its slot to a lighter one
-        # that ranks far behind it. "What do you know about me" answered from
-        # the standing identity card alone and got two of three questions
-        # wrong, with function_calls=0 on every turn. Being ranked in
-        # CORE_PRIORITY is not enough; only this set survives the cut.
-        "memory-search",
-        "memory-history",
-        "memory-topics",
-        # Web search, for the same reason and found by the same log line: once
-        # the three memory reads were pinned, search_web was the tool that lost
-        # its slot (it held position 11 on the call before). It is CORE_PRIORITY
-        # rank 0, the grounding capability for any public fact
-        # (turn_planner.PUBLIC_FACT_GROUNDING_CAPABILITY), and a live call
-        # without it claimed outright to have no internet access (2026-11-07).
-        # A ranked tool is not a declared tool; only this set is.
-        "search_web",
-        *NAMED_TOOLS,
-    }
+# Declared before every other tool so the size budget never drops them: every
+# tool the conversation rules name, then the app-steering and memory reads. A
+# model that is not given a tool it was told to use says it does not exist
+# (live 2026-10-14, a busy catalog sorted show_on_screen past the budget).
+#
+# Order is load-bearing. A frozenset alone forgot NAMED_TOOLS order, and the
+# packer then ranked promised tools by CORE_PRIORITY (which carries only
+# ``navigate`` of that tuple) and by name -- so show_on_screen, mid-tuple,
+# lost its slot while neighbours kept theirs (live 2026-11-14, 109 B short).
+# The tuple is the declaration order; the frozenset keeps membership O(1).
+# CORE_PRIORITY is not reused here: it does not list most NAMED_TOOLS, and
+# rank is not declaration (same lesson as the memory reads below).
+_PRIORITY_TOOLS_ORDER: Final[tuple[str, ...]] = (
+    *NAMED_TOOLS,
+    "find-app-action",
+    "run-app-action",
+    # The personal memory vault's read side (ADR-0044). Measured on a live
+    # gemini-live call 2026-11-11: the declaration carried 13 of 146 tools
+    # in 23977 of 24000 bytes, and all three of these were skipped at
+    # 541 / 504 / 360 bytes while screen_snapshot (275 B, CORE_PRIORITY
+    # rank 16) still fit -- the budget loop drops what does not fit with a
+    # bare ``continue``, so a heavy tool loses its slot to a lighter one
+    # that ranks far behind it. "What do you know about me" answered from
+    # the standing identity card alone and got two of three questions
+    # wrong, with function_calls=0 on every turn. Being ranked in
+    # CORE_PRIORITY is not enough; only this set survives the cut.
+    "memory-search",
+    "memory-history",
+    "memory-topics",
+    # Web search, for the same reason and found by the same log line: once
+    # the three memory reads were pinned, search_web was the tool that lost
+    # its slot (it held position 11 on the call before). It is CORE_PRIORITY
+    # rank 0, the grounding capability for any public fact
+    # (turn_planner.PUBLIC_FACT_GROUNDING_CAPABILITY), and a live call
+    # without it claimed outright to have no internet access (2026-11-07).
+    # A ranked tool is not a declared tool; only this set is.
+    "search_web",
 )
+_PRIORITY_TOOLS = frozenset(_PRIORITY_TOOLS_ORDER)
+_PRIORITY_RANK: Final[dict[str, int]] = {
+    name: index for index, name in enumerate(_PRIORITY_TOOLS_ORDER)
+}
 # Declared under its canonical name in every mode (see ``declarations``).
 _DIRECT_TOOLS = frozenset({"computer", "take_appshot"})
 # One screen, one mouse: these never run side by side, and a result that
@@ -715,11 +725,16 @@ class LiveTools:
 
         rank = {name: index for index, name in enumerate(CORE_PRIORITY)}
         unranked = len(rank)
+        priority_count = len(_PRIORITY_TOOLS_ORDER)
         ordered = sorted(
             catalog,
             key=lambda d: (
-                d.name not in _PRIORITY_TOOLS,
-                rank.get(canonical(d.name), unranked),
+                0 if d.name in _PRIORITY_TOOLS else 1,
+                (
+                    _PRIORITY_RANK[d.name]
+                    if d.name in _PRIORITY_TOOLS
+                    else priority_count + rank.get(canonical(d.name), unranked)
+                ),
                 d.name,
             ),
         )

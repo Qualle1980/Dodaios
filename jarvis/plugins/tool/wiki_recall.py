@@ -144,9 +144,25 @@ class WikiRecallTool:
             except ValueError:
                 rel_path = hit.path
 
-            snippet_part = f" — {hit.snippet}" if hit.snippet else ""
+            # Filename / frontmatter / alias hits have an empty body snippet by
+            # contract (SearchHit.snippet). The injector already falls back to
+            # ``preview`` (leading prose); recall used to drop the hit to a
+            # bare title+path, so a live model that cannot call wiki-page-read
+            # answered "nothing found" while holding the right note
+            # (live 2026-11-14, Werkzeugschleife → live-loop-broken-and-proven).
+            body = (hit.snippet or getattr(hit, "preview", "") or "").strip()
+            if body:
+                content_part = f" — {body}"
+            else:
+                # AP-30: a hit with no prose is a visible fault, not "".
+                log.warning(
+                    "wiki-recall: hit %r has empty snippet and preview; "
+                    "emitting title/path only",
+                    getattr(hit, "title", rel_path),
+                )
+                content_part = " — [no excerpt available; open the note for content]"
             lines.append(
-                f"- **{hit.title}**{snippet_part} "
+                f"- **{hit.title}**{content_part} "
                 f"[{_trust_label(hit)}] ({rel_path})"
             )
 
