@@ -145,9 +145,40 @@ class WikiRecallTool:
                 rel_path = hit.path
 
             snippet_part = f" — {hit.snippet}" if hit.snippet else ""
-            lines.append(f"- **{hit.title}**{snippet_part} ({rel_path})")
+            lines.append(
+                f"- **{hit.title}**{snippet_part} "
+                f"[{_trust_label(hit)}] ({rel_path})"
+            )
 
         return ToolResult(success=True, output="\n".join(lines))
+
+
+_TRUST_MARKERS: tuple[tuple[str, str], ...] = (
+    ("__fm_status_verified__", "verified"),
+    ("__fm_status_proposed__", "unconfirmed"),
+    ("__fm_status_superseded__", "superseded"),
+)
+
+
+def _trust_label(hit: Any) -> str:
+    """How much weight this hit deserves, in words the model can repeat.
+
+    Recall reaches the whole vault on purpose: a lesson exists so a mistake is
+    not repeated, and a gate that hid every note without machine-confirmed
+    evidence hid 209 of 216 of them, which defeats the point. Honesty is
+    therefore carried per hit instead of by exclusion — the model is told what
+    it is reading and can say "an unconfirmed note from the vault says ...".
+
+    The marker strings come from ``jarvis/memory/wiki/fts_index.py``, which
+    indexes ``status: <value>`` as ``__fm_status_<value>__`` exactly so a
+    status cannot be confused with a field that merely contains the word.
+    A note with no status at all is reported as unknown, never as verified.
+    """
+    frontmatter = str(getattr(hit, "frontmatter", "") or "")
+    for marker, label in _TRUST_MARKERS:
+        if marker in frontmatter:
+            return label
+    return "status unknown"
 
 
 def _with_semantic_hits(hits: list[Any], query: str, vault_root: Path) -> list[Any]:
