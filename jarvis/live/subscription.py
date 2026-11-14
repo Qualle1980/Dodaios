@@ -89,6 +89,11 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
         self._user_caption_segments: dict[str, None] = {}
         self._assistant_caption_segments: dict[str, None] = {}
         self._subscription_report_excluded_segments: set[str] = set()
+        # New final user captions (first sighting of a segment) admit a revision
+        # before ``to_thread`` persistence yields. ``delegation.created`` reuses
+        # that revision so a stale delegate cannot bill during the yield. ASR
+        # spelling finals reuse a known segment and do not admit again.
+        self._caption_revisions: dict[str, int] = {}
 
     def _report_sent(self) -> None:
         self._report_state = "sent"
@@ -140,6 +145,7 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
             self._queued_requests.clear()
             self._steering_receipts.clear()
             self._unfinished_groups.clear()
+            self._caption_revisions.clear()
             self._remember([{
                 "role": "assistant", "content": [{
                     "type": "output_text",
@@ -202,19 +208,33 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
             if not event.get("application_event"):
                 if self._report_state == "sent":
                     self._fail_subscription_report(self._subscription_report_id)
-                # Native Live owns request boundaries. ASR fragments and final
-                # spelling corrections are captions, not additional instructions.
-                self._tools.revision += 1
+                # Prefer a revision already admitted by the matching final
+                # caption (before its persistence yield). ASR spelling finals
+                # never admit, so they still land here without a prior entry.
+                admitted = self._caption_revisions.pop(identifier, None)
+                if admitted is None:
+                    admitted = self._caption_revisions.pop("typed-" + identifier, None)
+                if admitted is None:
+                    # Native Live owns request boundaries. ASR fragments and
+                    # final spelling corrections are captions, not additional
+                    # instructions — only a delegation without a prior caption
+                    # admission bumps here.
+                    self._tools.revision += 1
+                # Accepting turns on only with a real delegation so a late
+                # caption after cancel_work cannot re-enable the session.
                 self._tools.accept_new_input()
                 self._resume_needs_input = False
                 self._reconnect_attempts = 0
+                revision = (
+                    admitted if admitted is not None else self._tools.revision
+                )
             else:
                 # Application events skip the revision bump; still drop stale
                 # identical-call receipts so follow-up reads see new state (F4).
                 invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
                 if callable(invalidate):
                     invalidate(reset_waves=True)
-            revision = self._tools.revision
+                revision = self._tools.revision
             prompt = str(
                 event.get("prompt")
                 or getattr(
@@ -302,7 +322,8 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
             self._assistant_caption_segments[segment] = None
             if len(self._assistant_caption_segments) > 256:
                 self._assistant_caption_segments.pop(next(iter(self._assistant_caption_segments)))
-        if role == "user" and segment not in self._user_caption_segments:
+        new_user_segment = role == "user" and segment not in self._user_caption_segments
+        if new_user_segment:
             self._user_caption_segments[segment] = None
             if len(self._user_caption_segments) > 256:
                 self._user_caption_segments.pop(next(iter(self._user_caption_segments)))
@@ -310,6 +331,19 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
                 # A fresh utterance can produce smalltalk without delegation.
                 # Its later reply must not acknowledge an unspoken report.
                 self._fail_subscription_report(self._subscription_report_id)
+        # Admit authority before the first await when this final caption is a
+        # new user segment. Persistence yields; without this, a superseded
+        # delegate can start a billed reasoning round during to_thread.
+        # Known segments (ASR spelling corrections) do not admit again.
+        if new_user_segment and event.get("is_final"):
+            # Bump authority only. ``accept_new_input`` stays on delegation so a
+            # late caption after cancel_work cannot re-enable the session.
+            self._tools.revision += 1
+            if self._reasoning_task is not None:
+                self._reasoning_task.cancel()
+            self._caption_revisions[segment] = self._tools.revision
+            if len(self._caption_revisions) > 256:
+                self._caption_revisions.pop(next(iter(self._caption_revisions)))
         text = str(event.get("transcript") or "")
         start = self._timeline_offset + int(event.get("start_ms") or 0)
         end = self._timeline_offset + int(event.get("end_ms") or 0)
@@ -563,6 +597,12 @@ class SubscriptionLiveVoiceSession(LiveVoiceSession):
                     rounds = 0
                     while rounds < round_limit:
                         rounds += 1
+                        if (self._closing or self._tools.cancel_token.is_cancelled()
+                                or revision != self._tools.revision):
+                            return
+                        # One tick for a same-turn follow-up caption to admit a
+                        # newer revision before this job bills inference.
+                        await asyncio.sleep(0)
                         if (self._closing or self._tools.cancel_token.is_cancelled()
                                 or revision != self._tools.revision):
                             return

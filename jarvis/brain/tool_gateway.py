@@ -303,7 +303,41 @@ class BrainSupervisorToolGateway:
 
     def voice_catalog(self) -> tuple[SupervisorToolDescriptor, ...]:
         """Live models can see desktop primitives without a second tool model."""
-        return self._describe(self._voice_tools())
+        tools = self._voice_tools()
+        self._report_missing_priority_voice_tools(tools)
+        return self._describe(tools)
+
+    def _report_missing_priority_voice_tools(self, tools: dict[str, Any]) -> None:
+        """Name promised voice tools that never made it into this catalog (AP-30).
+
+        ``_voice_tools`` starts from the manager registry and adds voice-only
+        tools. A router tool that failed to construct, or a priority name that
+        was never loaded, used to vanish quietly — the model then said the
+        capability was unavailable. Report once per missing set.
+        """
+        try:
+            from jarvis.live.coordination import NAMED_TOOLS
+            from jarvis.live.tools import _PRIORITY_TOOLS
+        except Exception:  # noqa: BLE001 — catalog read must never fail closed
+            return
+        promised = set(_PRIORITY_TOOLS) | set(NAMED_TOOLS)
+        held = set(tools)
+        missing = sorted(name for name in promised if name not in held)
+        # task_status is a LiveTools builtin, not a gateway tool.
+        missing = [name for name in missing if name != "task_status"]
+        state = tuple(missing)
+        if getattr(self, "_missing_priority_reported", None) == state:
+            return
+        self._missing_priority_reported = state
+        if not missing:
+            return
+        log.warning(
+            "voice catalog missing %d promised tool(s); they are absent on "
+            "live surfaces until loaded into manager._tools or added in "
+            "_voice_tools(): %s",
+            len(missing),
+            ", ".join(missing),
+        )
 
     async def execute(
         self,

@@ -151,6 +151,12 @@ _PRIORITY_TOOLS = frozenset(
         # without it claimed outright to have no internet access (2026-11-07).
         # A ranked tool is not a declared tool; only this set is.
         "search_web",
+        # Vault / notes: same failure mode as memory reads — present in the
+        # voice catalog and preferred on the native path, but absent from this
+        # set so defer_catalog left them names-only until the model discovered
+        # them (often never).
+        "wiki-recall",
+        "remember",
         *NAMED_TOOLS,
     }
 )
@@ -587,6 +593,12 @@ class LiveTools:
 
     def declarations(self, *, defer_catalog: bool = False) -> list[dict]:
         self._defer_catalog = defer_catalog
+        # Tests (and any ``object.__new__`` construction) may call this before
+        # ``__init__`` finishes; keep the maps the packing path writes into.
+        if not hasattr(self, "_names") or self._names is None:
+            self._names = {}
+        if not hasattr(self, "_catalog_surface_reported"):
+            self._catalog_surface_reported = None
         definitions = [
             function(
                 "end_call",
@@ -660,15 +672,76 @@ class LiveTools:
                 }
             )
         if defer_catalog:
+            # Owner-frequent tools are declared directly even under defer.
+            # Before this, defer_catalog returned only builtins + computer /
+            # take_appshot; memory, wiki, workspace, search and app-actions
+            # lived in the names-only index and were reachable solely if the
+            # model called discover_tools (live 2026-11-07: it often did not).
+            # Compact forms keep the WebRTC message small; full schemas stay
+            # behind discover_tools for everything else.
+            used_bytes = _wire_size(definitions)
+            held_names = {descriptor.name for descriptor in catalog}
+            priority_direct: list[str] = []
+            for descriptor in catalog:
+                if descriptor.name in _DIRECT_TOOLS:
+                    continue
+                if descriptor.name not in _PRIORITY_TOOLS:
+                    continue
+                alias = self._alias(descriptor.name)
+                definition = {
+                    "type": "function",
+                    "name": alias,
+                    "description": f"{descriptor.name}: {descriptor.description}",
+                    "parameters": descriptor.input_schema,
+                }
+                short = compact_declaration(definition)
+                size = _wire_size(short) + 2
+                if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
+                    log.error(
+                        "Deferred catalog cannot declare promised tool %s "
+                        "(%d B short, %d of %d B used, %d definitions): "
+                        "raise the budget or shrink its schema",
+                        descriptor.name,
+                        size,
+                        used_bytes,
+                        _CATALOG_BYTE_BUDGET,
+                        len(definitions),
+                    )
+                    continue
+                used_bytes += size
+                self._names[alias] = descriptor.name
+                definitions.append(short)
+                priority_direct.append(descriptor.name)
+            discovery_only = sorted(
+                name
+                for name in held_names
+                if name not in _DIRECT_TOOLS and name not in priority_direct
+            )
+            self._report_catalog_surface(
+                len(definitions) - builtins,
+                len(catalog),
+                used_bytes,
+                [d.name for d in catalog if d.name in _DIRECT_TOOLS] + priority_direct,
+            )
+            if discovery_only:
+                log.info(
+                    "Deferred catalog leaves %d tools discovery-only via "
+                    "discover_tools+call_tool: %s",
+                    len(discovery_only),
+                    ", ".join(discovery_only[:24])
+                    + ("…" if len(discovery_only) > 24 else ""),
+                )
             definitions[1]["description"] = (
                 "Find tools by intent using a few English keywords, or an exact canonical name. "
-                "Returns relevant complete input schemas. Reuse schemas already read; do not "
+                "Returns relevant complete input schemas. Prefer tools already declared "
+                "directly for memory, wiki, workspace, search and app actions; use this "
+                "for anything else. Reuse schemas already read; do not "
                 "inventory unrelated tools. Empty query browses all tools. Pass next_offset as "
                 "offset with the same query to read another page only if needed."
             )
             # A names-only index lets the same model choose an exact capability
             # without asking lexical search to infer the user's intent.
-            names = sorted(descriptor.name for descriptor in catalog)
+            names = sorted(held_names)
             definitions[1]["description"] += " Available tool names: " + ", ".join(names)
             held = set(names)
             hints = [

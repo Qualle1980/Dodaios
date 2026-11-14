@@ -138,18 +138,32 @@ def _fit_declarations(
     )
     used = sum(len(json.dumps(d)) for d in session)
     direct: list[dict] = []
+    dropped: list[str] = []
     for declaration in catalog:
+        name = _declared_name(declaration)
         if len(direct) >= _DIRECT_TOOL_LIMIT:
-            break
-        if _declared_name(declaration) in NAMED_TOOLS:
+            dropped.append(name)
+            continue
+        if name in NAMED_TOOLS:
             # A tool the rules call by name is always declared, in short:
             # workspace-orchestrate alone outgrew a small model's whole budget.
             declaration = compact_declaration(declaration)
         size = len(json.dumps(declaration))
         if used + size > budget_chars:
+            # AP-30: name the drop. A bare continue looked like a complete
+            # surface while discover_tools still held the rest.
+            dropped.append(name)
             continue
         used += size
         direct.append(declaration)
+    if dropped:
+        log.info(
+            "Native voice fit left %d catalog tools discovery-only under a "
+            "%d-char budget: %s",
+            len(dropped),
+            budget_chars,
+            ", ".join(dropped[:24]) + ("…" if len(dropped) > 24 else ""),
+        )
     return (*session, *direct)
 
 
