@@ -817,6 +817,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             )
             if self._closing:
                 return
+            # Past the identical-call sequential cap: withhold the function
+            # response so Gemini Live's auto-reply loop stops (F10). The
+            # transport cannot replace tools mid-session.
+            if result.get("withhold_tool_response"):
+                log.warning(
+                    "Native voice withholding tool response for %s "
+                    "(identical-call storm ended)",
+                    event.tool_name,
+                )
+                return
             result = await self._send_tool_images(result)
             from jarvis.live.tools import annotate_failed_tool_result
 
@@ -883,6 +893,11 @@ class NativeLiveVoiceSession(LiveVoiceSession):
     async def _submit_report(self, prompt: str, kwargs: dict[str, Any]) -> bool:
         del kwargs  # a native model always holds its functions
         self._report_sent()
+        # Application events do not bump revision; drop stale read receipts
+        # so the model's next lookup sees the post-event world (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send_text(prompt)
         except BaseException:
