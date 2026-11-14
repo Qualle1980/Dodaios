@@ -20,6 +20,7 @@ import upward into ``jarvis.memory``. The two differ in intent: ``secret_guard``
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -148,6 +149,122 @@ def safe_preview(value: Any, *, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
     return text
 
 
+# --- structure-without-content summaries for INFO tool-arg logs -------------
+#
+# OpenTelemetry GenAI marks ``gen_ai.tool.call.arguments`` Opt-In because tool
+# payloads routinely hold PII; LiveKit tags the same fields as ``lk.pii.*``.
+# A desktop app with a pasteable logfile needs the same default: INFO keeps
+# diagnosis (which tool, which keys, which shape, identical or not) and leaves
+# free text for DEBUG behind ``safe_preview``.
+
+#: Cap for a string value that may appear verbatim at INFO.
+_SAFE_SCALAR_CHARS = 32
+#: Identifier-like strings only (action enums, tool names, short codes).
+#: Spaces, commas, quotes and most punctuation stay out — those are free text.
+_ENUM_LIKE = re.compile(r"^[A-Za-z0-9_.:/+-]{1,32}$")
+#: Default DEBUG preview length for full (redacted) tool arguments.
+TOOL_ARGS_DEBUG_CHARS = 240
+#: Hex length of the stable args digest shown at INFO.
+_ARGS_DIGEST_CHARS = 12
+
+
+def tool_args_digest(value: Any) -> str:
+    """Stable short digest of normalised ``value`` for comparing identical calls.
+
+    Uses the same JSON normalisation the live identity keys already rely on
+    (``sort_keys=True``, ``default=str``) so two equal argument dicts share a
+    digest and a storm of identical calls is visible in the INFO log alone.
+    """
+    try:
+        payload = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 — a digest must never crash the caller
+        payload = f"<{type(value).__name__}>"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:_ARGS_DIGEST_CHARS]
+
+
+def _scalar_is_safe_for_info(text: str) -> bool:
+    """True when a string may appear at INFO under the explicit allow rule.
+
+    Allowed: empty string, or a short enum-like identifier that does not match
+    a credential shape. Everything else is reported as ``str:<length>`` only.
+    """
+    if text == "":
+        return True
+    if len(text) > _SAFE_SCALAR_CHARS:
+        return False
+    if not _ENUM_LIKE.fullmatch(text):
+        return False
+    return redact_secrets(text) == text
+
+
+def _value_shape(value: Any) -> str:
+    """Type-and-size (or allowed scalar) summary of one argument value."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"int={value}"
+    if isinstance(value, float):
+        return f"float={value}"
+    if isinstance(value, str):
+        if _scalar_is_safe_for_info(value):
+            return f"str={value}" if value else "str=empty"
+        return f"str:{len(value)}"
+    if isinstance(value, (bytes, bytearray)):
+        return f"bytes:{len(value)}"
+    if isinstance(value, Mapping):
+        return f"dict:{len(value)}"
+    if isinstance(value, (list, tuple)):
+        return f"list:{len(value)}"
+    try:
+        encoded = json.dumps(value, default=str)
+        size = len(encoded)
+    except Exception:  # noqa: BLE001 — shape summary must never crash the caller
+        size = 0
+    return f"{type(value).__name__}:{size}"
+
+
+def tool_args_shape(args: Any) -> str:
+    """INFO-safe summary of tool arguments: keys, per-key type/size, digest.
+
+    Free-text string values never appear — only their length. Short enum-like
+    strings, booleans and numbers may appear under the explicit allow rule in
+    ``_scalar_is_safe_for_info`` / ``_value_shape``. Credential-shaped strings
+    are always length-only, even when short.
+    """
+    digest = tool_args_digest(args)
+    if not isinstance(args, Mapping):
+        return f"args={_value_shape(args)} digest={digest}"
+    if not args:
+        return f"keys=- digest={digest}"
+    parts = [f"{key}:{_value_shape(args[key])}" for key in sorted(args, key=str)]
+    return f"keys={','.join(parts)} digest={digest}"
+
+
+def log_tool_call(
+    logger: logging.Logger,
+    name: str,
+    args: Any,
+    *,
+    prefix: str = "Live tool call",
+    debug_chars: int = TOOL_ARGS_DEBUG_CHARS,
+) -> None:
+    """Log a tool call: shape at INFO, redacted full args at DEBUG.
+
+    Every live surface that logs arguments must go through this helper so a
+    new call site cannot reintroduce free-text payloads at the default level.
+    """
+    logger.info("%s %s %s", prefix, name, tool_args_shape(args))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "%s %s args=%s",
+            prefix,
+            name,
+            safe_preview(args, max_chars=debug_chars),
+        )
+
+
 class RedactingLogFilter(logging.Filter):
     """Mask credential shapes in a record before any handler formats it.
 
@@ -197,7 +314,11 @@ def redact_logger(name: str) -> None:
 __all__ = [
     "DEFAULT_PREVIEW_CHARS",
     "RedactingLogFilter",
+    "TOOL_ARGS_DEBUG_CHARS",
+    "log_tool_call",
     "redact_logger",
     "redact_secrets",
     "safe_preview",
+    "tool_args_digest",
+    "tool_args_shape",
 ]

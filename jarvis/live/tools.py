@@ -42,6 +42,8 @@ _SPEAK_FAILURE_MANDATE = (
 # lookup itself once per user turn and injects the result as context.
 SELF_KNOWLEDGE_CAPABILITY = "product_help"
 _GROUNDING_RESULT_CHARS = 8_000
+# DEBUG-only length for a redacted tool-result error; INFO never carries the text.
+_ERROR_LOG_CHARS = 160
 
 # A session.started event includes its declarations. Keep room for prompts and
 # history inside the 64 KiB message limit of smaller WebRTC clients.
@@ -1038,6 +1040,42 @@ class LiveTools:
             return self._control_lock
         return None
 
+    def _log_tool_call(self, name: str, args: dict) -> None:
+        """Shape at INFO (no free text); redacted full args at DEBUG.
+
+        Shared helper: ``jarvis.core.redact.log_tool_call``. Do not log args
+        through ``safe_preview`` at INFO — that retains dictated message bodies.
+        """
+        from jarvis.core.redact import log_tool_call
+
+        log_tool_call(log, name, args)
+
+    def _log_tool_result(self, name: str, result: dict) -> None:
+        """Outcome summary without free-text error bodies at INFO."""
+        from jarvis.core.redact import safe_preview
+
+        try:
+            payload_bytes = len(json.dumps(result, default=str))
+        except Exception:  # noqa: BLE001 — logging must never break the call
+            log.warning("Live tool result size encoding failed for %s", name, exc_info=True)
+            payload_bytes = -1
+        error = result.get("error") or ""
+        error_text = error if isinstance(error, str) else str(error)
+        log.info(
+            "Live tool result %s success=%s error_chars=%s bytes=%s reused=%s",
+            name,
+            result.get("success"),
+            len(error_text),
+            payload_bytes,
+            bool(result.get("reused_receipt") or result.get("repeat_of_identical_call")),
+        )
+        if error_text and log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "Live tool result %s error=%s",
+                name,
+                safe_preview(error_text, max_chars=_ERROR_LOG_CHARS),
+            )
+
     async def _execute_claimed(
         self, call_id: str, name: str, args: dict, revision: int, replay_result: dict | None,
     ) -> dict:
@@ -1058,6 +1096,7 @@ class LiveTools:
             }
         if not self.accepting:
             return {"success": False, "status": "voice_closed_before_execution"}
+        self._log_tool_call(name, args)
         receipt = await asyncio.to_thread(
             self.ledger.claim,
             self.session_id,
@@ -1067,6 +1106,7 @@ class LiveTools:
             revision,
         )
         if receipt is not None:
+            self._log_tool_result(name, receipt)
             return receipt
         try:
             if replay_result is not None and self.steering_replay_key(name, args) is None:
@@ -1102,6 +1142,7 @@ class LiveTools:
             receipt["output"] = {k: v for k, v in receipt["output"].items() if k != "_image"}
         take_images(receipt)
         await asyncio.to_thread(self.ledger.finish, self.session_id, call_id, receipt)
+        self._log_tool_result(name, receipt)
         return result
 
     async def _execute(

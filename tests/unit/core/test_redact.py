@@ -169,3 +169,84 @@ def test_the_redacting_filter_leaves_a_clean_exception_alone(
             logger.exception("it failed")
     assert caplog.records[0].exc_info is not None  # untouched: nothing to mask
     assert "nothing secret here" in caplog.text
+
+
+# --- tool_args_shape / log_tool_call (INFO keeps diagnosis, drops free text) ---
+
+_DICTATED_BODY = (
+    "Please tell Maria that the meeting moved to Thursday at three "
+    "and her private note about the clinic stay stays between us."
+)
+
+
+def test_tool_args_shape_keeps_keys_and_hides_dictated_text() -> None:
+    from jarvis.core.redact import tool_args_digest, tool_args_shape
+
+    args = {
+        "action": "send",
+        "to": "maria@example.com",
+        "body": _DICTATED_BODY,
+    }
+    shape = tool_args_shape(args)
+    assert "action:str=send" in shape
+    assert "body:str:" in shape
+    assert "to:str:" in shape  # email has @ — not enum-like, length only
+    assert f"digest={tool_args_digest(args)}" in shape
+    for word in ("Maria", "Thursday", "clinic", "private", "meeting"):
+        assert word not in shape
+    assert _DICTATED_BODY not in shape
+
+
+def test_tool_args_shape_distinguishes_identical_and_different_calls() -> None:
+    from jarvis.core.redact import tool_args_digest, tool_args_shape
+
+    first = {"action": "status", "filter": "open"}
+    same = {"filter": "open", "action": "status"}  # key order must not matter
+    other = {"action": "status", "filter": "done"}
+    assert tool_args_digest(first) == tool_args_digest(same)
+    assert tool_args_digest(first) != tool_args_digest(other)
+    assert tool_args_shape(first) == tool_args_shape(same)
+    assert tool_args_shape(first) != tool_args_shape(other)
+
+
+def test_tool_args_shape_masks_credential_shaped_scalars() -> None:
+    from jarvis.core.redact import tool_args_shape
+
+    secret = "sk-proj-AbCdEf0123456789ghijKLmnopQRstuv"
+    shape = tool_args_shape({"api_key": secret, "action": "run"})
+    assert secret not in shape
+    assert "api_key:str:" in shape
+    assert "action:str=run" in shape
+
+
+def test_log_tool_call_info_omits_body_debug_keeps_redacted_preview(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from jarvis.core.redact import log_tool_call
+
+    name = "jarvis.test.tool_args_log"
+    logger = logging.getLogger(name)
+    secret = "sk-proj-AbCdEf0123456789ghijKLmnopQRstuv"
+    args = {"message": _DICTATED_BODY, "token": secret, "action": "draft"}
+    with caplog.at_level(logging.DEBUG, logger=name):
+        log_tool_call(logger, "compose_note", args)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(info_records) == 1
+    assert len(debug_records) == 1
+    info_msg = info_records[0].getMessage()
+    debug_msg = debug_records[0].getMessage()
+
+    assert "compose_note" in info_msg
+    assert "message:str:" in info_msg
+    assert "action:str=draft" in info_msg
+    assert "digest=" in info_msg
+    for word in ("Maria", "Thursday", "clinic", "private", "meeting"):
+        assert word not in info_msg
+    assert secret not in info_msg
+    assert secret not in debug_msg
+    assert "<redacted:openai_key>" in debug_msg
+    # DEBUG still carries the redacted full arguments for local debugging.
+    assert "args=" in debug_msg
+    assert "draft" in debug_msg
