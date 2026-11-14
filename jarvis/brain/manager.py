@@ -3681,6 +3681,11 @@ class BrainManager:
         """Filter a delegated turn to tool-capable cross-family candidates."""
         from jarvis.core.model_selection import operation_model, worker_selection
 
+        # Explicit operation pin or configured [brain.worker] collapses the
+        # hoist (subscription must not become metered API). Reachability for
+        # scheduled tasks lives in usable_worker_selection / _task_provider_chain
+        # — not here: usable_* would short-circuit to any rescue-tail key and
+        # erase the Tool Model cross-family chain (AP-21 vs hoist contract).
         selection = operation_model.get() or worker_selection(self._config)
         if selection is not None:
             # A selected subscription must not silently turn into metered API usage.
@@ -14425,11 +14430,14 @@ class BrainManager:
         """Keep the selected agent and billing account for the entire scheduled turn."""
         from jarvis.core.model_selection import (
             operation_model,
+            usable_worker_selection,
             use_operation_model,
-            worker_selection,
         )
 
-        selected = operation_model.get() or worker_selection(self._config)
+        # Selection may dial a local runtime (free HTTP); keep it off the loop.
+        selected = operation_model.get()
+        if selected is None:
+            selected = await asyncio.to_thread(usable_worker_selection, self._config)
         with use_operation_model(selected):
             return await self._run_task_with_selection(
                 prompt=prompt,
@@ -14484,14 +14492,16 @@ class BrainManager:
         if wants_artifact(prompt) and _ARTIFACT_TOOL_NAME not in allowed_tools:
             allowed_tools = (*allowed_tools, _ARTIFACT_TOOL_NAME)
         tools = self._select_task_tools(allowed_tools)
-        from jarvis.core.model_selection import operation_model, worker_selection
+        from jarvis.core.model_selection import operation_model, usable_worker_selection
         from jarvis.core.task_agent import (
             dual_seat_subscription,
             run_selected,
             subscription_seat_off_loop,
         )
 
-        selected = operation_model.get() or worker_selection(self._config)
+        selected = operation_model.get()
+        if selected is None:
+            selected = await asyncio.to_thread(usable_worker_selection, self._config)
         if (
             selected is not None
             and await subscription_seat_off_loop(selected.provider) is not None
@@ -14640,9 +14650,18 @@ class BrainManager:
         an unattended background turn. Capped so an unattended run cannot
         walk a long chain for minutes.
         """
-        from jarvis.core.model_selection import operation_model, worker_selection
+        from jarvis.core.model_selection import operation_model, usable_worker_selection
 
-        selected = operation_model.get() or worker_selection(self._config)
+        # Capability-gated: a configured ``[brain.worker]`` whose provider was
+        # disabled at boot (no key) must not hard-pin the whole scheduled turn
+        # onto a dead brain. ``usable_worker_selection`` walks the rescue tail;
+        # ``None`` falls through to the Tool Model cross-family chain.
+        # Sync helper: async callers (``run_task``) already resolved selection
+        # off-loop into ``operation_model``; a direct sync call here still runs
+        # the local-runtime probe on a worker thread via the reachability module
+        # when no running loop is present, and answers "not usable" on-loop
+        # without blocking (cache fill in the background).
+        selected = operation_model.get() or usable_worker_selection(self._config)
         if selected is not None:
             return [(selected.provider, selected.model)]
         try:
@@ -14660,7 +14679,12 @@ class BrainManager:
             chain.append((name, model))
         if chain:
             return chain
-        name = self._active_name
+        # Last resort: the live primary. A partial construct (contract stubs)
+        # or a manager with nothing selected has no ``_active_name`` — refuse
+        # with an empty chain instead of AttributeError (AP-30).
+        name = getattr(self, "_active_name", None)
+        if not name:
+            return []
         model = (
             (self._deep_model(name) or self._fast_model(name))
             if intent == "deep" else self._fast_model(name)

@@ -155,6 +155,11 @@ def jarvis_seat(config: Any) -> Seat:
     from jarvis.core.model_selection import worker_selection
     from jarvis.core.task_agent import subscription_seat
 
+    # The seat is an identity, not a reachability question: an agent's own
+    # memory updates run on that agent's seat (AGENTS.md) and a seat that
+    # cannot answer asks no other provider. Never substitute a usable family
+    # here — ``usable_worker_selection`` would walk the rescue tail and review
+    # Jarvis' learning on someone else's seat.
     selection = worker_selection(config)
     if selection is not None:
         provider, runner = subscription_seat(selection.provider) or (selection.provider, "brain")

@@ -869,13 +869,20 @@ async def test_cancelled_generation_cannot_act_after_new_input(ledger, name):
 
 
 @pytest.mark.asyncio
-async def test_task_keeps_starting_agent_after_settings_change():
+async def test_task_keeps_starting_agent_after_settings_change(monkeypatch):
     from jarvis.brain.manager import BrainManager
     from jarvis.core.model_selection import operation_model
+    from jarvis.local_models import assistant_session as policy
 
     worker = SimpleNamespace(provider="openai-api", model="original", reasoning_effort="medium")
     config = SimpleNamespace(brain=SimpleNamespace(worker=worker))
     started, release = asyncio.Event(), asyncio.Event()
+
+    # run_task pins via usable_worker_selection (AP-21). Make the configured
+    # worker the only usable pick so the pin is openai/original; the assertion
+    # below is that a mid-run settings change does not move that pin.
+    monkeypatch.setattr(policy, "is_default_usable", lambda p: p == "openai")
+    monkeypatch.setattr(policy, "is_tool_capable", lambda _p: True)
 
     class Manager(BrainManager):
         def __init__(self):

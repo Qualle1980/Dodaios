@@ -47,8 +47,8 @@ def test_a_cli_only_primary_yields_to_the_tool_capable_fallback() -> None:
 
 
 def test_the_real_antigravity_plugin_reports_no_tools() -> None:
-    assert policy._tool_capable("antigravity") is False
-    assert policy._tool_capable("gemini") is True
+    assert policy.is_tool_capable("antigravity") is False
+    assert policy.is_tool_capable("gemini") is True
 
 
 def test_no_worker_tier_is_not_ready() -> None:

@@ -257,6 +257,27 @@ class OllamaBrain:
             return False
         return self._runtime_present()
 
+    @staticmethod
+    def runtime_reachable() -> bool:
+        """Whether the configured Ollama server answers a free ``/api/version``.
+
+        Selection asks this through :mod:`jarvis.local_models.runtime_reachable`
+        so a stopped local daemon is skipped instead of winning the worker
+        chain on keylessness alone. Read-only; never starts the server.
+        """
+        from jarvis.core import config as cfg_mod
+        from jarvis.local_models.runtime_reachable import http_get_ok
+
+        try:
+            ep = cfg_mod.resolve_provider_endpoint(
+                "ollama", vendor_default_base_url=default_server_root()
+            )
+            root = normalize_server_root(ep.base_url or default_server_root())
+        except Exception:  # noqa: BLE001 — unreadable endpoint is not reachable
+            log.debug("ollama runtime_reachable: endpoint unreadable", exc_info=True)
+            return False
+        return http_get_ok(f"{root}/api/version")
+
     def _runtime_present(self) -> bool:
         """Whether a server can exist at all, without a network call.
 
