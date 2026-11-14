@@ -140,13 +140,23 @@ _FIELD_LABEL_RE = re.compile(
 )
 _GENERIC_NAMES = frozenset({"user", "the user", "me", "owner"})
 #: Lines that set how the assistant should speak / which language the user uses.
+#:
+#: A bare language name is NOT one of them. The first version also matched
+#: `german|english|...` anywhere, so "writes every commit in English"
+#: or "translate legacy German in files you touch" became THE language line: it
+#: took the provenance suffix, and every later line -- the real one included --
+#: was then dropped as a duplicate. That is the contradictory-language-key bug
+#: this collector exists to prevent. A language counts only when a cue says the
+#: line is about which language is spoken or answered in.
 _LANGUAGE_LINE_RE = re.compile(
     r"(?:"
     r"\b(?:primary|main|default|reply|output|answer|spoken)?\s*languages?\b"
     r"|\bspeaks?\b"
     r"|\banswers?\s+in\b"
     r"|\breply(?:\s+in)?\b"
-    r"|\bdeutsch\b|\bgerman\b|\benglish\b|\barabic\b|\bspanish\b|\bportuguese\b"
+    r"|\b(?:haupt)?sprache\b"  # i18n-allow: German cue matched in user text
+    r"|\bspricht\b"
+    r"|\bantwortet\s+(?:auf|in)\b"
     r")",
     re.IGNORECASE,
 )
