@@ -121,14 +121,23 @@ def test_task_provider_chain_does_not_hard_pin_a_dead_worker(
     assert "claude-api" not in [name for name, _ in chain]
 
 
-def test_jarvis_seat_uses_a_usable_worker_not_the_dead_configured_one(
+def test_jarvis_seat_keeps_the_configured_worker_even_when_unusable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The seat is an identity: reachability never moves it to another family.
+
+    An agent's own memory updates run on that agent's seat (AGENTS.md), and
+    ``jarvis_seat``'s only runtime caller is the learning reviewer. Routing it
+    through ``usable_worker_selection`` made an unusable ``codex`` seat review
+    on ``gemini`` — see
+    ``tests/unit/memory/learning/test_learning_seat.py``. A seat that cannot
+    answer is reported by the reviewer, not swapped here.
+    """
     from jarvis.society import seat_brain
 
     cfg = _cfg("claude-api")
     monkeypatch.setattr(policy, "is_default_usable", lambda p: p == "gemini")
-    monkeypatch.setattr(policy, "is_tool_capable", lambda p: p != "antigravity")
+    monkeypatch.setattr(policy, "is_tool_capable", lambda _p: True)
     monkeypatch.setattr(policy, "_known", lambda p: p in {"claude-api", "gemini"})
     # subscription_seat is imported inside jarvis_seat from task_agent.
     monkeypatch.setattr(
@@ -137,16 +146,4 @@ def test_jarvis_seat_uses_a_usable_worker_not_the_dead_configured_one(
     )
 
     seat = seat_brain.jarvis_seat(cfg)
-    assert seat.provider == "gemini"
-
-
-def test_jarvis_seat_refuses_when_nothing_usable(monkeypatch: pytest.MonkeyPatch) -> None:
-    from jarvis.society import seat_brain
-
-    cfg = _cfg("claude-api")
-    monkeypatch.setattr(policy, "is_default_usable", lambda _p: False)
-    monkeypatch.setattr(policy, "is_tool_capable", lambda _p: True)
-    monkeypatch.setattr(policy, "_known", lambda _p: True)
-
-    with pytest.raises(seat_brain.SeatUnavailable):
-        seat_brain.jarvis_seat(cfg)
+    assert seat.provider == "claude-api"

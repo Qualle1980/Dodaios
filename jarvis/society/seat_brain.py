@@ -152,14 +152,15 @@ def jarvis_seat(config: Any) -> Seat:
     Blocking (the Claude login probe, the credential probes): call it in a
     thread.
     """
-    from jarvis.core.model_selection import usable_worker_selection
+    from jarvis.core.model_selection import worker_selection
     from jarvis.core.task_agent import subscription_seat
 
-    # Capability-gated: a configured ``[brain.worker]`` that was disabled at
-    # boot (no key / cannot call tools) must not become a silent dead seat.
-    # ``usable_worker_selection`` returns the first tool-capable reachable
-    # worker-tier provider, or None for an honest SeatUnavailable below.
-    selection = usable_worker_selection(config)
+    # The seat is an identity, not a reachability question: an agent's own
+    # memory updates run on that agent's seat (AGENTS.md) and a seat that
+    # cannot answer asks no other provider. Never substitute a usable family
+    # here — ``usable_worker_selection`` would walk the rescue tail and review
+    # Jarvis' learning on someone else's seat.
+    selection = worker_selection(config)
     if selection is not None:
         provider, runner = subscription_seat(selection.provider) or (selection.provider, "brain")
         return Seat(provider, selection.model or "", runner)
@@ -170,6 +171,7 @@ def jarvis_seat(config: Any) -> Seat:
     if not tier.ready or not tier.provider:
         raise SeatUnavailable(tier.reason or "no provider can run the Dodaios chat")
     return Seat(tier.provider, tier.model or "", resolve_runner(tier.provider, surface="jarvis"))
+
 
 def _chat_default_model(config: Any, provider: str) -> str:
     """The model an API seat's chat runs when it names none.
