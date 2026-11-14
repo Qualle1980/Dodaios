@@ -127,6 +127,26 @@ def subscription_language_directive(language: str) -> str:
     )
 
 
+def subscription_system_prompt(language: str) -> str:
+    """The persona first, then the language pin — one character on every path.
+
+    Without the persona block this transport answered as a generic assistant
+    while the same question asked in chat came back as Jarvis. The persona is
+    assembled by the one loader every other path uses, so a custom prompt or an
+    edited handbook reaches voice too, and an empty persona still leaves the
+    language pin intact.
+    """
+    directive = subscription_language_directive(language)
+    try:
+        from jarvis.brain.persona_loader import load_effective_persona_prompt
+
+        persona = load_effective_persona_prompt()
+    except Exception:  # noqa: BLE001 — a persona fault must not mute the voice
+        log.warning("Subscription voice: persona unavailable; language pin only.", exc_info=True)
+        return directive
+    return f"{persona}\n\n{directive}" if persona.strip() else directive
+
+
 class CodexSubscriptionVoiceBrain:
     """Route conversational voice turns to the subscription text transport.
 
@@ -253,7 +273,7 @@ class CodexSubscriptionVoiceBrain:
         messages = tuple([*self._history[-_MAX_HISTORY_MESSAGES:], BrainMessage("user", text)])
         request = BrainRequest(
             messages=messages,
-            system=subscription_language_directive(language),
+            system=subscription_system_prompt(language),
             stream=True,
         )
         answer_parts: list[str] = []
@@ -295,6 +315,7 @@ __all__ = [
     "SubscriptionVoiceCapability",
     "configured_voice_profile",
     "subscription_language_directive",
+    "subscription_system_prompt",
     "subscription_voice_capability",
     "subscription_voice_selected",
 ]
