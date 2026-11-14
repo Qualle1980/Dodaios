@@ -80,6 +80,8 @@ def http_get_ok(
         # the answer the selection chain needs so it can walk on).
         return False
     except httpx.HTTPError:
+        # Connection refused / DNS / protocol errors mean the runtime is down;
+        # selection walks on (AP-30: False is the answer, not a crash).
         return False
     except Exception:  # noqa: BLE001 — probe glitch degrades to not usable
         log.debug("local-runtime probe of %s failed", url, exc_info=True)
@@ -187,6 +189,8 @@ def _on_event_loop() -> bool:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
+        # get_running_loop raises when no loop is running; that is the normal
+        # off-loop answer, not a failure to report (AP-30).
         return False
     return True
 

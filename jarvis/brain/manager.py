@@ -3679,9 +3679,14 @@ class BrainManager:
         self, chain: list[tuple[str, str | None]]
     ) -> list[tuple[str, str | None]]:
         """Filter a delegated turn to tool-capable cross-family candidates."""
-        from jarvis.core.model_selection import operation_model, usable_worker_selection
+        from jarvis.core.model_selection import operation_model, worker_selection
 
-        selection = operation_model.get() or usable_worker_selection(self._config)
+        # Explicit operation pin or configured [brain.worker] collapses the
+        # hoist (subscription must not become metered API). Reachability for
+        # scheduled tasks lives in usable_worker_selection / _task_provider_chain
+        # — not here: usable_* would short-circuit to any rescue-tail key and
+        # erase the Tool Model cross-family chain (AP-21 vs hoist contract).
+        selection = operation_model.get() or worker_selection(self._config)
         if selection is not None:
             # A selected subscription must not silently turn into metered API usage.
             return [(selection.provider, selection.model)]
@@ -14674,7 +14679,12 @@ class BrainManager:
             chain.append((name, model))
         if chain:
             return chain
-        name = self._active_name
+        # Last resort: the live primary. A partial construct (contract stubs)
+        # or a manager with nothing selected has no ``_active_name`` — refuse
+        # with an empty chain instead of AttributeError (AP-30).
+        name = getattr(self, "_active_name", None)
+        if not name:
+            return []
         model = (
             (self._deep_model(name) or self._fast_model(name))
             if intent == "deep" else self._fast_model(name)
