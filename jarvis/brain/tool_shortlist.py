@@ -62,6 +62,11 @@ CORE_PRIORITY: Final[tuple[str, ...]] = (
     "memory_search",
     "memory_topics",
     "memory_history",
+    # Coding agents from typed chat / voice: without these in the direct set
+    # the shortlist deferred them behind find_tools, and a model that did not
+    # discover them first looked like the capability was missing.
+    "workspace_orchestrate",
+    "workspace_git",
     "wiki_ingest",
     "remember",
     "wiki_list",
