@@ -219,6 +219,11 @@ def normalize_model(agent: str, model: str | None) -> str:
     offered = {row["id"] for row in offered_models(agent)}
     if wanted in offered:
         return wanted
+    # Claude Code documents these stable --model aliases even when the curated
+    # discovery catalog contains only versioned model IDs. Dropping "sonnet"
+    # silently would revert a safety-pinned pane to the CLI's Opus default.
+    if agent == "claude" and wanted in {"sonnet", "haiku"}:
+        return wanted
     if offered:
         # The CLI publishes a list and this is not on it: a stale pick from a
         # client that has not reloaded its catalog. The CLI's own default is

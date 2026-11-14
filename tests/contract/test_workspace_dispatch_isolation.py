@@ -289,8 +289,13 @@ async def test_partial_allocation_keeps_created_ids_without_repeating_first_grou
     monkeypatch,
 ):
     original = rig[1].add_terminals
+    asked: list[dict[str, object]] = []
 
-    async def add(count, *, agent, workspace_id):
+    async def add(count, *, agent, workspace_id, model=None, permission_mode=None):
+        # The double carries the registry's whole batch API, including the
+        # safety pick a chat-created pane is started with, so a missing
+        # keyword cannot hide behind the partial-allocation assertions below.
+        asked.append({"agent": agent, "model": model, "permission_mode": permission_mode})
         if agent == "claude":
             raise SessionError("Later group could not start")
         return await original(count, agent=agent, workspace_id=workspace_id)
@@ -305,6 +310,11 @@ async def test_partial_allocation_keeps_created_ids_without_repeating_first_grou
     assert rig[2].calls[0]["terminal_id"] == result.output["agents"][0]["terminal_id"]
     assert (await tool.execute(args, context())).output == result.output
     assert len(rig[2].calls) == 1
+    # Codex takes no tier pick; the Claude group is pinned before it starts.
+    assert asked[0] == {"agent": "codex", "model": "", "permission_mode": None}
+    assert asked[1] == {
+        "agent": "claude", "model": "sonnet", "permission_mode": "acceptEdits",
+    }
 
 
 async def test_explicit_invalid_project_id_cannot_fall_back_to_named_workspace(rig, runnable):
