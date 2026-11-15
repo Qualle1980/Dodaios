@@ -56,7 +56,11 @@ def ascending_ids(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _kept_lines(path, facts=_FACTS) -> list[str]:
-    with MemoryVault(path) as vault:
+    # One frozen stamp for every insert. Without it the facts straddle a
+    # second boundary on a slow run, `recorded_at` stops tying, and the test
+    # measures the clock instead of the tiebreaker -- which is how this very
+    # test failed inside the full memory suite while passing alone.
+    with MemoryVault(path, clock=lambda: "2026-11-15T00:00:00+00:00") as vault:
         for text in facts:
             vault.remember(text, kind="profile", origin="imported")
         return [
