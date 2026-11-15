@@ -161,3 +161,30 @@ async def test_browser_media_levels_feed_echo_reference(tmp_path) -> None:
     assert entries
     assert entries[-1][2] == pytest.approx(0.4)
     assert entries[-1][1] == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_held_mic_frames_are_reported_in_the_log(tmp_path, caplog) -> None:
+    """A withheld mic frame must leave a trace.
+
+    Holding a frame is silent by construction: the frame simply never reaches
+    the provider. If this gate ever fails closed on a genuine barge-in, the
+    log would otherwise look exactly like a provider that did not react, and
+    the live test could not tell the two apart.
+    """
+    from jarvis.live.native import _MIC_HOLD_LOG_EVERY
+
+    session, connection, _frames = _in_call(gemini_like_provider(), tmp_path)
+    echo_reference.record(0.25, 0.1)
+    with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
+        for _ in range(_MIC_HOLD_LOG_EVERY):
+            await session.handle_audio_frame(_quiet_pcm())
+    assert connection.names() == []
+    held = [
+        record.getMessage()
+        for record in caplog.records
+        if "mic frames as speaker bleed" in record.getMessage()
+    ]
+    assert len(held) == 1, held
+    assert f"held {_MIC_HOLD_LOG_EVERY} mic frames" in held[0]
+    assert "echo_peak=0.250" in held[0]

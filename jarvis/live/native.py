@@ -46,6 +46,9 @@ _ECHO_MIC_HOLD_RATIO = 0.5
 _ECHO_MIC_HOLD_FLOOR = 0.02
 _ECHO_REFERENCE_ACTIVE_RMS = 0.01
 _ECHO_REFERENCE_WINDOW_S = 2.0
+# Log one line per this many held mic frames, so a burst is visible and a
+# long answer does not flood the log.
+_MIC_HOLD_LOG_EVERY = 25
 
 
 def _pcm16_rms(pcm: bytes) -> float:
@@ -88,6 +91,23 @@ def _echo_reference_recently_active(
         log.debug("live.native echo-reference snapshot failed", exc_info=True)
         return False
     return any(rms >= _ECHO_REFERENCE_ACTIVE_RMS for _ts, _dur, rms in reference)
+
+
+def _echo_reference_peak(*, window_s: float = _ECHO_REFERENCE_WINDOW_S) -> float:
+    """Loudest outbound RMS in the recent window, 0.0 when nothing played.
+
+    ``_echo_reference_recently_active`` answers yes or no against one
+    threshold, which cannot tell a faint tail from a speaker at full volume.
+    An abort needs the level: speaker echo and a deliberate barge-in look
+    identical in that boolean and differ here.
+    """
+    try:
+        reference = echo_reference.snapshot(window_s)
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the call
+        log.debug("live.native echo-reference peak failed", exc_info=True)
+        return 0.0
+    return max((rms for _ts, _dur, rms in reference), default=0.0)
+
 
 # How long a provider's readiness probe may take before the call is refused
 # (release SLO: an honest refusal within one second, spoken and visible).
@@ -254,6 +274,23 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         # before it becomes a user turn. The acoustic envelope
         # (``echo_reference``) arms the short-utterance judgment.
         self._echo_guard = SelfEchoGuard()
+        # Abort forensics. A cut answer looks the same in the log whether the
+        # speaker echoed into the microphone, the owner spoke, or something on
+        # this machine stalled the audio path. These two stamps plus the
+        # envelope peak separate those three without a second live test.
+        self._audio_started_ns: int | None = None
+        self._last_user_final_ns: int | None = None
+        # Mic frames withheld as speaker bleed since the last report. A held
+        # frame is invisible otherwise, so a swallowed barge-in would leave no
+        # trace at all - the one failure mode this gate can cause.
+        self._mic_held_frames = 0
+        self._mic_held_reported = 0
+
+    def _ms_since(self, stamp_ns: int | None) -> int:
+        """Milliseconds since ``stamp_ns``, or -1 when it never happened."""
+        if stamp_ns is None:
+            return -1
+        return max(0, int((time.time_ns() - stamp_ns) / 1_000_000))
 
     async def _start(self, message: dict) -> None:
         self._adopt_desktop_session()
@@ -550,7 +587,25 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             return False
         mic_rms = _pcm16_rms(pcm)
         threshold = max(_ECHO_MIC_HOLD_FLOOR, max(peaks) * _ECHO_MIC_HOLD_RATIO)
-        return mic_rms < threshold
+        hold = mic_rms < threshold
+        if hold:
+            self._mic_held_frames += 1
+            # One line per burst of held frames, not per frame (frames arrive
+            # every few tens of milliseconds). Without it, this gate failing
+            # closed on a real barge-in is indistinguishable from the provider
+            # simply not reacting.
+            if self._mic_held_frames >= self._mic_held_reported + _MIC_HOLD_LOG_EVERY:
+                self._mic_held_reported = self._mic_held_frames
+                log.info(
+                    "live.native[%s] held %d mic frames as speaker bleed "
+                    "(mic_rms=%.4f threshold=%.4f echo_peak=%.3f)",
+                    self.session_id,
+                    self._mic_held_frames,
+                    mic_rms,
+                    threshold,
+                    max(peaks),
+                )
+        return hold
 
     async def handle_audio_frame(self, pcm: bytes) -> None:
         if (
@@ -773,6 +828,8 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 or 24_000
             )
             _record_played_pcm(pcm, rate)
+            if self._audio_started_ns is None:
+                self._audio_started_ns = time.time_ns()
             # Date the text echo guard forward by this chunk's duration so
             # short trailing echoes after the last transcript still match.
             duration_s = (len(pcm) / 2) / float(rate) if rate > 0 else 0.0
@@ -880,6 +937,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             if self._bus is not None:
                 await self._bus.publish(caption)
             if role == "user" and event.is_final:
+                self._last_user_final_ns = time.time_ns()
                 self._transcript.finish("user")
         elif event.type == "tool_call":
             # The model is answering the report, starting with a tool.
@@ -908,7 +966,8 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             log.info(
                 "live.native[%s] abort cause=%s event=%s superseded=%s "
                 "self_initiated=%s output_running=%s speaking=%s "
-                "playback_active=%s",
+                "playback_active=%s echo_peak=%.3f spoken_ms=%d "
+                "since_user_final_ms=%d mic_held=%d",
                 self.session_id,
                 cause,
                 event.type,
@@ -917,7 +976,12 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 output_running,
                 bool(self._speaking),
                 bool(self.playback_active),
+                _echo_reference_peak(),
+                self._ms_since(self._audio_started_ns),
+                self._ms_since(self._last_user_final_ns),
+                self._mic_held_frames,
             )
+            self._audio_started_ns = None
             self._report_finished(delivered=True)
             self._speaking = False
             self._thinking = False
@@ -925,6 +989,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 await self._interrupt_reply()
             await self._emit_indicator({"type": "tts_cancel"})
         elif event.type == "turn_complete":
+            self._audio_started_ns = None
             self._native_turn_complete = True
             self._report_finished(delivered=True)
             self._transcript.finish("assistant")
