@@ -22,6 +22,9 @@ Fix:
 """
 from __future__ import annotations
 
+import pytest
+
+import jarvis.audio.player as player_mod
 from jarvis.audio.player import AudioPlayer
 
 
@@ -42,6 +45,15 @@ def _make_player(device: int | str | None = None) -> AudioPlayer:
     return p
 
 
+#: These tests patch attributes ON the sounddevice module. A headless
+#: install (python:3.11-slim, no libportaudio2) binds ``sd = None``, where
+#: ``monkeypatch.setattr`` raises AttributeError instead of testing anything.
+needs_sounddevice = pytest.mark.skipif(
+    player_mod.sd is None, reason="sounddevice is absent (headless install)"
+)
+
+
+@needs_sounddevice
 def test_cache_key_includes_device(monkeypatch) -> None:
     """A successful open on device=3 must NOT shortcut a later open on
     device=7 — the cascade must run fresh for the new device.
@@ -128,6 +140,7 @@ def test_invalidate_device_cache_drops_active_stream_and_cache() -> None:
     )
 
 
+@needs_sounddevice
 def test_a_remembered_refusal_is_skipped_on_the_next_walk(monkeypatch) -> None:
     """Live 2026-08-06: realtime playback retried 24000 first on every fresh
     cascade walk and PortAudio refused it with -9997 each time — one warning
@@ -172,6 +185,7 @@ def test_a_remembered_refusal_is_skipped_on_the_next_walk(monkeypatch) -> None:
     assert open_log == [(3, 48000)], "the refused 24000 was never retried"
 
 
+@needs_sounddevice
 def test_all_rates_refused_before_still_walks_everything(monkeypatch) -> None:
     """The filter must never starve the cascade: a device whose remembered
     refusals cover every candidate gets the full walk again (hot-swap edge —
