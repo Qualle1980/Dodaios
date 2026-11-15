@@ -153,6 +153,21 @@ _STOP_WORDS = frozenset(
 )
 
 
+def seed_key(seed: str) -> str:
+    """One conversation's seed, comparable across the surfaces that mirror it.
+
+    The two surfaces build the seed from the SAME spoken turns and still differ:
+    the voice side joins its segments with a space, the mirrored agent chat
+    joins them without one. Live 2026-11-15 that produced
+    ``"Spiel mir etwas Musik ab. einfach ueber YouTube"`` against
+    ``"Spiel mir etwas Musik ab.einfach ueber YouTube"`` -- an exact comparison
+    missed, the model was asked twice, and the two answers even disagreed
+    ("Kontaktzugriff" against "Kontozugriff"). Collapsing whitespace is not
+    enough when the character is absent, so all of it is removed.
+    """
+    return "".join(seed.split()).casefold()
+
+
 def _strip_lead(text: str) -> str:
     """Peel greetings, small talk and polite lead-ins off the front of *text*."""
     previous = None
@@ -368,7 +383,7 @@ class TitleBook:
             return self._mirror.get((kind, conv_id))
 
     def model_title_for_seed(self, seed: str, *, exclude: tuple[str, str]) -> str:
-        """A model title already written for this exact seed, or ``""``.
+        """A model title already written for this same seed, or ``""``.
 
         A spoken conversation is mirrored into a typed one that carries its own
         id, so the ``(kind, conv_id)`` key misses and the same text gets named
@@ -380,13 +395,14 @@ class TitleBook:
         Reads the in-memory mirror only, never SQLite: this runs on the title
         worker and must not hold the connection a listing waits behind.
         """
-        if not seed.strip():
+        wanted = seed_key(seed)
+        if not wanted:
             return ""
         with self._mirror_lock:
             for key, entry in self._mirror.items():
                 if key == exclude or entry.writer != WRITER_MODEL:
                     continue
-                if entry.seed == seed and entry.title:
+                if seed_key(entry.seed) == wanted and entry.title:
                     return entry.title
         return ""
 

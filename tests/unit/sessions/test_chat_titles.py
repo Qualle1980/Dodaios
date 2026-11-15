@@ -292,3 +292,37 @@ def test_a_mirrored_conversation_reuses_the_title_instead_of_paying_twice() -> N
     assert len(brain.prompts) == 1, (
         f"the model was asked {len(brain.prompts)} times for one title"
     )
+
+def test_the_mirror_seed_differs_by_one_space_and_still_reuses_the_title() -> None:
+    """The real seeds from the live run of 2026-11-15, verbatim.
+
+    Both surfaces build the seed from the SAME spoken segments. The voice side
+    joins them with a space, the mirrored agent chat without one. An exact
+    comparison missed that, the model was asked twice, and the two answers did
+    not even agree -- "Kontaktzugriff" against "Kontozugriff".
+    """
+    # i18n-allow: DE voice input, the recorded seeds under test.
+    spoken_voice = "Spiel mir etwas Musik ab. einfach ueber YouTube, ist egal was."
+    # i18n-allow: DE voice input, the mirror's join without the space.
+    spoken_agent = "Spiel mir etwas Musik ab.einfach ueber YouTube, ist egal was."
+    assert spoken_voice != spoken_agent
+    assert chat_titles.seed_key(spoken_voice) == chat_titles.seed_key(spoken_agent)
+
+    brain = _ScriptedBrain("1: Musik abspielen und Kontaktzugriff")  # i18n-allow: DE title
+    titler = _titler(brain)
+
+    voice = _voice("voice-2", [spoken_voice])
+    titler.titles_for([voice])
+    _drain_queue(titler)
+    named = titler.titles_for([voice])[(chat_titles.KIND_VOICE, "voice-2")]
+    assert named and len(brain.prompts) == 1
+
+    mirror = _typed("agent-2", [spoken_agent])
+    titler.titles_for([mirror])
+    _drain_queue(titler)
+    mirrored = titler.titles_for([mirror])[(chat_titles.KIND_TYPED, "agent-2")]
+
+    assert mirrored == named, "the mirror must adopt the title despite the spacing"
+    assert len(brain.prompts) == 1, (
+        f"the model was asked {len(brain.prompts)} times for one title"
+    )
