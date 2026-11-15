@@ -11287,18 +11287,32 @@ class BrainManager:
     def _override_chain(
         self, override: TurnOverride, level: str
     ) -> list[tuple[str, str | None]]:
-        """The chain for a caller-picked turn: exactly the pick, no stand-in.
+        """The pick, followed by every reachable visible chat stand-in.
 
-        A person who chose a model in the chat gets that model or an honest
-        error — never a silent cross-provider fallback. A tool-incapable pick
-        does not authorize another provider to lead or bill this turn.
+        The selected provider always goes first. If it fails, the resolver
+        chain supplies candidates and a positively connected subscription seat
+        may join even when it is absent from that chain. The typed-chat policy
+        admits seat-allowed accounts (including API keys); known-disconnected
+        logins are skipped; keyless local runtimes stay last. The receipt names
+        the provider that actually answered, so this is never a silent
+        cross-provider switch. A tool-incapable pick still does not authorize a
+        separate tool lead. Background work keeps its own stricter gate.
 
         One exception the person configured themselves: with
         ``deep_brain_escalation = "explicit"``, a pick of the default brain
         (``brain.primary``) hands a turn with a reasoning or coding keyword to
         the ``deep_brain`` first; the pick stays as its fallback.
         """
+        from jarvis.brain.background_policy import (
+            chat_fallback_providers,
+            keyless_local,
+            login_state,
+        )
+        from jarvis.brain.resolver import _resolve_chain
+        from jarvis.ui.web.provider_spec import PROVIDERS, provider_billing
+
         pick: tuple[str, str | None] = (override.provider, override.model)
+        chain = [pick]
         brain_cfg = self._config.brain
         deep_brain = brain_cfg.deep_brain
         if (
@@ -11315,8 +11329,36 @@ class BrainManager:
                 "Chat pick %s escalates a %s turn to deep_brain %s.",
                 override.provider, level, deep_brain,
             )
-            return [(deep_brain, escalated), pick]
-        return [pick]
+            chain = [(deep_brain, escalated), pick]
+
+        resolved = [
+            entry for entry in _resolve_chain(self._config)
+            if entry not in chain
+        ]
+        seen = {provider for provider, _model in chain} | {
+            provider for provider, _model in resolved
+        }
+        for spec in PROVIDERS:
+            if spec.tier != "brain" or spec.id in seen:
+                continue
+            if not provider_billing(spec).startswith("subscription"):
+                continue
+            if login_state(spec.id) is not True:
+                continue
+            model = self._deep_model(spec.id) or self._fast_model(spec.id) or None
+            resolved.append((spec.id, model))
+            seen.add(spec.id)
+
+        policy = chat_fallback_providers(
+            (provider for provider, _model in resolved),
+            primary=override.provider,
+        )
+        stand_ins = [entry for entry in resolved if policy.permits(entry[0])]
+        cloud = [entry for entry in stand_ins if not keyless_local(entry[0])]
+        local = [entry for entry in stand_ins if keyless_local(entry[0])]
+        chain.extend(cloud)
+        chain.extend(local)
+        return list(dict.fromkeys(chain))
 
     def _build_fallback_chain(self, level: str) -> list[tuple[str, str | None]]:
         """Returns a prioritised list of (provider, model) attempts."""
@@ -13008,6 +13050,20 @@ class BrainManager:
             # the chosen talker streams the answer normally after the fall-through.
             _is_router_lead = self._router_lead_key == (prov_name, model)
             _attempt_consumer = None if _is_router_lead else text_consumer
+            attempt_streamed = False
+            attempt_had_tool_calls = False
+            if turn_override is not None and _attempt_consumer is not None:
+                original_consumer = _attempt_consumer
+
+                def track_chat_output(
+                    chunk: str, consumer: Callable[[str], None] = original_consumer
+                ) -> None:
+                    nonlocal attempt_streamed
+                    if chunk:
+                        attempt_streamed = True
+                    consumer(chunk)
+
+                _attempt_consumer = track_chat_output
             # A lead that is still setting itself up shows no sign of life, and
             # the bounds that exist cannot see that: the tool-loop deadline is
             # checked between rounds and the stall watchdog waits 30 s, which is
@@ -13072,6 +13128,15 @@ class BrainManager:
                         tokens_cache_hit=int(agg.usage.get("cache_hit_tokens", 0)),
                         usd=usd, timestamp_ns=time.time_ns(),
                     ))
+                # A returned error marker is not a completed chat response.
+                # Retry only if neither visible text nor tool calls exist.
+                if (
+                    turn_override is not None
+                    and str(getattr(agg, "finish_reason", "")).lower() == "error"
+                ):
+                    attempt_had_tool_calls = bool(agg.tool_calls)
+                    raise RuntimeError("Provider stream ended with finish_reason=error")
+
                 # Empty-Response-Guard: wenn der Provider zwar erfolgreich
                 # antwortet aber **leeren** Content liefert (Safety-Block,
                 # truncated-Response, Schema-Mismatch), behandeln wir das wie
@@ -13275,7 +13340,7 @@ class BrainManager:
 
                 if idx > 0:
                     log.info(
-                        "Fallback-Hit: %s(%s) — %d provider übersprungen",
+                        "Fallback hit: %s(%s) — skipped %d provider(s)",
                         prov_name, model, idx,
                     )
                 if screen_turn_t0 is not None:
@@ -13308,6 +13373,14 @@ class BrainManager:
                 self._router_lead_key = None
                 continue
             except Exception as exc:  # noqa: BLE001
+                if turn_override is not None and (attempt_streamed or attempt_had_tool_calls):
+                    stage = "sending part of the answer" if attempt_streamed else "tool calls"
+                    raise RuntimeError(
+                        f"{prov_name} ({model or 'default model'}) stopped after "
+                        f"{stage}: {exc}. No fallback was attempted because it "
+                        "could mix responses or repeat tool actions. Reconnect the "
+                        "provider or choose another model and retry."
+                    ) from exc
                 last_exc = exc
                 msg = str(exc)
                 # Classify FIRST so a terminal-billing 429 ("credits depleted",
@@ -13330,7 +13403,7 @@ class BrainManager:
                     provider_errors.append(
                         (prov_name, model, "rate_limit", "HTTP 429"))
                 else:
-                    log.warning("Brain %s(%s) fehlgeschlagen: %s", prov_name, model, exc)
+                    log.warning("Brain %s(%s) failed: %s", prov_name, model, exc)
                     if (
                         turn_override is None
                         and kind in _DEAD_LIST_KINDS
@@ -13417,8 +13490,23 @@ class BrainManager:
 
         if used_provider is None:
             self._last_turn_all_failed = True
-            log.error("Alle %d Provider-Versuche fehlgeschlagen. Letzter Fehler: %s",
-                     len(chain), last_exc)
+            log.error(
+                "All %d provider attempts failed. Last error: %s",
+                len(chain),
+                last_exc,
+            )
+            if turn_override is not None:
+                attempts = "; ".join(
+                    f"{provider} ({model or 'default model'}): {detail or kind}"
+                    for provider, model, kind, detail in provider_errors
+                )
+                raise RuntimeError(
+                    "The selected provider failed and no reachable stand-in "
+                    "could answer. "
+                    f"Attempts: {attempts or str(last_exc) or 'no provider was callable'}. "
+                    "Reconnect the provider, choose another model, or start a "
+                    "local runtime and retry."
+                )
             # Developer diagnostic → LOG only. The voice path gets a localized,
             # provider-agnostic apology (live complaint 2026-06-01: the grok/
             # Anthropic billing diagnostic was spoken while Gemini was active).

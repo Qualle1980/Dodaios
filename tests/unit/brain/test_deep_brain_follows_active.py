@@ -189,12 +189,25 @@ def _chat_pick_chain(mgr: BrainManager, provider: str, level: str) -> list:
         _TURN_OVERRIDE.reset(token)
 
 
+def _permitted_followers(mgr: BrainManager, chain: list) -> set[str]:
+    """Which providers `background_policy` lets stand in for this pick."""
+    from jarvis.brain.background_policy import chat_fallback_providers
+
+    decision = chat_fallback_providers(
+        [name for name, _ in chain], primary=mgr.active_provider
+    )
+    return set(decision.allowed)
+
+
 def test_chat_pick_of_primary_escalates_keyword_turns() -> None:
     mgr = _split_mgr("explicit")
     mgr._turn_route_reason = "deep-keyword"
     chain = _chat_pick_chain(mgr, "gemini", "deep")
-    assert [p for p, _ in chain] == ["claude-api", "gemini"]
+    # The escalation still leads and the pick still carries the picked model.
+    assert [p for p, _ in chain][:2] == ["claude-api", "gemini"]
     assert chain[1] == ("gemini", "pick-model")
+    # Whatever follows is a permitted stand-in, never a second stored key.
+    assert {p for p, _ in chain[2:]} <= _permitted_followers(mgr, chain)
 
 
 @pytest.mark.parametrize(
@@ -205,10 +218,25 @@ def test_chat_pick_of_primary_escalates_keyword_turns() -> None:
         ("explicit", "deep-keyword", "openai"),
     ],
 )
-def test_chat_pick_stays_exact_otherwise(escalation: str, reason: str, provider: str) -> None:
+def test_chat_pick_leads_and_only_permitted_providers_follow(
+    escalation: str, reason: str, provider: str
+) -> None:
+    """The pick is tried first, with its own model, and nothing else leads.
+
+    Before #171 this read `== [(provider, "pick-model")]`: a typed pick was
+    the whole chain. That PR gives a failed pick a stand-in on purpose, so the
+    promise worth keeping is narrower and sharper -- the pick leads, and every
+    follower is one `background_policy.chat_fallback_providers` allows, which
+    is a subscription or a keyless local runtime. A second stored API key is
+    still never pulled in unasked (AGENTS.md section 2), and the stricter plan
+    seat rule from PR #4 keeps its own guard in
+    `tests/unit/brain/test_plan_seat_no_failover.py`.
+    """
     mgr = _split_mgr(escalation)
     mgr._turn_route_reason = reason
-    assert _chat_pick_chain(mgr, provider, "deep") == [(provider, "pick-model")]
+    chain = _chat_pick_chain(mgr, provider, "deep")
+    assert chain[0] == (provider, "pick-model")
+    assert {p for p, _ in chain[1:]} <= _permitted_followers(mgr, chain)
 
 
 def test_explicit_deep_brain_survives_without_router_block() -> None:

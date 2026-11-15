@@ -299,6 +299,39 @@ def background_providers(
     return BackgroundProviders(True, tuple(allowed), reason)
 
 
+def chat_fallback_providers(
+    candidates: Iterable[str], *, primary: str
+) -> BackgroundProviders:
+    """Providers that may stand in for a failed person-started chat pick.
+
+    A typed turn is work the person started, so every seat-allowed candidate
+    may answer — including API-key cards from the resolver chain. Known-
+    disconnected subscription logins (``login_state`` is ``False``) are
+    skipped instead of being called into a certain failure. Keyless local
+    runtimes stay after every cloud stand-in. A plan seat keeps the stricter
+    :func:`seat_successors` rule from PR #4. Background work keeps the
+    separate :func:`background_providers` gate and never inherits this list.
+    """
+    ordered = seat_successors(primary, dict.fromkeys(name for name in candidates if name))
+    cloud: list[str] = []
+    local: list[str] = []
+    for name in ordered:
+        billing = _billing(name)
+        if billing.startswith("subscription") and login_state(name) is False:
+            continue
+        if billing == "local":
+            local.append(name)
+        else:
+            cloud.append(name)
+    allowed = cloud + local
+    reason = (
+        "every reachable seat-allowed stand-in, cloud before local"
+        if allowed
+        else "no reachable stand-in is usable right now"
+    )
+    return BackgroundProviders(True, tuple(allowed), reason)
+
+
 def reset_for_tests() -> None:
     global _probe_override
     with _lock:
@@ -311,6 +344,7 @@ __all__ = [
     "BackgroundDeferred",
     "BackgroundProviders",
     "background_providers",
+    "chat_fallback_providers",
     "forget",
     "keyless_local",
     "seat_bound",
