@@ -1,12 +1,12 @@
-"""The per-turn override: a caller-picked brain that never moves the live one.
+"""The per-turn override never moves the live brain or spends a foreign key.
 
 The typed chat picks provider / model / effort per chat. The first attempt at
 that (2026-08-24, reverted) switched the manager's active brain for the pick,
 so the voice changed provider as a side effect. These tests pin the contract
-of the replacement (``jarvis/brain/turn_override.py``): the chain is exactly
-the pick, the pick runs on its own cached instance, the effort and tool
-context reach the request, and every piece of manager state a voice turn
-reads is untouched afterwards.
+of the replacement (``jarvis/brain/turn_override.py``): the pick goes first,
+only keyless local or connected subscription stand-ins may follow, the effort
+and tool context reach the request, and every piece of manager state a voice
+turn reads is untouched afterwards.
 """
 
 from __future__ import annotations
@@ -59,7 +59,9 @@ class _Tool:
 # ------------------------------------------------------------------ chain
 
 
-def test_override_chain_is_exactly_the_pick() -> None:
+def test_override_chain_starts_with_the_pick_then_only_safe_stand_ins() -> None:
+    from jarvis.brain.background_policy import keyless_local
+
     mgr = _manager()
     _seed(mgr, scoped_text="x")
     mgr._turn_substantive = True
@@ -68,7 +70,8 @@ def test_override_chain_is_exactly_the_pick() -> None:
         chain = mgr._build_fallback_chain("deep")
     finally:
         _TURN_OVERRIDE.reset(token)
-    assert chain == [(PICK, PICK_MODEL)], "no cross-provider stand-in for a picked model"
+    assert chain[0] == (PICK, PICK_MODEL)
+    assert all(keyless_local(provider) for provider, _model in chain[1:])
     assert mgr._router_lead_key is None
 
 
@@ -89,7 +92,10 @@ def test_override_on_a_tool_incapable_pick_never_bills_another_provider() -> Non
         chain = mgr._build_fallback_chain("deep")
     finally:
         _TURN_OVERRIDE.reset(token)
-    assert chain == [(PICK, PICK_MODEL)]
+    from jarvis.brain.background_policy import keyless_local
+
+    assert chain[0] == (PICK, PICK_MODEL)
+    assert all(keyless_local(provider) for provider, _model in chain[1:])
     assert mgr._router_lead_key is None
     assert seen == {}, "an explicit pick does not authorize helper providers"
 
@@ -153,11 +159,12 @@ async def test_a_failing_override_turn_does_not_dead_list_the_provider_for_the_v
     mgr = _manager()
     mgr._brain_cache[(f"{PICK}@agent", PICK_MODEL)] = FakeBrain(fail_on_call=0)
     mgr._brain_cache[(PICK, PICK_MODEL)] = FakeBrain(text_response="unused")
-    await mgr.generate(
-        "Erzähl mir bitte etwas über die Geschichte von Rom",  # i18n-allow: a substantive turn
-        use_history=False,
-        turn_override=TurnOverride(provider=PICK, model=PICK_MODEL),
-    )
+    with pytest.raises(RuntimeError, match="openai .*FakeBrain-scripted failure"):
+        await mgr.generate(
+            "Erzähl mir bitte etwas über die Geschichte von Rom",  # i18n-allow: a substantive turn
+            use_history=False,
+            turn_override=TurnOverride(provider=PICK, model=PICK_MODEL),
+        )
     assert PICK not in mgr._dead_providers
     assert (PICK, PICK_MODEL) not in mgr._dead_provider_models
 
@@ -183,11 +190,19 @@ async def test_an_override_turn_never_writes_the_brain_tabs_health(seat: str) ->
     mgr._brain_cache[(f"{PICK}@agent", PICK_MODEL)] = scoped
     mgr._brain_cache[(PICK, PICK_MODEL)] = FakeBrain(text_response="unused")
 
-    await mgr.generate(
-        "Erzähl mir bitte etwas über die Geschichte von Rom",  # i18n-allow: a substantive turn
-        use_history=False,
-        turn_override=TurnOverride(provider=PICK, model=PICK_MODEL),
-    )
+    if seat == "rejects":
+        with pytest.raises(RuntimeError, match="openai .*invalid x-api-key"):
+            await mgr.generate(
+                "Erzähl mir bitte etwas über die Geschichte von Rom",  # i18n-allow
+                use_history=False,
+                turn_override=TurnOverride(provider=PICK, model=PICK_MODEL),
+            )
+    else:
+        await mgr.generate(
+            "Erzähl mir bitte etwas über die Geschichte von Rom",  # i18n-allow
+            use_history=False,
+            turn_override=TurnOverride(provider=PICK, model=PICK_MODEL),
+        )
 
     outcome = ledger.get_ledger().get(PICK, ledger.MODALITY_BRAIN)
     assert outcome is not None and outcome.status == "bad_key"

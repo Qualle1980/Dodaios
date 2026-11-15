@@ -299,6 +299,36 @@ def background_providers(
     return BackgroundProviders(True, tuple(allowed), reason)
 
 
+def chat_fallback_providers(
+    candidates: Iterable[str], *, primary: str
+) -> BackgroundProviders:
+    """Providers that may stand in for a failed person-started chat pick.
+
+    This is deliberately narrower than :func:`background_providers` on a
+    key-only install. A typed turn authorizes the picked account, not a second
+    stored API key. Keyless local runtimes are always safe; subscription-only
+    providers cannot bill a key; dual-mode providers qualify only while their
+    subscription login is positively known to be connected. A plan seat keeps
+    the stricter :func:`seat_successors` rule from PR #4.
+    """
+    ordered = seat_successors(primary, dict.fromkeys(name for name in candidates if name))
+    allowed: list[str] = []
+    for name in ordered:
+        billing = _billing(name)
+        if billing == "local":
+            allowed.append(name)
+        elif billing == "subscription" and login_state(name) is not False:
+            allowed.append(name)
+        elif billing == "subscription_or_api" and login_state(name) is True:
+            allowed.append(name)
+    reason = (
+        "subscriptions and local models only"
+        if allowed
+        else "no subscription or local model is usable right now"
+    )
+    return BackgroundProviders(True, tuple(allowed), reason)
+
+
 def reset_for_tests() -> None:
     global _probe_override
     with _lock:
@@ -311,6 +341,7 @@ __all__ = [
     "BackgroundDeferred",
     "BackgroundProviders",
     "background_providers",
+    "chat_fallback_providers",
     "forget",
     "keyless_local",
     "seat_bound",
