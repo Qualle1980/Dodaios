@@ -828,6 +828,20 @@ class LiveVoiceSession:
         if levels.playback_active:
             level_tap.publish(levels.output_level)
             level_tap.note_playing(0.3)
+            # Live plays in the browser, so AudioPlayer never records the
+            # envelope. Feed the process-local echo reference from the page's
+            # own output meter (~100 ms cadence) so the native path can arm
+            # its speaker-echo judgment the way desktop barge-in does.
+            #
+            # UNIT WARNING: this is the page's 0..1 output METER, not an RMS
+            # like the outbound-PCM samples beside it. The envelope therefore
+            # mixes two scales, and a reader may only ask it "were we audible
+            # recently" -- never compare its level against a microphone RMS.
+            # A mic gate built on that ratio held a real barge-in at
+            # mic_rms=0.1253 against threshold=0.4788 (measured 2026-11-15).
+            from jarvis.audio import echo_reference
+
+            echo_reference.record(float(levels.output_level), 0.1)
         elif previous_playback:
             level_tap.reset_playing()
         if meter_owned:
