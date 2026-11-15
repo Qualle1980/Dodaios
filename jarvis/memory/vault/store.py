@@ -617,8 +617,17 @@ class MemoryVault:
         sections: list[tuple[str, list[Memory]]] = []
         budget = max_chars
         for key in ("pinned", *_PROFILE_ORDER):
+            # Alphabetical first, so the rank sort below has a stable base:
+            # Python's sort is stable, and every tie therefore resolves by
+            # text instead of by whatever order `list()` happened to return.
+            # That order breaks ITS ties on a random uuid, and with the
+            # per-kind line cap the coin flip decided which facts the model
+            # sees -- the same vault produced different blocks on consecutive
+            # calls. Text is an arbitrary tiebreaker; being arbitrary is fine,
+            # being random is not.
+            by_text = sorted(groups.get(key, []), key=lambda m: m.text)
             items = sorted(
-                groups.get(key, []),
+                by_text,
                 # `helpful_count`, never `use_count`: being shown is not
                 # evidence of having helped, and ordering by it would let the
                 # block keep whatever it already held.
