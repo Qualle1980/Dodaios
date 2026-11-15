@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.fakes.install_long_runner import start_long_runner
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -56,34 +58,10 @@ def _make_fake_install(tmp_path: Path) -> Path:
 def _start_process_from(fake: Path) -> subprocess.Popen[bytes]:
     """Run a harmless long-runner whose executable lives inside the fake dir.
 
-    On Windows this puts real file locks on the tree — the exact condition
+    On Windows this puts real file locks on the tree - the exact condition
     that broke the original uninstall.
     """
-    if sys.platform == "win32":
-        bin_dir = fake / ".venv" / "Scripts"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-        target = bin_dir / "jarvis-fake.exe"
-        source = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "ping.exe"
-        shutil.copy2(source, target)
-        return subprocess.Popen(  # noqa: S603 — self-copied system binary
-            [str(target), "-n", "120", "127.0.0.1"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    bin_dir = fake / ".venv" / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    target = bin_dir / "jarvis-fake"
-    sleep_bin = shutil.which("sleep")
-    assert sleep_bin, "CI runner without a sleep binary"
-    # Keep executable mode without copying the macOS system file's SIP flags.
-    shutil.copy(sleep_bin, target)
-    target.chmod(0o755)
-    return subprocess.Popen(  # noqa: S603 — self-copied system binary
-        [str(target), "120"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return start_long_runner(fake, seconds=120)
 
 
 def _run_bootstrap(fake: Path) -> subprocess.CompletedProcess[str]:

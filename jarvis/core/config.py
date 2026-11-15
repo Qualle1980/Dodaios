@@ -3262,6 +3262,7 @@ class WikiIntegrationConfig(BaseModel):
     # Read-only folders recall searches next to vault_root: path strings or
     # { name, path } tables. Never written — see memory/wiki/external_sources.
     external_sources: list[Any] = Field(default_factory=list)
+    verified_only: bool = False
     subscribe_idle: bool = True  # listen for IdleEntered
     fallback_to_direct_ingest: bool = True  # when scheduler is missing
 

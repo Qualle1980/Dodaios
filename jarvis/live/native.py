@@ -142,6 +142,21 @@ _DIRECT_TOOL_PREFERENCE = (
 )
 
 
+# How the browser must play this path's audio. The native path never
+# negotiates WebRTC (``requires_webrtc_answer`` is False above), so its PCM
+# travels as untimed binary frames and the playback worklet is the only sink.
+# Without this announcement the client leaves ``timedOutput`` false and plays
+# every arriving frame AT ONCE, over whatever is already scheduled — audible
+# as words running over each other, worst on a long answer (reported
+# 2026-11-13). #115 built the ordered timeline for exactly these untimed
+# frames (``handleUntimedAudio``: a frame starts where the queued audio ends),
+# but it only joins that timeline inside a timed session. ``source_timed_audio``
+# is NOT the switch to flip for it: that flag claims the provider hands us
+# intervals, which Gemini Live does not, and it would also start emitting
+# speech-timing frames in ``jarvis/live/session.py``.
+_OUTPUT_TRANSPORT = "timed_pcm"
+
+
 def _declared_name(declaration: dict) -> str:
     """The canonical tool name behind a declaration (catalog tools are aliased)."""
     name = str(declaration.get("name", ""))
@@ -365,6 +380,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                     "output_sample_rate": self._provider.output_sample_rate,
                     "language": self._language,
                     "requires_webrtc_answer": False,
+                    "output_transport": _OUTPUT_TRANSPORT,
                     "input_muted": self._input_muted,
                 }
             )
@@ -608,6 +624,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 "input_sample_rate": self._provider.input_sample_rate,
                 "output_sample_rate": self._provider.output_sample_rate,
                 "requires_webrtc_answer": False,
+                "output_transport": _OUTPUT_TRANSPORT,
                 "reconnected": True,
             }
         )
@@ -978,6 +995,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             )
             if self._closing:
                 return
+            # Past the identical-call sequential cap: withhold the function
+            # response so Gemini Live's auto-reply loop stops (F10). The
+            # transport cannot replace tools mid-session.
+            if result.get("withhold_tool_response"):
+                log.warning(
+                    "Native voice withholding tool response for %s "
+                    "(identical-call storm ended)",
+                    event.tool_name,
+                )
+                return
             result = await self._send_tool_images(result)
             from jarvis.live.tools import annotate_failed_tool_result
 
@@ -1044,6 +1071,11 @@ class NativeLiveVoiceSession(LiveVoiceSession):
     async def _submit_report(self, prompt: str, kwargs: dict[str, Any]) -> bool:
         del kwargs  # a native model always holds its functions
         self._report_sent()
+        # Application events do not bump revision; drop stale read receipts
+        # so the model's next lookup sees the post-event world (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send_text(prompt)
         except BaseException:

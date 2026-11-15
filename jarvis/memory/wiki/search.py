@@ -133,6 +133,9 @@ class VaultSearch:
         only recall paths pass them, never a consumer that writes back what
         it found. Each source has its own index under ``data/``, rebuilt
         once per instance on first search; the source itself is only read.
+    verified_only:
+        When enabled, Agent-Learnings results must carry ``status: verified``.
+        Other external sources keep their existing behaviour.
     """
 
     def __init__(
@@ -142,12 +145,14 @@ class VaultSearch:
         conn: sqlite3.Connection | None = None,
         db_path: Path | None = None,
         external_sources: Sequence[ExternalSource] = (),
+        verified_only: bool = False,
     ) -> None:
         self._root = vault_root
         self._conn: sqlite3.Connection | None = conn
         self._owns_conn: bool = conn is None
         self._db_path: Path | None = db_path
         self._external = tuple(external_sources)
+        self._verified_only = verified_only
         self._external_conns: dict[str, sqlite3.Connection] = {}
         # ``warm_up`` builds these on a background thread at boot while a
         # turn may already be searching, so the cache is reached from two
@@ -311,6 +316,10 @@ class VaultSearch:
                 root=source.path,
                 source=source.name,
                 source_type=SOURCE_TYPE_EXTERNAL,
+                require_verified=(
+                    self._verified_only
+                    and source.path.name.casefold() == "agent-learnings"
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("VaultSearch: external source %r skipped: %s", source.name, exc)
@@ -325,6 +334,7 @@ class VaultSearch:
         root: Path | None = None,
         source: str = CANONICAL_SOURCE,
         source_type: str = SOURCE_TYPE_CANONICAL,
+        require_verified: bool = False,
     ) -> list[SearchHit]:
         root = self._root if root is None else root
         # BM25 weights are positional over EVERY column, including the
@@ -344,10 +354,22 @@ class VaultSearch:
                 frontmatter
             FROM wiki_fts
             WHERE wiki_fts MATCH ?
-            ORDER BY bm25_score
-            LIMIT ?
         """
-        cursor = conn.execute(sql, (match_expr, k))
+        params: list[object] = [match_expr]
+        if require_verified:
+            # Generated index pages carry no status of their own, so they can
+            # never satisfy the verified gate anyway. Keeping the exclusion
+            # inside this branch scopes it to the gated source: applied to
+            # every search it would also hide legacy CONTENT notes whose file
+            # name happens to start with ``index-`` from ordinary recall.
+            sql += (
+                " AND lower(path) NOT GLOB 'index-*.md'"
+                " AND lower(path) NOT GLOB '*/index-*.md'"
+                " AND instr(frontmatter, '__fm_status_verified__') > 0"
+            )
+        sql += " ORDER BY bm25_score LIMIT ?"
+        params.append(k)
+        cursor = conn.execute(sql, params)
         # Lowercased bare tokens for the "did body actually contain a hit?" check.
         # Strip the quotes AND the prefix marker: '"drogen"*' and '"drogen"'
         # both reduce to 'drogen', so the body check below stays a plain
