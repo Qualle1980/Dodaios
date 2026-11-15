@@ -1,8 +1,14 @@
-"""Synthetic recall benchmark using FTS5 and the real cosine search with a fake encoder."""
+"""CI wiring tests for fused wiki recall.
+
+The cross-language encoder is deliberately built from the answer key. It proves
+that fusion, excerpts, fallback, and output budgets are connected correctly.
+It cannot disagree with the supplied translations and therefore makes no claim
+about real retrieval quality. Run scripts/wiki_recall_quality_benchmark.py with
+the installed local model for that measurement.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import sqlite3
@@ -13,7 +19,8 @@ import pytest
 
 from jarvis.memory.wiki import semantic_search
 from jarvis.memory.wiki.fts_index import ensure_schema, index_vault
-from jarvis.memory.wiki.search import VaultSearch
+from jarvis.memory.wiki.recall_quality import rank_hits
+from jarvis.memory.wiki.search import SearchHit, VaultSearch
 from jarvis.plugins.tool.wiki_recall import WikiRecallTool
 from tests.fakes.fake_semantic_encoder import FakeSemanticEncoder
 
@@ -25,13 +32,17 @@ _CASES = [
 _HIT = re.compile(r"^- \*\*.*?\*\* — (.*?) \[.*?\] \((.*?)\)$", re.MULTILINE)
 
 
-class FixtureEncoder(FakeSemanticEncoder):
-    def __init__(self):
-        super().__init__({
-            case["id"]: (case["query"].split()[0], case["semantic_term"])
-            for case in _CASES
-            if case["mode"] == "cross"
-        })
+class AnswerKeyWiringEncoder(FakeSemanticEncoder):
+    """Map every cross-language fixture from its declared answer key."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            {
+                case["id"]: (case["query"].split()[0], case["semantic_term"])
+                for case in _CASES
+                if case["mode"] == "cross"
+            }
+        )
 
     def encode(self, texts, *, wait=False):
         vectors = super().encode(texts, wait=wait)
@@ -42,14 +53,16 @@ class FixtureEncoder(FakeSemanticEncoder):
 
 
 @contextmanager
-def recall(tmp_path, *, semantic):
+def wiring_recall(tmp_path: Path, *, semantic: bool):
     root = _FIXTURES / "vault"
     with closing(sqlite3.connect(":memory:", check_same_thread=False)) as conn:
         ensure_schema(conn)
         index_vault(root, conn)
         if semantic:
             engine = semantic_search.activate(
-                root, db_path=tmp_path / "semantic.db", encoder=FixtureEncoder()
+                root,
+                db_path=tmp_path / "semantic.db",
+                encoder=AnswerKeyWiringEncoder(),
             )
             assert engine.sync().failed == 0
         try:
@@ -66,9 +79,11 @@ async def retrieve(tool, case):
 
 
 @pytest.mark.asyncio
-async def test_wiki_recall_cross_language_returns_answer_excerpt_in_one_call(tmp_path):
+async def test_answer_key_wiring_returns_cross_language_excerpt_in_one_call(
+    tmp_path: Path,
+) -> None:
     case = next(case for case in _CASES if case["mode"] == "cross")
-    with recall(tmp_path, semantic=True) as tool:
+    with wiring_recall(tmp_path, semantic=True) as tool:
         hits = await retrieve(tool, case)
     excerpt, path = hits[0]
     assert path == case["path"]
@@ -76,51 +91,47 @@ async def test_wiki_recall_cross_language_returns_answer_excerpt_in_one_call(tmp
 
 
 @pytest.mark.asyncio
-async def test_wiki_recall_without_semantic_runtime_still_returns_lexical_excerpt(tmp_path):
+async def test_wiring_without_semantic_runtime_returns_lexical_excerpt(
+    tmp_path: Path,
+) -> None:
     case = next(case for case in _CASES if case["mode"] == "lexical")
-    with recall(tmp_path, semantic=False) as tool:
+    with wiring_recall(tmp_path, semantic=False) as tool:
         hits = await retrieve(tool, case)
     excerpt, path = next(hit for hit in hits if hit[1] == case["path"])
     assert case["answer"] in excerpt
     assert path == case["path"]
 
 
-async def measure(tmp_path):
-    with recall(tmp_path, semantic=True) as tool:
-        hybrid = [await retrieve(tool, case) for case in _CASES]
-    with recall(tmp_path, semantic=False) as tool:
-        fallback = [await retrieve(tool, case) for case in _CASES]
-    scores = dict.fromkeys(
-        ("Answer-bearing Hit@1", "Recall@3", "MRR@5", "Excerpt Support Rate",
-         "False Injection Rate", "Fallback Parity"), 0.0
+def test_fusion_uses_passage_evidence_when_rrf_scores_tie(tmp_path: Path) -> None:
+    thin = SearchHit(
+        title="Navigation summary",
+        path=tmp_path / "brief.md",
+        snippet="A short repeated subject reference with little supporting evidence.",
+        score=0.46,
     )
-    positives = negatives = lexical = retrieved = 0
-    for case, hits, lexical_hits in zip(_CASES, hybrid, fallback, strict=True):
-        if case["path"] is None:
-            negatives += 1
-            scores["False Injection Rate"] += bool(hits)
-            continue
-        positives += 1
-        expected = case["path"]
-        rank = next((i for i, (_, path) in enumerate(hits, 1) if path == expected), 0)
-        supports = bool(rank and case["answer"] in hits[rank - 1][0])
-        scores["Answer-bearing Hit@1"] += rank == 1 and supports
-        scores["Recall@3"] += 0 < rank <= 3
-        scores["MRR@5"] += 1 / rank if 0 < rank <= 5 else 0
-        retrieved += bool(rank)
-        scores["Excerpt Support Rate"] += supports
-        if case["mode"] == "lexical":
-            lexical += 1
-            scores["Fallback Parity"] += hits[:1] == lexical_hits[:1]
-    denominators = [positives, positives, positives, retrieved, negatives, lexical]
-    return {
-        metric: round(value / count, 4) if count else 0.0
-        for (metric, value), count in zip(scores.items(), denominators, strict=True)
-    }
+    answer = SearchHit(
+        title="Answer note",
+        path=tmp_path / "answer.md",
+        snippet=(
+            "The detailed passage states the requested fact and includes enough "
+            "supporting context for a grounded answer to the question."
+        ),
+        score=0.35,
+    )
+
+    ranked = rank_hits(
+        exact=[],
+        lexical=[thin, answer],
+        semantic=[thin, answer],
+    )
+
+    assert ranked[0].path == answer.path
 
 
 @pytest.mark.asyncio
-async def test_exact_identifiers_and_titles_survive_competing_lexical_hits(tmp_path):
+async def test_exact_identifiers_and_titles_survive_competing_lexical_hits(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "vault"
     root.mkdir()
     (root / "primary.md").write_text(
@@ -142,7 +153,7 @@ async def test_exact_identifiers_and_titles_survive_competing_lexical_hits(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_wire_output_obeys_recall_budgets(tmp_path):
+async def test_wire_output_obeys_recall_budgets(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     root.mkdir()
     sentence = "Schedule details fill this sentence with a record of the intended cadence. "
@@ -165,8 +176,18 @@ async def test_wire_output_obeys_recall_budgets(tmp_path):
     assert all(excerpt.endswith((".", ".…")) for excerpt, _ in hits)
 
 
-if __name__ == "__main__":
-    from tempfile import TemporaryDirectory
+def test_uncorroborated_weak_semantic_candidate_is_not_injected(
+    tmp_path: Path,
+) -> None:
+    weak = SearchHit(
+        title="Weak semantic neighbor",
+        path=tmp_path / "weak.md",
+        snippet=(
+            "This long passage is semantically nearby but remains below the "
+            "meaning-only confidence floor used by recall."
+        ),
+        score=0.35,
+    )
 
-    with TemporaryDirectory() as temp:
-        print(json.dumps(asyncio.run(measure(Path(temp))), indent=2))
+    assert rank_hits(exact=[], lexical=[], semantic=[weak]) == []
+    assert rank_hits(exact=[], lexical=[weak], semantic=[weak]) == [weak]

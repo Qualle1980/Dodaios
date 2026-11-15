@@ -16,6 +16,10 @@ log = logging.getLogger(__name__)
 # Cormack, Clarke and Buettcher, SIGIR 2009, doi:10.1145/1571941.1572114.
 _RRF_K = 60
 
+# A meaning-only candidate needs stronger evidence than one corroborated by FTS.
+# This floor is measured against the versioned negative-query fixture.
+_SEMANTIC_ONLY_MIN_SCORE = 0.36
+
 
 def rank_hits(
     exact: Sequence[SearchHit],
@@ -25,7 +29,16 @@ def rank_hits(
     """Keep exact candidates first and fuse the remaining two ranked lists."""
     candidates: dict[Path, SearchHit] = {}
     scores: dict[Path, float] = {}
-    for ranking in (lexical, semantic):
+    semantic_scores = {hit.path: hit.score for hit in semantic}
+    semantic_evidence = {
+        hit.path: hit.score * _passage_evidence_weight(hit.snippet) for hit in semantic
+    }
+    semantic_by_evidence = sorted(
+        semantic,
+        key=lambda hit: semantic_evidence[hit.path],
+        reverse=True,
+    )
+    for ranking in (lexical, semantic_by_evidence):
         seen: set[Path] = set()
         for rank, hit in enumerate(ranking, 1):
             if hit.path in seen:
@@ -34,8 +47,29 @@ def rank_hits(
             candidates.setdefault(hit.path, hit)
             scores[hit.path] = scores.get(hit.path, 0.0) + 1 / (_RRF_K + rank)
     pinned = {hit.path: hit for hit in exact}
-    ranked = sorted(candidates, key=scores.__getitem__, reverse=True)
+    lexical_paths = {hit.path for hit in lexical}
+    eligible = (
+        path
+        for path in candidates
+        if path in lexical_paths or semantic_scores.get(path, -1.0) >= _SEMANTIC_ONLY_MIN_SCORE
+    )
+    ranked = sorted(
+        eligible,
+        key=lambda path: (scores[path], semantic_evidence.get(path, -1.0)),
+        reverse=True,
+    )
     return [*pinned.values(), *(candidates[path] for path in ranked if path not in pinned)]
+
+
+def _passage_evidence_weight(text: str) -> float:
+    """Discount thin semantic matches without excluding short factual notes.
+
+    Cosine similarity alone can favor a short navigation blurb that repeats
+    the subject over a passage that states the answer. Short evidence keeps
+    40 percent of its score and reaches full weight at 16 words.
+    """
+    word_count = len(text.split())
+    return 0.4 + 0.6 * min(word_count, 16) / 16
 
 
 def lexical_passage(query: str, title: str, body: str) -> str:

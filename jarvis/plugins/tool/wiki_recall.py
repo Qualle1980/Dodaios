@@ -29,6 +29,7 @@ Vault-root resolution (§6 AGENT-B, spec A7):
     field is unavailable at construction time, the tool falls back to the
     resolver's default vault location and logs a single WARNING.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -135,6 +136,8 @@ class WikiRecallTool:
         semantic = await asyncio.to_thread(_semantic_hits, query, vault_root)
         hits = rank_hits(exact, lexical, semantic)[:k]
         semantic_passages = {hit.path: hit.snippet for hit in semantic}
+        lexical_paths = {hit.path for hit in lexical}
+        body_evidence_paths = lexical_paths | {hit.path for hit in exact}
 
         log.info("wiki-recall: %d hit(s) for query (k=%d)", len(hits), k)
 
@@ -142,9 +145,7 @@ class WikiRecallTool:
         if not hits:
             return ToolResult(
                 success=True,
-                output=(
-                    f'No wiki matches found for "{display_query}" in {vault_root}.'
-                ),
+                output=(f'No wiki matches found for "{display_query}" in {vault_root}.'),
             )
 
         lines = [f'## Wiki hits for "{display_query}"']
@@ -156,18 +157,17 @@ class WikiRecallTool:
             except ValueError:
                 rel_path = hit.path
 
-            excerpt = semantic_passages.get(hit.path, "")
-            if not excerpt:
-                body = indexed_body(hit) if indexed_body else None
-                if body is not None:
-                    excerpt = await asyncio.to_thread(lexical_passage, query, hit.title, body)
-                elif indexed_body is None:
-                    excerpt = hit.snippet or hit.preview
+            body = indexed_body(hit) if indexed_body else None
+            if hit.path in body_evidence_paths and body is not None:
+                excerpt = await asyncio.to_thread(lexical_passage, query, hit.title, body)
+            else:
+                excerpt = semantic_passages.get(hit.path, "")
+            if not excerpt and indexed_body is None:
+                excerpt = hit.snippet or hit.preview
 
             if not excerpt:
                 log.warning(
-                    "wiki-recall: hit %r has empty snippet and preview; "
-                    "no body excerpt available",
+                    "wiki-recall: hit %r has empty snippet and preview; no body excerpt available",
                     hit.title,
                 )
                 excerpt = _NO_EXCERPT
@@ -217,7 +217,8 @@ def _clip_excerpt(excerpt: str, limit: int) -> str:
     if len(excerpt) <= limit:
         return excerpt
     boundaries = (
-        match.start() for match in _SENTENCE_END.finditer(excerpt[:limit + 1])
+        match.start()
+        for match in _SENTENCE_END.finditer(excerpt[: limit + 1])
         if match.start() < limit
     )
     end = max(boundaries, default=limit - 1)
@@ -267,8 +268,7 @@ def _build_search_instance() -> VaultSearch:
     resolved = resolve_vault_root(raw).path
     if raw is None:
         log.warning(
-            "wiki-recall: cfg.wiki_integration.vault_root not found; "
-            "defaulting to %s",
+            "wiki-recall: cfg.wiki_integration.vault_root not found; defaulting to %s",
             resolved,
         )
 
