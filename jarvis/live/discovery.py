@@ -9,15 +9,13 @@ from collections import Counter
 from collections.abc import Iterable
 
 from jarvis.core.protocols import SupervisorToolDescriptor
+from jarvis.live.query_vocabulary import STOP_WORDS, bridge
 
 _PAGE_SIZE = 5
 _PAGE_BYTES = 12_000
-_STOP_WORDS = frozenset("a an and are for in is it of on or the to with jarvis".split())
-
-
 def _words(text: str) -> set[str]:
     # Split canonical snake/kebab names and punctuation as well as ordinary prose.
-    words = set(re.findall(r"[^\W_]+", text.casefold())) - _STOP_WORDS
+    words = set(re.findall(r"[^\W_]+", text.casefold())) - STOP_WORDS
     return {
         word[:-1]
         if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is"))
@@ -33,7 +31,7 @@ def discover(catalog: Iterable[SupervisorToolDescriptor], query: str, offset: in
     returned no results even for available tools. Matching any meaningful word
     and ranking by coverage avoids repeated unsuccessful paid search turns.
     """
-    terms = _words(query)
+    terms = bridge(_words(query))
     indexed = [(d, _words(d.name), _words(d.description)) for d in catalog]
     frequencies = Counter(
         word for _, names, descriptions in indexed for word in names | descriptions
@@ -54,14 +52,26 @@ def discover(catalog: Iterable[SupervisorToolDescriptor], query: str, offset: in
         if score or not terms:
             ranked.append((score, descriptor))
     ranked.sort(key=lambda entry: (-entry[0], entry[1].name))
+    # Nothing scored. Showing the model an empty result is how a capability we
+    # HAVE gets reported as missing: live F-2 it tried workspace-git twice for
+    # a GitHub question and then gave up, and the German measurement of
+    # 2026-11-16 produced an empty answer for three of eight everyday
+    # questions. Advice to "try other keywords" is not data; the index is.
+    # Names only, so browsing stays cheap -- a name read back here dispatches
+    # through the exact-match branch above and returns the full schema.
+    index_only = not ranked and bool(terms)
+    if index_only:
+        ranked = [(0.0, descriptor) for descriptor, _, _ in indexed]
+        ranked.sort(key=lambda entry: entry[1].name)
     offset = max(0, offset)
     page: list[dict] = []
     for _, descriptor in ranked[offset : offset + _PAGE_SIZE]:
         item = {
             "name": descriptor.name,
             "description": descriptor.description,
-            "parameters": descriptor.input_schema,
         }
+        if not index_only:
+            item["parameters"] = descriptor.input_schema
         # Never slice a schema. One large required schema is allowed to exceed
         # the page target; pagination must always advance without hiding tools.
         if page and len(json.dumps([*page, item]).encode("utf-8")) > _PAGE_BYTES:
@@ -73,8 +83,11 @@ def discover(catalog: Iterable[SupervisorToolDescriptor], query: str, offset: in
         "total": len(ranked),
         "next_offset": next_offset if next_offset < len(ranked) else None,
     }
-    if not ranked:
+    if index_only:
+        result["matched"] = False
         result["hint"] = (
-            "Try fewer English keywords, an exact tool name, or an empty query to browse."
+            "No tool matched those words, so this is the catalog itself, names only. "
+            "Call discover_tools again with an exact name from this list for its "
+            "full schema, or page on with next_offset."
         )
     return result
