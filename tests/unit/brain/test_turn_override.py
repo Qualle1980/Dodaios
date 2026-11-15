@@ -1,12 +1,12 @@
-"""The per-turn override never moves the live brain or spends a foreign key.
+"""The per-turn override never moves the live brain.
 
 The typed chat picks provider / model / effort per chat. The first attempt at
 that (2026-08-24, reverted) switched the manager's active brain for the pick,
 so the voice changed provider as a side effect. These tests pin the contract
 of the replacement (``jarvis/brain/turn_override.py``): the pick goes first,
-only keyless local or connected subscription stand-ins may follow, the effort
-and tool context reach the request, and every piece of manager state a voice
-turn reads is untouched afterwards.
+reachable seat-allowed stand-ins may follow with locals last, the effort and
+tool context reach the request, and every piece of manager state a voice turn
+reads is untouched afterwards.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class _Tool:
 # ------------------------------------------------------------------ chain
 
 
-def test_override_chain_starts_with_the_pick_then_only_safe_stand_ins() -> None:
+def test_override_chain_starts_with_the_pick_then_cloud_before_local() -> None:
     from jarvis.brain.background_policy import keyless_local
 
     mgr = _manager()
@@ -71,11 +71,20 @@ def test_override_chain_starts_with_the_pick_then_only_safe_stand_ins() -> None:
     finally:
         _TURN_OVERRIDE.reset(token)
     assert chain[0] == (PICK, PICK_MODEL)
-    assert all(keyless_local(provider) for provider, _model in chain[1:])
+    stand_ins = chain[1:]
+    assert stand_ins, "a typed pick keeps reachable stand-ins behind it"
+    local_indexes = [
+        idx for idx, (provider, _model) in enumerate(stand_ins) if keyless_local(provider)
+    ]
+    cloud_indexes = [
+        idx for idx, (provider, _model) in enumerate(stand_ins) if not keyless_local(provider)
+    ]
+    if cloud_indexes and local_indexes:
+        assert max(cloud_indexes) < min(local_indexes)
     assert mgr._router_lead_key is None
 
 
-def test_override_on_a_tool_incapable_pick_never_bills_another_provider() -> None:
+def test_override_on_a_tool_incapable_pick_does_not_install_a_foreign_tool_lead() -> None:
     mgr = _manager()
     scoped, unscoped = _seed(mgr, scoped_text="x")
     unscoped.supports_tools = False  # the capability probe reads the unscoped instance
@@ -92,12 +101,10 @@ def test_override_on_a_tool_incapable_pick_never_bills_another_provider() -> Non
         chain = mgr._build_fallback_chain("deep")
     finally:
         _TURN_OVERRIDE.reset(token)
-    from jarvis.brain.background_policy import keyless_local
 
     assert chain[0] == (PICK, PICK_MODEL)
-    assert all(keyless_local(provider) for provider, _model in chain[1:])
     assert mgr._router_lead_key is None
-    assert seen == {}, "an explicit pick does not authorize helper providers"
+    assert seen == {}, "an explicit pick does not authorize a separate tool lead"
 
 
 def test_without_an_override_the_chain_is_the_classic_one() -> None:

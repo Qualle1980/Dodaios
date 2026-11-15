@@ -11287,22 +11287,29 @@ class BrainManager:
     def _override_chain(
         self, override: TurnOverride, level: str
     ) -> list[tuple[str, str | None]]:
-        """The pick, followed only by safe and visible chat stand-ins.
+        """The pick, followed by every reachable visible chat stand-in.
 
-        The selected provider always goes first. If it fails, the existing
-        resolver chain supplies candidates, while the background billing policy
-        admits only a connected subscription or a keyless local runtime. The
-        receipt names the provider that actually answered, so this is never a
-        silent cross-provider switch. A tool-incapable pick still does not
-        authorize a separate tool lead.
+        The selected provider always goes first. If it fails, the resolver
+        chain supplies candidates and a positively connected subscription seat
+        may join even when it is absent from that chain. The typed-chat policy
+        admits seat-allowed accounts (including API keys); known-disconnected
+        logins are skipped; keyless local runtimes stay last. The receipt names
+        the provider that actually answered, so this is never a silent
+        cross-provider switch. A tool-incapable pick still does not authorize a
+        separate tool lead. Background work keeps its own stricter gate.
 
         One exception the person configured themselves: with
         ``deep_brain_escalation = "explicit"``, a pick of the default brain
         (``brain.primary``) hands a turn with a reasoning or coding keyword to
         the ``deep_brain`` first; the pick stays as its fallback.
         """
-        from jarvis.brain.background_policy import chat_fallback_providers
+        from jarvis.brain.background_policy import (
+            chat_fallback_providers,
+            keyless_local,
+            login_state,
+        )
         from jarvis.brain.resolver import _resolve_chain
+        from jarvis.ui.web.provider_spec import PROVIDERS, provider_billing
 
         pick: tuple[str, str | None] = (override.provider, override.model)
         chain = [pick]
@@ -11328,14 +11335,29 @@ class BrainManager:
             entry for entry in _resolve_chain(self._config)
             if entry not in chain
         ]
+        seen = {provider for provider, _model in chain} | {
+            provider for provider, _model in resolved
+        }
+        for spec in PROVIDERS:
+            if spec.tier != "brain" or spec.id in seen:
+                continue
+            if not provider_billing(spec).startswith("subscription"):
+                continue
+            if login_state(spec.id) is not True:
+                continue
+            model = self._deep_model(spec.id) or self._fast_model(spec.id) or None
+            resolved.append((spec.id, model))
+            seen.add(spec.id)
+
         policy = chat_fallback_providers(
             (provider for provider, _model in resolved),
             primary=override.provider,
         )
-        chain.extend(
-            entry for entry in resolved
-            if policy.permits(entry[0])
-        )
+        stand_ins = [entry for entry in resolved if policy.permits(entry[0])]
+        cloud = [entry for entry in stand_ins if not keyless_local(entry[0])]
+        local = [entry for entry in stand_ins if keyless_local(entry[0])]
+        chain.extend(cloud)
+        chain.extend(local)
         return list(dict.fromkeys(chain))
 
     def _build_fallback_chain(self, level: str) -> list[tuple[str, str | None]]:
@@ -13318,7 +13340,7 @@ class BrainManager:
 
                 if idx > 0:
                     log.info(
-                        "Fallback-Hit: %s(%s) — %d provider übersprungen",
+                        "Fallback hit: %s(%s) — skipped %d provider(s)",
                         prov_name, model, idx,
                     )
                 if screen_turn_t0 is not None:
@@ -13381,7 +13403,7 @@ class BrainManager:
                     provider_errors.append(
                         (prov_name, model, "rate_limit", "HTTP 429"))
                 else:
-                    log.warning("Brain %s(%s) fehlgeschlagen: %s", prov_name, model, exc)
+                    log.warning("Brain %s(%s) failed: %s", prov_name, model, exc)
                     if (
                         turn_override is None
                         and kind in _DEAD_LIST_KINDS
@@ -13479,8 +13501,8 @@ class BrainManager:
                     for provider, model, kind, detail in provider_errors
                 )
                 raise RuntimeError(
-                    "The selected provider failed and no approved subscription "
-                    "or local fallback could answer. "
+                    "The selected provider failed and no reachable stand-in "
+                    "could answer. "
                     f"Attempts: {attempts or str(last_exc) or 'no provider was callable'}. "
                     "Reconnect the provider, choose another model, or start a "
                     "local runtime and retry."

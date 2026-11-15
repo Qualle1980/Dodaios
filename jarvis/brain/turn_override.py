@@ -90,11 +90,12 @@ class TurnOverride:
     """The pick for one ``generate`` call.
 
     ``provider`` / ``model``
-        The chain is exactly this pair — no cross-provider fallback: a person
-        who picked a model must get that model or an honest error, never a
-        silent stand-in. When the pick cannot call tools at all (a text-only
-        brain), the manager's intelligent-router lead still runs in front of
-        it, as it does for a tool-incapable voice brain.
+        The selected pair goes first. If it fails before any text or tool
+        result, reachable seat-allowed stand-ins may follow (cloud before
+        local), and the receipt names who answered. A mid-stream failure stays
+        an honest error instead of splicing a second answer. When the pick
+        cannot call tools at all (a text-only brain), the manager still does
+        not install a separate tool lead for an explicit chat pick.
     ``reasoning_effort``
         Forwarded onto every request of the turn; ``None`` keeps the
         provider's default.

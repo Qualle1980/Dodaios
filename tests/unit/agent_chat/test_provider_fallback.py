@@ -1,4 +1,10 @@
-"""Typed chat fallback stays useful without spending an unapproved API key."""
+"""Typed chat fallback uses every reachable stand-in the person already set up.
+
+A typed turn is work the person started, so a failed pick may move onto another
+reachable account — including API-key cards and a connected subscription seat
+that is not on the resolver chain. Background work stays on the stricter
+no-surprise-invoice rule. Locals stay last. The turn names who answered.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +25,12 @@ from tests.fixtures.brain.fake_brain import FakeBrain
 
 PICK = "openai"
 PICK_MODEL = "picked-model"
-REPRESENTATIVE = "ollama"
-REPRESENTATIVE_MODEL = "local-model"
-FORBIDDEN = "openrouter"
-FORBIDDEN_MODEL = "keyed-model"
+KEYED = "openrouter"
+KEYED_MODEL = "keyed-model"
+LOCAL = "ollama"
+LOCAL_MODEL = "local-model"
+SEAT = "claude-cli"
+SEAT_MODEL = "claude-sonnet"
 PICK_ERROR = "selected account is temporarily unavailable"
 
 
@@ -56,12 +64,14 @@ class _MarkedFailureBrain(_FailingBrain):
         yield BrainDelta(content="Unfinished picked answer. ", finish_reason="error")
 
 
-def _manager(bus: EventBus) -> tuple[BrainManager, _FailingBrain, FakeBrain, FakeBrain]:
+def _manager(
+    bus: EventBus,
+) -> tuple[BrainManager, _FailingBrain, FakeBrain, FakeBrain]:
     config = JarvisConfig()
     config.brain.primary = PICK
-    config.brain.worker = BrainTierConfig(provider=FORBIDDEN, model=FORBIDDEN_MODEL)
-    config.brain.local_fallback = REPRESENTATIVE
-    config.brain.local_fallback_model = REPRESENTATIVE_MODEL
+    config.brain.worker = BrainTierConfig(provider=KEYED, model=KEYED_MODEL)
+    config.brain.local_fallback = LOCAL
+    config.brain.local_fallback_model = LOCAL_MODEL
     config.brain.providers[PICK] = BrainProviderConfig(
         model=PICK_MODEL, deep_model=PICK_MODEL
     )
@@ -69,12 +79,12 @@ def _manager(bus: EventBus) -> tuple[BrainManager, _FailingBrain, FakeBrain, Fak
     manager._registry._loaded = True
 
     picked = _FailingBrain(PICK_ERROR)
-    representative = FakeBrain(text_response="The safe fallback answered.")
-    forbidden = FakeBrain(text_response="The API-key provider must never answer.")
+    keyed = FakeBrain(text_response="The keyed stand-in answered.")
+    local = FakeBrain(text_response="The local runtime answered.")
     manager._brain_cache[(f"{PICK}@agent", PICK_MODEL)] = picked
-    manager._brain_cache[(f"{REPRESENTATIVE}@agent", REPRESENTATIVE_MODEL)] = representative
-    manager._brain_cache[(f"{FORBIDDEN}@agent", FORBIDDEN_MODEL)] = forbidden
-    return manager, picked, representative, forbidden
+    manager._brain_cache[(f"{KEYED}@agent", KEYED_MODEL)] = keyed
+    manager._brain_cache[(f"{LOCAL}@agent", LOCAL_MODEL)] = local
+    return manager, picked, keyed, local
 
 
 def _service(bus: EventBus) -> AgentChatService:
@@ -97,32 +107,49 @@ async def _typed_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    representative_fails: bool = False,
+    keyed_fails: bool = False,
+    local_fails: bool = False,
     pick_fails_midstream: bool = False,
     pick_reports_failed_stream: bool = False,
-) -> tuple[list[dict[str, Any]], _FailingBrain, FakeBrain, FakeBrain]:
+    seat_connected: bool = False,
+    omit_keyed_from_chain: bool = False,
+) -> tuple[list[dict[str, Any]], _FailingBrain, FakeBrain, FakeBrain, FakeBrain | None]:
     from jarvis.agent_chat import service as service_module
     from jarvis.brain import background_policy
 
     background_policy.reset_for_tests()
-    background_policy._probe_override = lambda _provider: False
+    login_map = {SEAT: True} if seat_connected else {}
+    background_policy._probe_override = lambda provider: login_map.get(provider, False)
     monkeypatch.setattr(background_policy, "_read_markers", lambda: {})
     monkeypatch.setattr(background_policy, "_write_markers", lambda _markers: None)
 
     bus = EventBus()
-    manager, picked, representative, forbidden = _manager(bus)
+    manager, picked, keyed, local = _manager(bus)
+    if omit_keyed_from_chain:
+        manager._config.brain.worker = BrainTierConfig(provider="", model="")
     if pick_fails_midstream:
         picked = _PartialFailingBrain(PICK_ERROR)
         manager._brain_cache[(f"{PICK}@agent", PICK_MODEL)] = picked
     if pick_reports_failed_stream:
         picked = _MarkedFailureBrain(PICK_ERROR)
         manager._brain_cache[(f"{PICK}@agent", PICK_MODEL)] = picked
-    if representative_fails:
+    if keyed_fails:
+        failed_keyed = _FailingBrain("keyed stand-in is offline")
+        manager._brain_cache[(f"{KEYED}@agent", KEYED_MODEL)] = failed_keyed
+        keyed = failed_keyed
+    if local_fails:
         failed_local = _FailingBrain("local runtime is offline")
-        manager._brain_cache[
-            (f"{REPRESENTATIVE}@agent", REPRESENTATIVE_MODEL)
-        ] = failed_local
-        representative = failed_local
+        manager._brain_cache[(f"{LOCAL}@agent", LOCAL_MODEL)] = failed_local
+        local = failed_local
+
+    seat: FakeBrain | None = None
+    if seat_connected:
+        seat = FakeBrain(text_response="The connected subscription answered.")
+        manager._brain_cache[(f"{SEAT}@agent", SEAT_MODEL)] = seat
+        manager._brain_cache[(f"{SEAT}@agent", None)] = seat
+        manager._config.brain.providers[SEAT] = BrainProviderConfig(
+            model=SEAT_MODEL, deep_model=SEAT_MODEL
+        )
 
     monkeypatch.setattr(service_module, "_claude_cli_installed", lambda: False)
     monkeypatch.setattr(runner_brain, "brain_manager", lambda: manager)
@@ -142,7 +169,7 @@ async def _typed_turn(
         await service.send(session.session_id, "Explain the fallback in one sentence.")
         events = await _drain(queue, "turn_finished")
         await service.wait_turn(session.session_id)
-        return events, picked, representative, forbidden
+        return events, picked, keyed, local, seat
     finally:
         service.unsubscribe(session.session_id, queue)
         service.store.close()
@@ -150,37 +177,100 @@ async def _typed_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_chat_pick_is_answered_by_an_allowed_representative(
+async def test_a_failed_chat_pick_is_answered_by_a_keyed_stand_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    events, picked, representative, _forbidden = await _typed_turn(tmp_path, monkeypatch)
+    events, picked, keyed, local, _seat = await _typed_turn(tmp_path, monkeypatch)
 
     assert picked.calls
-    assert representative.calls
+    assert keyed.calls
+    assert local.calls == []
     assert next(e for e in events if e["kind"] == "assistant_text")["payload"]["text"] == (
-        "The safe fallback answered."
+        "The keyed stand-in answered."
     )
     assert events[-1]["payload"]["status"] == "done"
 
 
 @pytest.mark.asyncio
-async def test_the_visible_turn_receipt_names_the_representative(
+async def test_the_visible_turn_receipt_names_the_keyed_stand_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    events, _picked, _representative, _forbidden = await _typed_turn(tmp_path, monkeypatch)
+    events, _picked, _keyed, _local, _seat = await _typed_turn(tmp_path, monkeypatch)
 
     assert events[-1]["payload"]["answered_by"] == {
-        "provider": REPRESENTATIVE,
-        "model": REPRESENTATIVE_MODEL,
+        "provider": KEYED,
+        "model": KEYED_MODEL,
     }
+
+
+@pytest.mark.asyncio
+async def test_a_local_runtime_is_only_tried_after_every_cloud_stand_in_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events, picked, keyed, local, _seat = await _typed_turn(
+        tmp_path, monkeypatch, keyed_fails=True
+    )
+
+    assert picked.calls
+    assert keyed.calls
+    assert local.calls
+    assert next(e for e in events if e["kind"] == "assistant_text")["payload"]["text"] == (
+        "The local runtime answered."
+    )
+    assert events[-1]["payload"]["answered_by"] == {
+        "provider": LOCAL,
+        "model": LOCAL_MODEL,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_connected_subscription_stands_in_even_outside_the_resolver_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events, picked, keyed, local, seat = await _typed_turn(
+        tmp_path,
+        monkeypatch,
+        seat_connected=True,
+        omit_keyed_from_chain=True,
+        keyed_fails=True,
+    )
+
+    assert seat is not None
+    assert picked.calls
+    assert seat.calls
+    assert local.calls == []
+    assert next(e for e in events if e["kind"] == "assistant_text")["payload"]["text"] == (
+        "The connected subscription answered."
+    )
+    assert events[-1]["payload"]["answered_by"]["provider"] == SEAT
+
+
+def test_background_work_still_refuses_a_keyed_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jarvis.brain import background_policy
+
+    background_policy.reset_for_tests()
+    background_policy._probe_override = lambda provider: provider == SEAT
+    monkeypatch.setattr(background_policy, "_read_markers", lambda: {})
+    monkeypatch.setattr(background_policy, "_write_markers", lambda _markers: None)
+
+    decision = background_policy.background_providers(
+        [SEAT, KEYED, "gemini", LOCAL]
+    )
+
+    assert decision.subscription_mode
+    assert KEYED not in decision.allowed
+    assert "gemini" not in decision.allowed
+    assert SEAT in decision.allowed
+    assert LOCAL in decision.allowed
+    background_policy.reset_for_tests()
 
 
 @pytest.mark.asyncio
 async def test_no_representative_reports_the_pick_and_its_real_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    events, _picked, _representative, _forbidden = await _typed_turn(
-        tmp_path, monkeypatch, representative_fails=True
+    events, _picked, _keyed, _local, _seat = await _typed_turn(
+        tmp_path, monkeypatch, keyed_fails=True, local_fails=True
     )
 
     terminal = events[-1]["payload"]
@@ -190,30 +280,21 @@ async def test_no_representative_reports_the_pick_and_its_real_error(
 
 
 @pytest.mark.asyncio
-async def test_a_keyed_provider_forbidden_by_policy_is_never_called(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _events, _picked, _representative, forbidden = await _typed_turn(tmp_path, monkeypatch)
-
-    assert forbidden.calls == []
-
-
-@pytest.mark.asyncio
 async def test_a_midstream_failure_never_splices_a_second_provider_into_the_answer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    events, picked, representative, forbidden = await _typed_turn(
+    events, picked, keyed, local, _seat = await _typed_turn(
         tmp_path, monkeypatch, pick_fails_midstream=True
     )
 
     assert picked.calls
-    assert representative.calls == []
-    assert forbidden.calls == []
+    assert keyed.calls == []
+    assert local.calls == []
     assert events[-1]["payload"]["status"] == "error"
     assert PICK_ERROR in events[-1]["payload"]["error"]
     assert not any(
         e["kind"] == "assistant_text"
-        and "safe fallback" in e["payload"].get("text", "")
+        and "keyed stand-in" in e["payload"].get("text", "")
         for e in events
     )
 
@@ -222,11 +303,11 @@ async def test_a_midstream_failure_never_splices_a_second_provider_into_the_answ
 async def test_a_provider_error_finish_reason_is_not_reported_as_a_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    events, picked, representative, forbidden = await _typed_turn(
+    events, picked, keyed, local, _seat = await _typed_turn(
         tmp_path, monkeypatch, pick_reports_failed_stream=True
     )
 
     assert picked.calls
-    assert representative.calls == []
-    assert forbidden.calls == []
+    assert keyed.calls == []
+    assert local.calls == []
     assert events[-1]["payload"]["status"] == "error"
