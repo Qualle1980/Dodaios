@@ -10,6 +10,14 @@ These pins require the native handler to (1) record outbound PCM into the
 echo envelope, (2) drop a final input transcript that is only our own recent
 speech while that envelope is active, and (3) still accept a novel barge-in
 during playback.
+
+An energy gate on the INBOUND mic frames was tried here and withdrawn: the
+envelope carries two different units (true PCM RMS from the outbound audio,
+and the browser's 0..1 output meter from ``media_levels``), so a ratio of the
+recent peak sat above any human voice and held a real barge-in. Measured live
+on 2026-11-15: mic_rms=0.1253 against threshold=0.4788 while the owner was
+interrupting. Text is the backstop on this path; a level gate needs its own
+unit before it may touch the mic again.
 """
 
 from __future__ import annotations
@@ -30,9 +38,6 @@ from .test_native_live_fixes import _in_call, _settle
 def _loud_pcm(samples: int = 480, amplitude: int = 8_000) -> bytes:
     return struct.pack("<" + "h" * samples, *([amplitude] * samples))
 
-
-def _quiet_pcm(samples: int = 480) -> bytes:
-    return struct.pack("<" + "h" * samples, *([0] * samples))
 
 
 @pytest.fixture(autouse=True)
@@ -126,26 +131,6 @@ async def test_novel_barge_in_during_playback_still_becomes_a_turn(
 
 
 @pytest.mark.asyncio
-async def test_quiet_mic_is_held_while_echo_reference_is_active(tmp_path) -> None:
-    session, connection, _frames = _in_call(gemini_like_provider(), tmp_path)
-    echo_reference.record(0.25, 0.1)
-    await session.handle_audio_frame(_quiet_pcm())
-    assert connection.names() == []
-
-
-@pytest.mark.asyncio
-async def test_loud_mic_still_reaches_provider_during_playback(tmp_path) -> None:
-    from jarvis.realtime.audio import StreamingPcm16Resampler
-
-    session, connection, _frames = _in_call(gemini_like_provider(), tmp_path)
-    session._provider = gemini_like_provider()
-    session._resampler = StreamingPcm16Resampler(16_000, 16_000)
-    echo_reference.record(0.05, 0.1)
-    await session.handle_audio_frame(_loud_pcm(samples=320, amplitude=20_000))
-    assert "send_audio" in connection.names()
-
-
-@pytest.mark.asyncio
 async def test_browser_media_levels_feed_echo_reference(tmp_path) -> None:
     session, _connection, _frames = _in_call(gemini_like_provider(), tmp_path)
     await session._receive_media_levels(
@@ -161,30 +146,3 @@ async def test_browser_media_levels_feed_echo_reference(tmp_path) -> None:
     assert entries
     assert entries[-1][2] == pytest.approx(0.4)
     assert entries[-1][1] == pytest.approx(0.1)
-
-
-@pytest.mark.asyncio
-async def test_held_mic_frames_are_reported_in_the_log(tmp_path, caplog) -> None:
-    """A withheld mic frame must leave a trace.
-
-    Holding a frame is silent by construction: the frame simply never reaches
-    the provider. If this gate ever fails closed on a genuine barge-in, the
-    log would otherwise look exactly like a provider that did not react, and
-    the live test could not tell the two apart.
-    """
-    from jarvis.live.native import _MIC_HOLD_LOG_EVERY
-
-    session, connection, _frames = _in_call(gemini_like_provider(), tmp_path)
-    echo_reference.record(0.25, 0.1)
-    with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
-        for _ in range(_MIC_HOLD_LOG_EVERY):
-            await session.handle_audio_frame(_quiet_pcm())
-    assert connection.names() == []
-    held = [
-        record.getMessage()
-        for record in caplog.records
-        if "mic frames as speaker bleed" in record.getMessage()
-    ]
-    assert len(held) == 1, held
-    assert f"held {_MIC_HOLD_LOG_EVERY} mic frames" in held[0]
-    assert "echo_peak=0.250" in held[0]

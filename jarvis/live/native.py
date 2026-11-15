@@ -39,28 +39,9 @@ from jarvis.speech.echo_guard import SelfEchoGuard
 
 log = logging.getLogger(__name__)
 
-# Mic frames quieter than this fraction of the recent played peak while the
-# echo reference is armed are held back so Gemini never hears our own
-# speakers. Louder frames still travel — that is a real barge-in.
-_ECHO_MIC_HOLD_RATIO = 0.5
-_ECHO_MIC_HOLD_FLOOR = 0.02
 _ECHO_REFERENCE_ACTIVE_RMS = 0.01
 _ECHO_REFERENCE_WINDOW_S = 2.0
-# Log one line per this many held mic frames, so a burst is visible and a
-# long answer does not flood the log.
-_MIC_HOLD_LOG_EVERY = 25
 
-
-def _pcm16_rms(pcm: bytes) -> float:
-    """RMS of little-endian int16 PCM, normalized to 0..1."""
-    if len(pcm) < 2:
-        return 0.0
-    samples = array.array("h")
-    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
-    if not samples:
-        return 0.0
-    mean_sq = sum(int(sample) * int(sample) for sample in samples) / len(samples)
-    return (mean_sq ** 0.5) / 32768.0
 
 
 def _record_played_pcm(pcm: bytes, sample_rate: int) -> None:
@@ -280,11 +261,6 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         # envelope peak separate those three without a second live test.
         self._audio_started_ns: int | None = None
         self._last_user_final_ns: int | None = None
-        # Mic frames withheld as speaker bleed since the last report. A held
-        # frame is invisible otherwise, so a swallowed barge-in would leave no
-        # trace at all - the one failure mode this gate can cause.
-        self._mic_held_frames = 0
-        self._mic_held_reported = 0
 
     def _ms_since(self, stamp_ns: int | None) -> int:
         """Milliseconds since ``stamp_ns``, or -1 when it never happened."""
@@ -569,43 +545,6 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         self.playback_active = False
         await self._emit_indicator({"type": "audio_clear"})
 
-    def _echo_should_hold_mic(self, pcm: bytes) -> bool:
-        """Hold quiet mic frames while our own speakers are in the envelope.
-
-        Adapts the desktop barge-in energy floor (``desktop.py``): without
-        local candidate-frame correlation on this path, low mic energy during
-        recent played output is treated as speaker bleed and never reaches
-        Gemini. A louder frame fails open — that is the barge-in path.
-        """
-        try:
-            reference = echo_reference.snapshot(_ECHO_REFERENCE_WINDOW_S)
-        except Exception:  # noqa: BLE001 — never block the mic on a snapshot error
-            log.debug("live.native echo-reference mic hold failed", exc_info=True)
-            return False
-        peaks = [rms for _ts, _dur, rms in reference if rms >= _ECHO_REFERENCE_ACTIVE_RMS]
-        if not peaks:
-            return False
-        mic_rms = _pcm16_rms(pcm)
-        threshold = max(_ECHO_MIC_HOLD_FLOOR, max(peaks) * _ECHO_MIC_HOLD_RATIO)
-        hold = mic_rms < threshold
-        if hold:
-            self._mic_held_frames += 1
-            # One line per burst of held frames, not per frame (frames arrive
-            # every few tens of milliseconds). Without it, this gate failing
-            # closed on a real barge-in is indistinguishable from the provider
-            # simply not reacting.
-            if self._mic_held_frames >= self._mic_held_reported + _MIC_HOLD_LOG_EVERY:
-                self._mic_held_reported = self._mic_held_frames
-                log.info(
-                    "live.native[%s] held %d mic frames as speaker bleed "
-                    "(mic_rms=%.4f threshold=%.4f echo_peak=%.3f)",
-                    self.session_id,
-                    self._mic_held_frames,
-                    mic_rms,
-                    threshold,
-                    max(peaks),
-                )
-        return hold
 
     async def handle_audio_frame(self, pcm: bytes) -> None:
         if (
@@ -614,8 +553,6 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             and not self._recovering
             and not self._input_muted
         ):
-            if self._echo_should_hold_mic(pcm):
-                return
             audio = self._resampler.process(pcm)
             if audio:
                 try:
@@ -967,7 +904,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 "live.native[%s] abort cause=%s event=%s superseded=%s "
                 "self_initiated=%s output_running=%s speaking=%s "
                 "playback_active=%s echo_peak=%.3f spoken_ms=%d "
-                "since_user_final_ms=%d mic_held=%d",
+                "since_user_final_ms=%d",
                 self.session_id,
                 cause,
                 event.type,
@@ -979,7 +916,6 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 _echo_reference_peak(),
                 self._ms_since(self._audio_started_ns),
                 self._ms_since(self._last_user_final_ns),
-                self._mic_held_frames,
             )
             self._audio_started_ns = None
             self._report_finished(delivered=True)
