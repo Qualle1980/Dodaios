@@ -1,0 +1,36 @@
+{"id": "greenhouse-lexical", "query": "greenhouse", "path": "greenhouse.md", "answer": "valve G-17", "mode": "lexical"}
+{"id": "greenhouse-cross", "query": "bewässerung greenhouse", "path": "greenhouse.md", "answer": "valve G-17", "mode": "cross", "semantic_term": "irrigation", "i18n-allow": true}
+{"id": "observatory-lexical", "query": "observatory", "path": "observatory.md", "answer": "mirror H-24", "mode": "lexical"}
+{"id": "observatory-cross", "query": "teleskop observatory", "path": "observatory.md", "answer": "mirror H-24", "mode": "cross", "semantic_term": "reflector", "i18n-allow": true}
+{"id": "ferry-lexical", "query": "ferry", "path": "ferry.md", "answer": "berth J-31", "mode": "lexical"}
+{"id": "ferry-cross", "query": "anlegestelle ferry", "path": "ferry.md", "answer": "berth J-31", "mode": "cross", "semantic_term": "pontoon", "i18n-allow": true}
+{"id": "bakery-lexical", "query": "bakery", "path": "bakery.md", "answer": "starter K-42", "mode": "lexical"}
+{"id": "bakery-cross", "query": "sauerteig bakery", "path": "bakery.md", "answer": "starter K-42", "mode": "cross", "semantic_term": "fermentation", "i18n-allow": true}
+{"id": "archive-lexical", "query": "archive", "path": "archive.md", "answer": "drawer L-53", "mode": "lexical"}
+{"id": "archive-cross", "query": "aufbewahrung archive", "path": "archive.md", "answer": "drawer L-53", "mode": "cross", "semantic_term": "retention", "i18n-allow": true}
+{"id": "weatherstation-lexical", "query": "weatherstation", "path": "weatherstation.md", "answer": "gauge M-64", "mode": "lexical"}
+{"id": "weatherstation-cross", "query": "niederschlag weatherstation", "path": "weatherstation.md", "answer": "gauge M-64", "mode": "cross", "semantic_term": "precipitation", "i18n-allow": true}
+{"id": "workshop-lexical", "query": "workshop", "path": "workshop.md", "answer": "bench N-75", "mode": "lexical"}
+{"id": "workshop-cross", "query": "schraubstock workshop", "path": "workshop.md", "answer": "bench N-75", "mode": "cross", "semantic_term": "vise", "i18n-allow": true}
+{"id": "aquarium-lexical", "query": "aquarium", "path": "aquarium.md", "answer": "pump P-86", "mode": "lexical"}
+{"id": "aquarium-cross", "query": "strömung aquarium", "path": "aquarium.md", "answer": "pump P-86", "mode": "cross", "semantic_term": "circulation", "i18n-allow": true}
+{"id": "orchard-lexical", "query": "orchard", "path": "orchard.md", "answer": "basket Q-97", "mode": "lexical"}
+{"id": "orchard-cross", "query": "obsternte orchard", "path": "orchard.md", "answer": "basket Q-97", "mode": "cross", "semantic_term": "picking", "i18n-allow": true}
+{"id": "kiln-lexical", "query": "kiln", "path": "kiln.md", "answer": "cone R-18", "mode": "lexical"}
+{"id": "kiln-cross", "query": "brennofen kiln", "path": "kiln.md", "answer": "cone R-18", "mode": "cross", "semantic_term": "ceramics", "i18n-allow": true}
+{"id": "railway-lexical", "query": "railway", "path": "railway.md", "answer": "platform S-29", "mode": "lexical"}
+{"id": "railway-cross", "query": "fahrplan railway", "path": "railway.md", "answer": "platform S-29", "mode": "cross", "semantic_term": "timetable", "i18n-allow": true}
+{"id": "library-lexical", "query": "library", "path": "library.md", "answer": "shelf T-30", "mode": "lexical"}
+{"id": "library-cross", "query": "ausleihe library", "path": "library.md", "answer": "shelf T-30", "mode": "cross", "semantic_term": "lending", "i18n-allow": true}
+{"id": "absent-1", "query": "mercury transit", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-2", "query": "platinum assay", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-3", "query": "microchip fabrication", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-4", "query": "volcano evacuation", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-5", "query": "pension enrollment", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-6", "query": "octopus migration", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-7", "query": "asteroid mining", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-8", "query": "submarine sonar", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-9", "query": "quasar photometry", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-10", "query": "glacier drilling", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-11", "query": "amber fossil", "path": null, "answer": null, "mode": "negative"}
+{"id": "absent-12", "query": "cricket score", "path": null, "answer": null, "mode": "negative"}
