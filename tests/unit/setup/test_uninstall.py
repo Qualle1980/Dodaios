@@ -16,6 +16,7 @@ import pytest
 
 from jarvis.setup import uninstall
 from jarvis.setup.uninstall import UninstallPlan
+from tests.fakes.install_long_runner import start_long_runner
 
 
 def _fake_plan(
@@ -382,34 +383,7 @@ def _start_fake_install_process(fake_dir: Path) -> subprocess.Popen[bytes]:
     That is precisely the condition that locked the venv files on Windows and
     made the real uninstall fail with PermissionDenied.
     """
-    if sys.platform == "win32":
-        bin_dir = fake_dir / ".venv" / "Scripts"
-    else:
-        bin_dir = fake_dir / ".venv" / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        source = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "ping.exe"
-        target = bin_dir / "jarvis-fake.exe"
-        shutil.copy2(source, target)
-        args = [str(target), "-n", "60", "127.0.0.1"]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen(  # noqa: S603 — self-copied system binary
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
-    source_str = shutil.which("sleep")
-    if source_str is None:
-        pytest.skip("no 'sleep' binary available")
-    target = bin_dir / "jarvis-fake"
-    shutil.copy2(source_str, target)
-    target.chmod(0o755)
-    return subprocess.Popen(  # noqa: S603 — self-copied system binary
-        [str(target), "60"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return start_long_runner(fake_dir, seconds=60)
 
 
 def test_stop_running_instances_ends_process_from_install_dir(tmp_path: Path) -> None:
