@@ -247,3 +247,48 @@ def test_an_app_without_a_data_folder_never_queues_work() -> None:
         assert titler._queue == {} and titler._thread is None
     finally:
         chat_titles.reset_for_tests()
+
+
+def _typed(conv_id: str, user: list[str], *, seed: str = "") -> TitleRequest:
+    return TitleRequest(
+        kind=chat_titles.KIND_TYPED,
+        conv_id=conv_id,
+        version="2000",
+        message_count=len(user),
+        updated_ms=2_000,
+        settled=True,
+        seed=seed or (user[0] if user else ""),
+        loader=lambda: [("user", text) for text in user] + [("assistant", "Klar.")],
+    )
+
+
+def test_a_mirrored_conversation_reuses_the_title_instead_of_paying_twice() -> None:
+    """One spoken turn is also stored as a typed chat; that must not cost a second call.
+
+    Live 2026-11-15: every voice session is mirrored into an agent chat with its
+    own id, so the book's ``(kind, conv_id)`` key missed and the model named the
+    SAME seed twice -- two CLI starts of 4.5-5.8s each, out of the user's shared
+    subscription quota, for the identical title
+    "Guenstigster Reiskocher bei Amazon".
+    """
+    spoken = "Schau fuer mich im Amazon nach, was ist das guenstigste Angebot fuer ein Reiskocher?"
+    brain = _ScriptedBrain("1: Guenstigster Reiskocher bei Amazon")
+    titler = _titler(brain)
+
+    voice = _voice("voice-1", [spoken])
+    titler.titles_for([voice])
+    _drain_queue(titler)
+    named = titler.titles_for([voice])[(chat_titles.KIND_VOICE, "voice-1")]
+    assert named == "Guenstigster Reiskocher bei Amazon"
+    assert len(brain.prompts) == 1
+
+    # The same conversation, mirrored: different kind, different id, same seed.
+    mirror = _typed("agent-1", [spoken])
+    titler.titles_for([mirror])
+    _drain_queue(titler)
+    mirrored = titler.titles_for([mirror])[(chat_titles.KIND_TYPED, "agent-1")]
+
+    assert mirrored == named, "the mirror must adopt the title already written"
+    assert len(brain.prompts) == 1, (
+        f"the model was asked {len(brain.prompts)} times for one title"
+    )

@@ -367,6 +367,29 @@ class TitleBook:
         with self._mirror_lock:
             return self._mirror.get((kind, conv_id))
 
+    def model_title_for_seed(self, seed: str, *, exclude: tuple[str, str]) -> str:
+        """A model title already written for this exact seed, or ``""``.
+
+        A spoken conversation is mirrored into a typed one that carries its own
+        id, so the ``(kind, conv_id)`` key misses and the same text gets named
+        twice. Live 2026-11-15: two CLI starts of 4.5-5.8s each, out of the
+        user's shared subscription quota, produced the identical title
+        "Guenstigster Reiskocher bei Amazon". The same seed is the same
+        conversation, so the second call buys nothing.
+
+        Reads the in-memory mirror only, never SQLite: this runs on the title
+        worker and must not hold the connection a listing waits behind.
+        """
+        if not seed.strip():
+            return ""
+        with self._mirror_lock:
+            for key, entry in self._mirror.items():
+                if key == exclude or entry.writer != WRITER_MODEL:
+                    continue
+                if entry.seed == seed and entry.title:
+                    return entry.title
+        return ""
+
     def put(self, kind: str, conv_id: str, entry: TitleEntry) -> None:
         with self._mirror_lock:
             self._mirror[(kind, conv_id)] = entry
@@ -610,6 +633,16 @@ class ChatTitler:
                 )
             self._book.put(req.kind, req.conv_id, entry)
             if model and user and time.monotonic() >= self._quiet_until:
+                # The same conversation under another key was already named.
+                shared = self._book.model_title_for_seed(
+                    req.seed, exclude=(req.kind, req.conv_id)
+                )
+                if shared:
+                    self._book.put(req.kind, req.conv_id, TitleEntry(
+                        title=shared, writer=WRITER_MODEL, version=req.version,
+                        messages_at=req.message_count, seed=req.seed,
+                    ))
+                    continue
                 convo = Conversation(user=user[:USER_TURNS_READ], reply=reply)
                 for_model.append((req, convo, entry))
         for start in range(0, len(for_model), MODEL_BATCH):
