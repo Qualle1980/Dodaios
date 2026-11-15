@@ -26,7 +26,21 @@ from jarvis.harness.computer_use_context import (
     register_active_cu_token,
 )
 from jarvis.speech.pipeline import SpeechPipeline
+from tests.fakes.headless_audio import silence_real_audio_devices
 from tests.fakes.voice_session import open_classic_voice_session
+
+
+@pytest.fixture(autouse=True)
+def _no_real_audio_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build the pipeline without grabbing a real output device.
+
+    ``SpeechPipeline.__init__`` creates an ``AudioPlayer`` and binds it as the
+    process-wide shared player; nothing here closes it. That cost nothing while
+    ``sounddevice`` was absent, but Ubuntu 26.04's PortAudio reaches a sound
+    server, so the process called ``abort()`` at interpreter shutdown -- after
+    every test in this file had already passed.
+    """
+    silence_real_audio_devices(monkeypatch)
 
 
 @dataclass

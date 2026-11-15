@@ -500,11 +500,23 @@ jobs:
         with:
           python-version: "3.11"
       - name: System libraries
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libportaudio2 libegl1 libopengl0
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libportaudio2 libegl1 libopengl0 pulseaudio
       - name: Install
         uses: ./.github/actions/install-locked
         with:
           extras: dev telephony
+      - name: A sound server PortAudio can reach
+        # Ubuntu 26.04's PortAudio (19.7) initialises AT IMPORT through its
+        # PulseAudio backend. With no server answering, `import sounddevice`
+        # raises PaErrorCode -9999 ("PulseAudio_Initialize: Can't connect to
+        # server"), so every module binds `sd = None` and the audio tests
+        # patch attributes on None instead of testing anything. Production
+        # WANTS that guarded import -- a headless install has no sound server
+        # and must still boot -- so the fix belongs here, not in the code.
+        # --exit-idle-time=-1 keeps the daemon up between test files.
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          python -c "import sounddevice; print('sounddevice', sounddevice.__version__, 'inputs+outputs', len(sounddevice.query_devices()))"
       - name: Download the shared duration snapshot
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
