@@ -24,6 +24,37 @@ def pytest_configure(config) -> None:  # noqa: ANN001
     )
 
 
+@pytest.fixture(scope="session")
+def _isolation_root(tmp_path_factory):  # noqa: ANN001
+    """One un-numbered root for every per-test isolation directory.
+
+    ``tmp_path_factory.mktemp(name)`` scans the base temp directory for the
+    next free number on every call. Ten autouse fixtures below each needed one
+    directory per test, so a full ``tests/unit/`` run created a quarter of a
+    million siblings in one folder and every further ``mktemp`` had to walk all
+    of them: the run became quadratic and stopped finishing at all (measured
+    2026-11-14 — 232145 directories, 7.5 h for roughly 9 % of the suite).
+
+    Handing out ``root / str(next(counter))`` instead costs no scan, so the
+    cost per test stays flat no matter how many tests ran before it.
+    """
+    return tmp_path_factory.mktemp("isolation", numbered=True)
+
+
+@pytest.fixture
+def isolated_dir(_isolation_root, request):  # noqa: ANN001
+    """Factory for a fresh, scan-free directory belonging to this test."""
+    made: list[Path] = []
+
+    def _make(name: str) -> Path:
+        path = _isolation_root / f"{len(made)}-{name}-{id(request.node):x}"
+        path.mkdir(parents=True, exist_ok=True)
+        made.append(path)
+        return path
+
+    return _make
+
+
 @pytest.fixture(autouse=True)
 def _society_runtime_isolated():
     """Put the process-wide society runtime back after every test.
@@ -110,7 +141,7 @@ def _browser_lock_pinned_on():
 
 
 @pytest.fixture(autouse=True)
-def _agentic_ide_history_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _agentic_ide_history_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep every suite away from the developer's real Agentic-IDE history.
 
     Two small JSON files decide what the workspace picker shows on its front
@@ -134,7 +165,7 @@ def _agentic_ide_history_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
     """
     from jarvis.agentic_ide import recents, resume_store
 
-    root = tmp_path_factory.mktemp("agentic-ide-history")
+    root = isolated_dir("agentic-ide-history")
     monkeypatch.setattr(recents, "_store_path", lambda: root / "recents.json")
     monkeypatch.setattr(resume_store, "_store_path", lambda: root / "last_session.json")
     monkeypatch.setattr(recents, "_temp_roots", list)
@@ -142,7 +173,7 @@ def _agentic_ide_history_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _agent_trust_configs_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _agent_trust_configs_in_tmp(isolated_dir, tmp_path_factory, monkeypatch):  # noqa: ANN001
     """Keep the folder-trust pre-seed out of the developer's real CLI configs.
 
     Opening a workspace marks its folder as trusted in each coding CLI's own
@@ -162,7 +193,7 @@ def _agent_trust_configs_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
     """
     from jarvis.workspace import trust
 
-    fake_home = tmp_path_factory.mktemp("agent-trust-home")
+    fake_home = isolated_dir("agent-trust-home")
     base = tmp_path_factory.getbasetemp().resolve()
     real_config_path = trust._config_path  # noqa: SLF001
     real_extra_configs = trust._extra_configs  # noqa: SLF001
@@ -186,7 +217,7 @@ def _agent_trust_configs_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _macos_shell_registration_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _macos_shell_registration_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep every suite away from the developer's real macOS shell databases.
 
     On a Mac the bundle suites build real ``Personal Jarvis.app`` bundles under
@@ -203,7 +234,7 @@ def _macos_shell_registration_in_tmp(tmp_path_factory, monkeypatch):  # noqa: AN
     import jarvis.setup.macos_app_bundle as mab
     import jarvis.setup.macos_search_index as search_index
 
-    agents = tmp_path_factory.mktemp("launch-agents")
+    agents = isolated_dir("launch-agents")
     monkeypatch.setattr(autostart_macos, "_agents_dir", lambda: agents)
     # The label is the product's own, so a real ``launchctl load`` of a test
     # plist collides with — or, through RunAtLoad, starts — the installed app.
@@ -230,7 +261,7 @@ def _macos_shell_registration_in_tmp(tmp_path_factory, monkeypatch):  # noqa: AN
 
 
 @pytest.fixture(autouse=True)
-def _pricing_feed_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _pricing_feed_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep cost tracking's provider-feed refresh off the network and off the
     developer's real ``data/model_catalog_cache.json``.
 
@@ -248,7 +279,7 @@ def _pricing_feed_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
     from jarvis.brain import cost
 
-    root = tmp_path_factory.mktemp("pricing-feed")
+    root = isolated_dir("pricing-feed")
     path = root / "model_catalog_cache.json"
     path.write_text(
         json.dumps({"openrouter": {"fetched_at": time.time(), "models": []}}),
@@ -264,7 +295,7 @@ def _pricing_feed_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _memory_vault_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _memory_vault_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep the personal memory vault off the developer's real one.
 
     Anything that writes a memory - the ``remember`` tool, the candidate filer -
@@ -277,7 +308,7 @@ def _memory_vault_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
     """
     from jarvis.memory.vault import runtime
 
-    root = tmp_path_factory.mktemp("memory-vault")
+    root = isolated_dir("memory-vault")
     monkeypatch.setattr(runtime, "vault_path", lambda _config: root / "vault.db")
     runtime.close_active()
     yield
@@ -285,7 +316,31 @@ def _memory_vault_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _background_policy_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _agent_provider_prefs_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
+    """Keep the API Keys agents' provider choices off the developer's real file.
+
+    ``resolve_runner`` / ``forces_api`` read
+    ``user_data_dir()/agent_chat/agent_providers.json``. A machine whose owner
+    set the dual Claude row to its API key (``api_only``) makes society unit
+    tests that expect ``claude-cli`` fail with ``brain`` instead. CI has no
+    such file, so the same tests stay green there. The agent_chat prefs suite
+    already redirected this store; the leak comes in through every other suite
+    that resolves a society seat. Root conftest for the same reason as the
+    history redirect above: a guarantee that only holds for the tests somebody
+    remembered is not a guarantee. Tests that need a specific preference write
+    it through ``save`` into the redirected path.
+    """
+    from jarvis.agent_chat import agent_provider_prefs as prefs_mod
+
+    root = isolated_dir("agent-provider-prefs")
+    path = root / "agent_providers.json"
+    monkeypatch.setattr(prefs_mod, "_path", lambda: path)
+    monkeypatch.setattr(prefs_mod, "_cache", None)
+    yield path
+
+
+@pytest.fixture(autouse=True)
+def _background_policy_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep the background billing policy off the developer's real login state.
 
     The policy remembers a connected subscription in the user-data directory
@@ -296,7 +351,7 @@ def _background_policy_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
     """
     from jarvis.brain import background_policy
 
-    root = tmp_path_factory.mktemp("background-policy")
+    root = isolated_dir("background-policy")
     monkeypatch.setattr(background_policy, "_marker_path", lambda: root / "subscription_seen.json")
     monkeypatch.setattr(background_policy, "_registry_probe", lambda _provider: None)
     background_policy.reset_for_tests()
@@ -305,12 +360,12 @@ def _background_policy_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _mission_paid_ledger_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _mission_paid_ledger_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Keep the missions' rolling paid-use ledger off the developer's real data
     directory: it records real spend and gates automatic paid API use."""
     from jarvis.missions import capacity
 
-    root = tmp_path_factory.mktemp("mission-paid-ledger")
+    root = isolated_dir("mission-paid-ledger")
     monkeypatch.setattr(
         capacity, "_default_daily_ledger_path", lambda: root / "mission_paid_ledger.json"
     )
@@ -319,13 +374,13 @@ def _mission_paid_ledger_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _app_action_state_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+def _app_action_state_in_tmp(isolated_dir, monkeypatch):  # noqa: ANN001
     """Every registry-command or app-action call records its outcome for the
     Jarvis-actions page; keep that, and the per-action policy, off the
     developer's real ``data/state``."""
     from jarvis.app_actions import history, policy
 
-    root = tmp_path_factory.mktemp("app-actions")
+    root = isolated_dir("app-actions")
     monkeypatch.setattr(policy, "policy_path", lambda: root / "policy.json")
     monkeypatch.setattr(history, "history_path", lambda: root / "history.json")
     history.reset_for_tests()
@@ -334,13 +389,13 @@ def _app_action_state_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
 
 
 @pytest.fixture(autouse=True)
-def _provider_health_ledger_in_tmp(tmp_path_factory):  # noqa: ANN001
+def _provider_health_ledger_in_tmp(isolated_dir):  # noqa: ANN001
     """Every real brain/speech/realtime call records its outcome for the
     status dots; keep that record off the developer's real ``data/state`` and
     start every test with an empty one."""
     from jarvis.brain import provider_health_ledger as ledger
 
-    root = tmp_path_factory.mktemp("provider-health")
+    root = isolated_dir("provider-health")
     ledger.set_ledger(ledger.ProviderHealthLedger(root / ledger.LEDGER_FILE_NAME))
     yield root
     # In-memory, not None: a late background call must not create the real file.

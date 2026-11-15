@@ -19,11 +19,27 @@ export class TimedPcmQueue {
 
   clear(): void { this.audio.clear(); this.spans = []; }
 
-  enqueue(samples: Int16Array, timing?: AudioInterval): void {
-    if (!samples.length) return;
-    this.spans.push({ frames: samples.length, consumed: 0,
-      timing: timing && validAudioInterval(timing.startMs, timing.endMs) ? timing : undefined });
-    this.consume(this.audio.enqueue(samples)); // Overrun discards audio, never counts it as heard.
+  /** Returns how many trailing samples the bounded ring refused, if any. */
+  enqueue(samples: Int16Array, timing?: AudioInterval): number {
+    if (!samples.length) return 0;
+    // Refuse-newest (2026-11-13): only the accepted prefix enters the ring, so
+    // span metadata must describe that prefix. Consuming ``dropped`` from the
+    // front was correct for drop-oldest and would desync highlights now.
+    const dropped = this.audio.enqueue(samples);
+    const accepted = samples.length - dropped;
+    if (accepted <= 0) return dropped;
+    let acceptedTiming: AudioInterval | undefined;
+    if (timing && validAudioInterval(timing.startMs, timing.endMs)) {
+      acceptedTiming = accepted === samples.length
+        ? timing
+        : {
+            startMs: timing.startMs,
+            endMs: timing.startMs
+              + (timing.endMs - timing.startMs) * accepted / samples.length,
+          };
+    }
+    this.spans.push({ frames: accepted, consumed: 0, timing: acceptedTiming });
+    return dropped;
   }
 
   render(output: Float32Array, contextStart: number): RenderedAudioInterval[] {

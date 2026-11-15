@@ -132,6 +132,18 @@ _TOKEN = re.compile(r"\w+", re.UNICODE)
 #: Order of kinds in the always-on profile block.
 _PROFILE_ORDER = ("profile", "preference", "procedural", "relationship", "project", "reference")
 
+#: Max unpinned lines per kind in the standing block. Pinned has no line cap
+#: (the user's own word outranks the floor). ``reference`` is 0: it is lookup
+#: material retrieved per turn, not ambient identity (ADR-0044 point 5).
+_PROFILE_KIND_CAPS: dict[str, int] = {
+    "profile": 6,
+    "preference": 5,
+    "procedural": 5,
+    "relationship": 3,
+    "project": 3,
+    "reference": 0,
+}
+
 _PROFILE_HEADINGS = {
     "profile": "About the user",
     "preference": "Preferences",
@@ -586,7 +598,9 @@ class MemoryVault:
 
         Pinned memories first, then the stable kinds in a fixed order. Episodes
         and sensitive memories stay out; they reach the model through search.
-        A budget cut drops whole lines, least used first.
+        Each unpinned kind also has a line cap so early kinds cannot spend the
+        whole character budget. A budget or cap cut drops whole lines; the
+        sort still prefers ``helpful_count`` over mere surfacing.
         """
         current = [
             m
@@ -603,14 +617,34 @@ class MemoryVault:
         sections: list[tuple[str, list[Memory]]] = []
         budget = max_chars
         for key in ("pinned", *_PROFILE_ORDER):
+            # Alphabetical first, so the rank sort below has a stable base:
+            # Python's sort is stable, and every tie therefore resolves by
+            # text instead of by whatever order `list()` happened to return.
+            # That order breaks ITS ties on a random uuid, and with the
+            # per-kind line cap the coin flip decided which facts the model
+            # sees -- the same vault produced different blocks on consecutive
+            # calls. Text is an arbitrary tiebreaker; being arbitrary is fine,
+            # being random is not.
+            by_text = sorted(groups.get(key, []), key=lambda m: m.text)
             items = sorted(
-                groups.get(key, []),
+                by_text,
                 # `helpful_count`, never `use_count`: being shown is not
                 # evidence of having helped, and ordering by it would let the
                 # block keep whatever it already held.
                 key=lambda m: (m.helpful_count, m.confidence, m.recorded_at),
                 reverse=True,
             )
+            # Pinned has no per-kind line cap. Every other standing kind does.
+            kind_cap = _PROFILE_KIND_CAPS.get(key)
+            if kind_cap is not None and len(items) > kind_cap:
+                log.info(
+                    "memory vault: profile_selection capped %s to %d lines "
+                    "(%d candidates)",
+                    key,
+                    kind_cap,
+                    len(items),
+                )
+                items = items[:kind_cap]
             if not items:
                 continue
             heading = f"{_PROFILE_HEADINGS[key]}:"

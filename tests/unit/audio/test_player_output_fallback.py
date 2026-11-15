@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import jarvis.audio.player as player_module
 from jarvis.audio.player import AudioPlayer, is_local_output_error
 
@@ -24,6 +26,14 @@ def test_is_local_output_error_ignores_transport_failures() -> None:
     assert is_local_output_error(TimeoutError("handshake")) is False
 
 
+#: Patches attributes ON the sounddevice module; a headless install binds
+#: ``sd = None`` and ``monkeypatch.setattr`` would raise AttributeError.
+needs_sounddevice = pytest.mark.skipif(
+    player_module.sd is None, reason="sounddevice is absent (headless install)"
+)
+
+
+@needs_sounddevice
 def test_open_retries_on_the_next_output_device(monkeypatch) -> None:
     player = AudioPlayer.__new__(AudioPlayer)
     player._device = 5
@@ -113,3 +123,28 @@ def test_recover_output_device_skips_the_dead_index(monkeypatch) -> None:
     assert player.recover_output_device() is True
     assert player._device == 3
     assert 7 in player._output_failed_devices
+
+
+def test_a_transport_failure_is_not_local_death_without_sounddevice() -> None:
+    """Headless installs must not mistake a dead websocket for a dead speaker.
+
+    Without sounddevice there is no PortAudio, so nothing can raise one of its
+    errors. The stand-in used to be ``OSError`` -- and ``ConnectionError``
+    derives from it, so on ``python:3.11-slim`` (no libportaudio2) every
+    provider transport death was classified as local output death. BUG-108
+    inverted: the failure a websocket rebuild WOULD heal was treated as the one
+    it cannot, so the socket stayed dead.
+    """
+    absent = player_module._port_audio_error_type(None)
+
+    assert not isinstance(ConnectionError("websocket 1006"), absent)
+    assert not isinstance(OSError("disk went away"), absent)
+    assert issubclass(absent, BaseException)
+
+
+def test_the_portaudio_error_type_is_the_real_one_when_sounddevice_is_there() -> None:
+    class _FakeSd:
+        class PortAudioError(Exception):
+            pass
+
+    assert player_module._port_audio_error_type(_FakeSd) is _FakeSd.PortAudioError

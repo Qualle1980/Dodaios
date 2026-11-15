@@ -1408,6 +1408,26 @@ def set_wiki_vault_root(vault_root: str, *, path: Path = DEFAULT_CONFIG_FILE) ->
     _patch_table(path, "wiki_integration", "vault_root", vault_root)
 
 
+def set_wiki_verified_only(
+    enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE
+) -> None:
+    """Persist ``[wiki_integration] verified_only`` in jarvis.toml (AP-7).
+
+    The reader half of the vault governance gate (#157): when enabled, a
+    recall hit from the Agent-Learnings source must carry ``status:
+    verified``. The only writer of this key — editing jarvis.toml by hand
+    is what AP-7 forbids.
+
+    Same TOML-only rationale as :func:`set_wiki_vault_root`:
+    ``wiki_integration`` is not tracked in ``config-soll.json``, so  # i18n-allow
+    the drift-guard never reverts it. Takes effect on the next app restart —
+    a ``VaultSearch`` built at boot keeps the flag it was constructed with.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("verified_only must be a bool")
+    _patch_table(path, "wiki_integration", "verified_only", enabled)
+
+
 def set_overlay_style(style: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     """Persist the on-screen overlay style to ``[ui] orb_style`` in jarvis.toml.
 

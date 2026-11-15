@@ -329,6 +329,15 @@ class _GeminiLiveSession:
         self._gen_started_at = 0.0
         self._last_input_kind = "connect"
         self._last_input_at = time.monotonic()
+        # Which adapter, and which of its generations, a wire line belongs to.
+        # Two concurrent generations print identical lines, so the log could
+        # not tell them apart: on 2026-11-13 a voice answer overlapped itself
+        # and the log showed a generation start 116 ms BEFORE an input that
+        # reported ``model_generating=False``. Whether that was one adapter
+        # racing its own flag or two adapters on one session is decidable
+        # from the log only once every line carries this identity.
+        self._wire = f"{str(session_id)[:8]}/{id(self) & 0xFFFF:04x}"
+        self._gen_seq = 0
         # A generation that handed out a function call is closed by the server
         # with ``interrupted`` AND ``turn_complete`` — two edges, usually two
         # messages. The ``interrupted`` edge resets the per-generation counters
@@ -389,10 +398,16 @@ class _GeminiLiveSession:
     ) -> None:
         if not self._gen_started_at:
             self._gen_started_at = time.monotonic()
+            self._gen_seq += 1
             log.info(
-                "gemini-live: generation started %.2fs after the last %s input",
+                "gemini-live[%s gen=%d]: generation started %.2fs after the "
+                "last %s input (model_generating=%s user_turn_open=%s)",
+                self._wire,
+                self._gen_seq,
                 self._gen_started_at - self._last_input_at,
                 self._last_input_kind,
+                self._model_generating,
+                self._user_turn_open,
             )
             if not calls:
                 # Spoken output opens a NEW generation: whatever boundary
@@ -431,8 +446,10 @@ class _GeminiLiveSession:
     def _log_generation_boundary(self, *, kind: str, reason: str = "") -> None:
         started = self._gen_started_at
         log.info(
-            "gemini-live: %s — audio=%.1fs transcript=%d chars function_calls=%d "
-            "generation=%s; %.2fs after the last %s input%s",
+            "gemini-live[%s gen=%d]: %s — audio=%.1fs transcript=%d chars "
+            "function_calls=%d generation=%s; %.2fs after the last %s input%s",
+            self._wire,
+            self._gen_seq,
             kind,
             self._gen_audio_bytes / float(_OUTPUT_RATE * 2),
             self._gen_transcript_chars,
@@ -913,8 +930,10 @@ class _GeminiLiveSession:
         # Runtime text updates must use the realtime-input text stream.
         payload = str(text)
         log.info(
-            "gemini-live: text input sent (%d chars; model_generating=%s "
-            "user_turn_open=%s)",
+            "gemini-live[%s gen=%d]: text input sent (%d chars; "
+            "model_generating=%s user_turn_open=%s)",
+            self._wire,
+            self._gen_seq,
             len(payload),
             self._model_generating,
             self._user_turn_open,

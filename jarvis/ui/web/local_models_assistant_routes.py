@@ -85,9 +85,9 @@ def _opener(mode: str) -> str:
 
 def _usable(provider: str) -> bool:
     """The provider-agnostic worker check the API-keys page uses."""
-    from jarvis.local_models.assistant_session import _default_usable
+    from jarvis.local_models.assistant_session import is_default_usable
 
-    return (_worker_usable(provider) or _default_usable(provider)) and not _worker_flagged_dead(
+    return (_worker_usable(provider) or is_default_usable(provider)) and not _worker_flagged_dead(
         provider
     )
 

@@ -36,11 +36,31 @@ from jarvis.core.protocols import AudioChunk
 
 log = logging.getLogger("jarvis.audio.player")
 
+class _NoPortAudioError(Exception):
+    """Stands in for ``PortAudioError`` where sounddevice is absent.
+
+    Nothing ever raises it: without sounddevice there is no PortAudio, so no
+    error can be one of its errors. ``OSError`` used to play that part and it
+    is the WRONG stand-in — ``ConnectionError`` derives from it, so on every
+    headless install (``python:3.11-slim``, no libportaudio2) a dead provider
+    websocket was classified as a dead local speaker. That is BUG-108 inverted:
+    the transport death a rebuild WOULD heal was treated as the one it cannot,
+    so the socket was never rebuilt.
+    """
+
+
 # `except sd.PortAudioError` is a RUNTIME expression: when sd is None it would
 # evaluate None.PortAudioError and raise AttributeError, masking the real audio
 # error. Resolve the exception type once here so the except clause stays safe
 # even without sounddevice (H4 review).
-_PortAudioError: type[BaseException] = sd.PortAudioError if sd is not None else OSError
+def _port_audio_error_type(sd_module: Any) -> type[BaseException]:
+    """The exception type meaning "PortAudio failed" on this install."""
+    if sd_module is None:
+        return _NoPortAudioError
+    return sd_module.PortAudioError  # type: ignore[no-any-return]
+
+
+_PortAudioError: type[BaseException] = _port_audio_error_type(sd)
 
 # Markers that the LOCAL output sink died (BUG-108). Sample-rate refusals
 # (-9997) are handled by the rate cascade, not by device fallback.

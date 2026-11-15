@@ -14,7 +14,10 @@ from jarvis.agent_chat import service
 
 @pytest.fixture(autouse=True)
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    # Override the root conftest redirect so this module owns a known layout
+    # under tmp (broken-file test writes beside the path ``_path`` returns).
+    path = tmp_path / "Jarvis" / "agent_chat" / "agent_providers.json"
+    monkeypatch.setattr(prefs_mod, "_path", lambda: path)
     monkeypatch.setattr(prefs_mod, "_cache", None)
     return tmp_path
 

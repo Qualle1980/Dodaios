@@ -828,6 +828,20 @@ class LiveVoiceSession:
         if levels.playback_active:
             level_tap.publish(levels.output_level)
             level_tap.note_playing(0.3)
+            # Live plays in the browser, so AudioPlayer never records the
+            # envelope. Feed the process-local echo reference from the page's
+            # own output meter (~100 ms cadence) so the native path can arm
+            # its speaker-echo judgment the way desktop barge-in does.
+            #
+            # UNIT WARNING: this is the page's 0..1 output METER, not an RMS
+            # like the outbound-PCM samples beside it. The envelope therefore
+            # mixes two scales, and a reader may only ask it "were we audible
+            # recently" -- never compare its level against a microphone RMS.
+            # A mic gate built on that ratio held a real barge-in at
+            # mic_rms=0.1253 against threshold=0.4788 (measured 2026-11-15).
+            from jarvis.audio import echo_reference
+
+            echo_reference.record(float(levels.output_level), 0.1)
         elif previous_playback:
             level_tap.reset_playing()
         if meter_owned:
@@ -855,6 +869,34 @@ class LiveVoiceSession:
                 from jarvis.realtime.offer_broker import validate_webrtc_offer_sdp
 
                 self._offer_future.set_result(validate_webrtc_offer_sdp(message.get("sdp")))
+            return
+        if kind == "playback_overrun":
+            # See ``playback_diag`` below. The browser's playback ring is
+            # bounded (ten seconds) and drops the OLDEST samples when a
+            # provider outruns playback, which is audible as the answer
+            # jumping forward mid-word.
+            log.info(
+                "live[%s] browser playback OVERRUN: dropped=%s total=%s rate=%s",
+                self.session_id,
+                message.get("dropped"),
+                message.get("total"),
+                message.get("rate"),
+            )
+            return
+        if kind == "playback_diag":
+            # Diagnosis only (2026-11-13): a long spoken answer was heard with
+            # words running over each other while the backend log proved a
+            # single generation produced them, and no client-side signal
+            # existed to say whether the browser had joined the ordered
+            # timeline (``handleUntimedAudio``) or was playing every arriving
+            # frame at once. The client reports that once per connection.
+            log.info(
+                "live[%s] browser playback: ordered=%s timed_output=%s detail=%s",
+                self.session_id,
+                message.get("ordered"),
+                message.get("timed_output"),
+                str(message.get("detail", ""))[:120],
+            )
             return
         if kind == "playback_state":
             if type(message.get("active")) is bool:
@@ -1755,6 +1797,13 @@ class LiveVoiceSession:
                 from jarvis.live.tools import annotate_failed_tool_result
 
                 result = annotate_failed_tool_result(result)
+                if result.get("withhold_tool_response"):
+                    log.warning(
+                        "Live session withholding tool response for %s "
+                        "(identical-call storm ended)",
+                        item.get("name"),
+                    )
+                    continue
                 if result.get("success") is False or result.get("speak_failure"):
                     self._turn_failed_tools.add(str(item.get("name") or ""))
                 image_inputs.extend(take_images(result))
@@ -2036,6 +2085,10 @@ class LiveVoiceSession:
         # Marked before the wire: the model's answer can arrive while the
         # send is still being awaited, and must count as this report's.
         self._report_sent()
+        # Application events skip a revision bump; drop stale read receipts (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send(
                 {
