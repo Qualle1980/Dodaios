@@ -509,3 +509,11 @@ eval-results/
 # Cross-process write locks beside the files they guard (jarvis/core/file_lock.py).
 jarvis.toml.lock
 scripts/config-soll.json.lock
+
+# Agent context store (.agent-context/): the FTS index is a rebuildable cache
+# and logs/ is scratch output (the global `logs/` rule above would hide the
+# folder itself), so only its .gitkeep is versioned.
+.agent-context/.cache/
+!.agent-context/logs/
+.agent-context/logs/*
+!.agent-context/logs/.gitkeep

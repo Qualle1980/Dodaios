@@ -331,3 +331,23 @@ voice-ready path.
 [`docs/os-parity.md`](docs/os-parity.md) ·
 [`docs/macos-permissions.md`](docs/macos-permissions.md) ·
 [`docs/jarvis-cli.md`](docs/jarvis-cli.md).
+
+## 6. Agent context (`.agent-context/`)
+
+Shared working context for every agent; the rules stay in this file.
+
+- Read `.agent-context/CURRENT.md` at the start of a task: short state, kept
+  under 8 KB. Replace stale lines, never append history.
+- Before fixing a failure, run
+  `python .agent-context/tools/context.py search "<symptom words>"` (§0: search
+  the failure). It returns `status: verified` lessons only; `--all` adds drafts.
+- A lesson is one file in `lessons/` with the frontmatter shown in CURRENT.md.
+  Mark it `verified` only with a test, command output or live run as proof;
+  everything else is `draft`. English, no secrets or private data.
+- Decisions go to `decisions/NNNN-*.md`. Scratch output goes to `logs/`, which
+  is never versioned (`tools/cleanup.ps1`, dry run unless `-Apply`).
+- The SQLite index is a cache under `.agent-context/.cache/`; never commit it.
+- `tools/guard-destructive.ps1` is an optional `PreToolUse` hook that answers
+  `ask` for destructive shell commands. Register it per machine (`.claude/*` is
+  not versioned). Under `bypassPermissions` the `ask` still holds, and in a
+  headless run it denies, so do not register it for unattended workers.
