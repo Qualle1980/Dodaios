@@ -81,31 +81,61 @@ PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (0.80, 4.0),
     "claude-haiku-4-5": (0.80, 4.0),
     # ── Google Gemini (Frontier: 3.1-pro-preview, 3-flash) ──────────
+    # gemini-3.1-pro-preview Standard <=200k: $2.00 / $12.00
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
     "gemini-3.1-pro-preview": (2.0, 12.0),
+    # Not on Google's pricing page or OpenRouter feed as of 2026-11-16;
+    # kept as a historical offline fallback only.
     "gemini-3-pro-preview": (1.50, 10.0),
-    "gemini-3-flash": (0.10, 0.40),
-    "gemini-3-flash-preview": (0.10, 0.40),
-    "gemini-3.1-flash-lite": (0.05, 0.20),
+    # gemini-3-flash-preview Standard text: $0.50 / $3.00
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16). The bare
+    # gemini-3-flash id is not listed separately; keep the two rows equal.
+    "gemini-3-flash": (0.50, 3.0),
+    "gemini-3-flash-preview": (0.50, 3.0),
+    # gemini-3.1-flash-lite Standard: $0.25 / $1.50
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16). Was
+    # wrongly (0.05, 0.20) and under-counted spend by 5x / 7.5x.
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+    # gemini-2.5-pro Standard <=200k: $1.25 / $10.00
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
     "gemini-2.5-pro": (1.25, 10.0),
-    # 2.5 Flash GA rates (raised from the preview's $0.075/$0.30 in 2025);
-    # re-verified against the OpenRouter feed 2026-08-18.
+    # gemini-2.5-flash Standard text: $0.30 / $2.50
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
     "gemini-2.5-flash": (0.30, 2.50),
+    # gemini-2.5-flash-lite Standard text: $0.10 / $0.40
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
     "gemini-2.5-flash-lite": (0.10, 0.40),
-    "gemini-3.1-flash-tts-preview": (0.075, 0.30),  # TTS, same rate
+    # gemini-3.1-flash-tts-preview Standard: $1.00 text in / $20.00 audio out
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16). Was wrongly
+    # (0.075, 0.30).
+    "gemini-3.1-flash-tts-preview": (1.0, 20.0),
     # 2026-07-28 cost audit: the 3.5/3.6 flash generation is ~20x pricier
     # than 2.5-flash; these entries were missing, so the live install
-    # tallied its dominant spend as $0.00 (verified against the OpenRouter
-    # /api/v1/models pricing feed on 2026-07-28).
+    # tallied its dominant spend as $0.00. gemini-3.5-flash is not on
+    # Google's page (2026-11-16); rate kept from OpenRouter
+    # https://openrouter.ai/api/v1/models (1.50 / 9.0).
     "gemini-3.5-flash": (1.50, 9.0),
+    # gemini-3.5-flash-lite Standard: $0.30 / $2.50
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
     "gemini-3.5-flash-lite": (0.30, 2.50),
-    # 3.6 / 3.7 Flash: $0.75 / $3.75 per ai.google.dev/gemini-api/docs/pricing
-    # (2026-08-18; promotional rate "through Dec 31, 2026"). 3.7 was missing
-    # here on 2026-08-18 and the live install showed a whole session as $0.
+    # gemini-3.6-flash / gemini-3.8-flash Standard promo through Dec 31, 2026:
+    # $0.75 / $3.75 per https://ai.google.dev/gemini-api/docs/pricing
+    # (2026-11-16). gemini-3.7-flash is not on Google's page; rate kept from
+    # OpenRouter https://openrouter.ai/api/v1/models (0.75 / 3.75).
     "gemini-3.6-flash": (0.75, 3.75),
     "gemini-3.7-flash": (0.75, 3.75),
-    "gemini-3.8-flash": (0.75, 3.75),  # OpenRouter feed, 2026-09-28
+    "gemini-3.8-flash": (0.75, 3.75),
+    # DATED: Google's page states these rates run "through December 31, 2026"
+    # and become $1.50 / $7.50 "starting January 1, 2027" — a 2x step for the
+    # 3.6 and 3.8 Flash rows above (verified 2026-11-16). Every budget gate
+    # that reads this table doubles on that date; re-check these two rows
+    # then rather than discovering it in a monthly bill.
     # Live API models — TEXT rates; audio rates live in
     # REALTIME_AUDIO_PRICING_USD_PER_MTOK below.
+    # Shared Live Standard text row: $0.75 / $4.50
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16) section
+    # "Gemini 3.8 Live, Gemini 3.8 Live Extended Thinking, and Gemini 3.1
+    # Flash Live Preview". Keep these three equal.
     "gemini-3.1-flash-live-preview": (0.75, 4.50),
     # gemini-3.8-live shares 3.1-flash-live-preview's pricing row. It was
     # missing here until 2026-11-07, so every Live turn the app ran recorded
@@ -113,11 +143,15 @@ PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
     # reason. Keep the two rows equal; a test asserts that rather than a
     # copied literal.
     "gemini-3.8-live": (0.75, 4.50),
-    # 2.5 Flash native-audio Live: $0.50 / $2.00 text (ai.google.dev pricing,
-    # 2026-08-18). ``gemini-live-2.5-flash-native-audio`` is the Vertex id of
-    # the same model — VertexLiveProvider.default_model — and Vertex bills
-    # the same per-token rates.
+    "gemini-3.8-live-extended-thinking": (0.75, 4.50),
+    # 2.5 Flash native-audio Live: $0.50 / $2.00 text
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16).
+    # ``gemini-live-2.5-flash-native-audio`` is the Vertex id of the same
+    # model — VertexLiveProvider.default_model — and Vertex bills the same
+    # per-token rates. ``gemini-2.5-flash-native-audio-latest`` is the
+    # rolling alias the Live picker offers; keep all three equal.
     "gemini-2.5-flash-native-audio-preview-12-2025": (0.50, 2.0),
+    "gemini-2.5-flash-native-audio-latest": (0.50, 2.0),
     "gemini-live-2.5-flash-native-audio": (0.50, 2.0),
     # ── OpenAI (Frontier: GPT-5.5 + 5.5-pro, released 2026-04-23) ──
     "gpt-5.5": (5.0, 30.0),
@@ -470,15 +504,18 @@ async def ensure_pricing_for(model: str | None, *, timeout_s: float = 3.0) -> bo
 # - OpenAI Realtime: gpt-realtime-2.1 $32 in / $64 out,
 #   gpt-realtime-2.1-mini $10 in / $20 out
 REALTIME_AUDIO_PRICING_USD_PER_MTOK: dict[str, tuple[float, float]] = {
+    # Shared Live Standard audio row: $3.00 in / $12.00 out
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16) section
+    # "Gemini 3.8 Live, Gemini 3.8 Live Extended Thinking, and Gemini 3.1
+    # Flash Live Preview". Keep these three equal.
     "gemini-3.1-flash-live-preview": (3.0, 12.0),
-    # Same pricing row as 3.1-flash-live-preview (2026-11-07). Google's own
-    # pricing page would not render cleanly on retrieval, so this was taken
-    # from the shared-row listing and is worth re-checking when the next Live
-    # model lands.
     "gemini-3.8-live": (3.0, 12.0),
-    # 2.5 Flash native audio (AI Studio id + Vertex id): $3.00 in / $12.00
-    # out per ai.google.dev/gemini-api/docs/pricing, 2026-08-18.
+    "gemini-3.8-live-extended-thinking": (3.0, 12.0),
+    # 2.5 Flash native audio: $3.00 in / $12.00 out
+    # https://ai.google.dev/gemini-api/docs/pricing (2026-11-16). Vertex id
+    # and rolling ``-latest`` alias share the dated preview row.
     "gemini-2.5-flash-native-audio-preview-12-2025": (3.0, 12.0),
+    "gemini-2.5-flash-native-audio-latest": (3.0, 12.0),
     "gemini-live-2.5-flash-native-audio": (3.0, 12.0),
     "gpt-realtime-2.1": (32.0, 64.0),
     "gpt-realtime-2.1-mini": (10.0, 20.0),
