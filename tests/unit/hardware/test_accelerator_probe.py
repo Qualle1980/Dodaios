@@ -13,6 +13,7 @@ headless Linux container as on the maintainer's Windows box.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,14 @@ from jarvis.hardware import detection
 
 
 @pytest.fixture(autouse=True)
-def _fresh_memo() -> None:
-    """The probe is memoised process-wide; each test starts from cold."""
+def _fresh_memo() -> Iterator[None]:
+    """The probe is memoised process-wide; each test starts AND ends cold.
+
+    Resetting only before let a test's patched answer (``(0.0, "none")``)
+    outlive it for the memo's 60 s and reach the realtime preflight tests.
+    """
+    detection._reset_for_tests()
+    yield
     detection._reset_for_tests()
 
 
@@ -39,6 +46,7 @@ def _not_a_mac(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _no_vendor_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(detection, "_ollama_reported_gb", lambda: 0.0)
+    monkeypatch.setattr(detection, "_ollama_log_is_cpu_only", lambda: False)
     monkeypatch.setattr(detection, "_windows_registry_vram_gb", lambda: 0.0)
     monkeypatch.setattr(detection, "_linux_drm_vram_gb", lambda: 0.0)
 
@@ -127,6 +135,44 @@ def test_a_rotated_or_missing_log_is_simply_no_answer(
     assert detection._ollama_reported_gb() == 0.0
     _log_with(monkeypatch, tmp_path, "")
     assert detection._ollama_reported_gb() == 0.0
+
+
+def test_a_cpu_only_ollama_log_is_not_accelerator_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ollama prints system RAM on ``library=cpu``; that is not VRAM.
+
+    Measured 2026-11-15: ``total="14.8 GiB"`` with ``library=cpu`` while
+    ``ollama ps`` reported 100 % CPU, and the brain planned from
+    "15 GB of accelerator memory".
+    """
+    _log_with(
+        monkeypatch,
+        tmp_path,
+        'msg="inference compute" id=cpu library=cpu compute="" name=cpu '
+        'description=cpu total="14.8 GiB" available="8.1 GiB"\n',
+    )
+    assert detection._ollama_reported_gb() == 0.0
+    assert detection._ollama_log_is_cpu_only() is True
+    _no_nvidia(monkeypatch)
+    _not_a_mac(monkeypatch)
+    # An iGPU in the registry must not override a server that chose CPU.
+    monkeypatch.setattr(detection, "_windows_registry_vram_gb", lambda: 1.0)
+    monkeypatch.setattr(detection, "_linux_drm_vram_gb", lambda: 1.0)
+    assert detection.usable_accelerator_gb() == (0.0, "none")
+
+
+def test_a_cuda_line_still_wins_when_a_cpu_line_shares_the_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _log_with(
+        monkeypatch,
+        tmp_path,
+        'msg="inference compute" id=cpu library=cpu total="14.8 GiB"\n'
+        'msg="inference compute" id=0 library=CUDA total="15.9 GiB"\n',
+    )
+    assert detection._ollama_reported_gb() == pytest.approx(15.9)
+    assert detection._ollama_log_is_cpu_only() is False
 
 
 # ── Source precedence ────────────────────────────────────────────────────

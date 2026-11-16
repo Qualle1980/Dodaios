@@ -553,9 +553,14 @@ def usable_accelerator_gb() -> tuple[float, str]:
 #: ``inference compute`` record per device it will actually use, whatever the
 #: vendor — ``library=CUDA`` / ``ROCm`` / ``Metal`` — so this one pattern reads
 #: a card three separate vendor SDKs would be needed to read directly.
+#: ``library=cpu`` is NOT an accelerator: Ollama prints system RAM there
+#: (measured ``total="14.8 GiB"`` on a CPU-only host) and counting it as VRAM
+#: made ``num_ctx`` plan from "15 GB of accelerator memory" while ``ollama ps``
+#: reported 100 % CPU.
 _OLLAMA_COMPUTE_RE = re.compile(
     r"inference compute.*?\btotal=\"?([0-9.]+)\s*([KMGT]i?B)\"?", re.IGNORECASE
 )
+_OLLAMA_CPU_LIBRARY_RE = re.compile(r"\blibrary=cpu\b", re.IGNORECASE)
 #: Keyed by the unit's first letter, so ``GB`` and ``GiB`` both land on the
 #: same factor. Ollama prints binary units either way.
 _UNIT_GIB = {"k": 1 / 1048576, "m": 1 / 1024, "g": 1.0, "t": 1024.0}
@@ -598,13 +603,15 @@ def _ollama_log_paths() -> list[Path]:
     return paths
 
 
-def _ollama_reported_gb() -> float:
-    """Largest device Ollama itself reported, in GiB; ``0.0`` when unknown.
+def _ollama_compute_from_logs() -> tuple[float, bool]:
+    """``(best_gpu_gib, saw_any_compute_line)`` from Ollama's startup records.
 
-    Authoritative where it answers: it is the budget the server decided on,
-    not one this process guessed for it.
+    CPU ``library=cpu`` lines are skipped for the GiB figure (they name system
+    RAM) but still count as a seen compute line, so a CPU-only server is
+    distinct from a missing log and must not fall through to the OS inventory.
     """
     best = 0.0
+    saw = False
     for path in _ollama_log_paths():
         try:
             if not path.is_file():
@@ -613,8 +620,33 @@ def _ollama_reported_gb() -> float:
         except OSError:  # pragma: no cover — unreadable or vanished mid-read
             continue
         for match in _OLLAMA_COMPUTE_RE.finditer(text):
+            saw = True
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line = text[line_start : match.end()]
+            if _OLLAMA_CPU_LIBRARY_RE.search(line):
+                continue
             best = max(best, _gib(match.group(1), match.group(2)))
+    return best, saw
+
+
+def _ollama_reported_gb() -> float:
+    """Largest GPU device Ollama itself reported, in GiB; ``0.0`` when unknown.
+
+    Authoritative where it answers: it is the budget the server decided on,
+    not one this process guessed for it. CPU-only records yield ``0.0``.
+    """
+    best, _saw = _ollama_compute_from_logs()
     return best
+
+
+def _ollama_log_is_cpu_only() -> bool:
+    """True when Ollama logged inference-compute lines and every one was CPU.
+
+    Distinct from a missing log: a CPU-only server must not fall through to
+    the OS inventory (an iGPU's shared memory is not what the server uses).
+    """
+    best, saw = _ollama_compute_from_logs()
+    return saw and best <= 0.0
 
 
 def _linux_drm_vram_gb() -> float:
@@ -677,11 +709,15 @@ def _vendor_neutral_gb() -> tuple[float, str]:
     Ordered by how much the answer can be trusted: Ollama's own startup record
     first (it names the budget the server will actually use, for CUDA, ROCm and
     Metal alike), then the OS's own inventory, which needs no running server
-    and no vendor tool but only reports what the card HAS.
+    and no vendor tool but only reports what the card HAS. When Ollama has
+    already named only CPU devices, the OS inventory is skipped — an iGPU's
+    shared memory must not override a server that chose CPU.
     """
     reported = _ollama_reported_gb()
     if reported > 0:
         return reported, "ollama-runtime"
+    if _ollama_log_is_cpu_only():
+        return 0.0, ""
     if os.name == "nt":
         registry = _windows_registry_vram_gb()
         if registry > 0:
