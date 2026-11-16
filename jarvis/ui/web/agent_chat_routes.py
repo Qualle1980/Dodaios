@@ -54,7 +54,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from jarvis.agent_chat import attachments as chat_attachments
-from jarvis.agent_chat import runner_cli, typeahead
+from jarvis.agent_chat import runner_cli, seat_login, typeahead
 from jarvis.agent_chat.catalog import claude_code_models, offers, rows_for
 from jarvis.agent_chat.control_types import CommandRequest, CommandResult
 from jarvis.agent_chat.credential_requests import CredentialRequestBusy
@@ -670,91 +670,11 @@ _health_cache: dict[str, tuple[float, tuple[int, int], list[ProviderHealthRow]]]
 _CLI_RUNNERS: Final[frozenset[str]] = runner_cli.CLI_RUNNERS
 
 
-def _cli_auth_status(runner: str) -> Any | None:
-    """The vendor CLI's own login snapshot. ``None`` if ``runner`` is not a CLI
-    this app can read the login of (OpenCode, Kimi and the DeepSeek harness
-    keep theirs where no reader has been verified — see the registry)."""
-    if runner == "glm-cli":
-        # GLM Coding Plan is Claude Code plus a Z.ai key: the key IS the login.
-        from types import SimpleNamespace
-
-        from jarvis.workspace.agents import glm_spawn_env
-
-        configured = glm_spawn_env() is not None
-        return SimpleNamespace(
-            connected=configured,
-            mode="subscription",
-            message="GLM Coding Plan: Z.ai key saved"
-            if configured
-            else "GLM Coding Plan: no Z.ai key — add one under API Keys",
-        )
-    if runner == "claude-cli":
-        from jarvis.claude_auth import ClaudeAuthService
-
-        return ClaudeAuthService().status()
-    if runner == "codex-cli":
-        from jarvis.codex_auth import CodexAuthService
-
-        return CodexAuthService().status()
-    if runner == "agy-cli":
-        from jarvis.google_cli.auth_service import GoogleCliAuthService
-
-        return GoogleCliAuthService().status()
-    if runner == "grok-cli":
-        from jarvis.grok_build_auth import GrokBuildAuthService
-
-        return GrokBuildAuthService().status()
-    return None
-
-
-def _cli_subscription_connected(runner: str, st: Any) -> bool:
-    """Whether ``st`` is a login this CLI seat can actually spend.
-
-    Claude and Grok Build report ``connected=True`` for a stored API key as
-    well; that key belongs to a different picker row. Antigravity's
-    ``api_key`` mode is the Gemini key, same split. Codex's ``connected``
-    is the CLI's own auth.json (ChatGPT login or a key the CLI itself
-    holds), which is what ``codex exec`` uses.
-    """
-    connected = bool(getattr(st, "connected", False))
-    mode = (getattr(st, "mode", None) or "").strip().lower()
-    if runner == "claude-cli":
-        return connected and mode == "subscription"
-    if runner == "grok-cli":
-        return connected and mode == "subscription"
-    if runner == "agy-cli":
-        return connected and mode == "oauth-personal"
-    return connected
-
-
-def _cli_login_snapshot(runner: str) -> tuple[str, str, str]:
-    """Login presence for a vendor CLI seat. Never a live API-key call.
-
-    Returns ``(status, reason, detail)``. A signed-in subscription is
-    ``ok``; anything else is ``needs_setup`` so the picker does not borrow
-    API-key words ("Key rejected") for a seat that has no key.
-    """
-    try:
-        st = _cli_auth_status(runner)
-    except Exception as exc:  # noqa: BLE001 — one bad CLI must not lose the sweep
-        log.info("agent chat: CLI login check for %s failed: %s", runner, exc)
-        return (
-            "unknown",
-            "check_failed",
-            f"The check itself failed ({type(exc).__name__})",
-        )
-    if st is None:
-        # The CLI keeps its own login and this app has no verified reader for
-        # it: no dot rather than a guessed one (the turn itself says if the
-        # CLI is signed out).
-        return "unknown", "self_managed", f"{runner}: keeps its own login"
-    connected = _cli_subscription_connected(runner, st)
-    detail = (getattr(st, "message", None) or "").strip() or (
-        f"{runner}: signed in" if connected else f"{runner}: not signed in"
-    )
-    if connected:
-        return "ok", "ok", detail
-    return "needs_setup", "not_configured", detail
+# The CLI login reader is shared with the coding-session tool, so it lives in
+# the agent-chat layer; these names stay for the routes and their tests.
+_cli_auth_status = seat_login.cli_auth_status
+_cli_subscription_connected = seat_login.cli_subscription_connected
+_cli_login_snapshot = seat_login.cli_login_snapshot
 
 
 async def _one_provider_health(cfg: Any, provider_id: str, *, surface: str) -> ProviderHealthRow:
