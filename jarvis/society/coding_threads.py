@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Final
 from uuid import uuid4
 
+from jarvis.core.delegated_work import DelegatedWork, register_delegated_work
 from jarvis.core.protocols import ToolResult
 
 from .delivery import FOLLOW_UP_RULE, IncomingMessage, incoming_context
@@ -517,7 +518,8 @@ class CodingThreadTool:
         )
         coordinator = self.runtime.coding_threads
         coordinator.track(session.session_id, self._owner_session)
-        await service.send(session.session_id, prompt, author=_author(agent))
+        turn_id = await service.send(session.session_id, prompt, author=_author(agent))
+        _track_delegated_thread(service, session, name=row.label, turn_id=str(turn_id or ""))
         card = _thread_card(service, service.store.get_session(session.session_id) or session)
         await coordinator.announce(self._owner_session, card)
         return {
@@ -541,11 +543,14 @@ class CodingThreadTool:
         ):
             raise ValueError("The thread waits for an answer to its question: use answer.")
         try:
-            await service.send(session.session_id, prompt, author=_author(agent))
+            turn_id = await service.send(session.session_id, prompt, author=_author(agent))
         except SessionBusy as exc:
             raise ValueError(
                 "The thread is still working. Wait for its report, or stop it first."
             ) from exc
+        _track_delegated_thread(
+            service, session, name=_label_of(session.provider), turn_id=str(turn_id or "")
+        )
         self.runtime.coding_threads.agent_took_turn(session.session_id)
         return {**_thread_card(service, session), "status": "working"}
 
@@ -735,6 +740,75 @@ def _thread_card(service: Any, session: Any) -> dict[str, Any]:
         "access": session.permission_mode,
         "running": bool(service.is_running(session.session_id)),
     }
+
+
+def _track_delegated_thread(
+    service: Any, session: Any, *, name: str, turn_id: str
+) -> None:
+    """Hold the owner's turn until this coding thread needs attention.
+
+    Wake via :meth:`CodingThreads.track` still runs for SeatYielded and
+    background delivery; this registration is what ``run_with_delegates``
+    waits on. Same attention signals as ``WAKE_KINDS``.
+    """
+    thread_id = session.session_id
+    label = name or _label_of(session.provider)
+
+    async def probe() -> dict[str, Any] | None:
+        events = service.store.list_events(thread_id)
+        for event in reversed(events):
+            kind = str(event.get("kind") or "")
+            if kind not in WAKE_KINDS:
+                continue
+            payload = event.get("payload") or {}
+            event_turn = str(payload.get("turn_id") or "")
+            if turn_id and event_turn and event_turn != turn_id:
+                continue
+            if kind == "turn_finished":
+                status, text, error = last_turn(events)
+                if turn_id and event_turn == turn_id:
+                    status = str(payload.get("status") or status or "done")
+                    texts = [
+                        str((e.get("payload") or {}).get("text") or "")
+                        for e in events
+                        if e["kind"] == "assistant_text"
+                        and str((e.get("payload") or {}).get("turn_id") or "") == turn_id
+                    ]
+                    text = "\n\n".join(t for t in texts if t.strip())
+                    error = str(payload.get("error") or error)
+                if status == "error":
+                    report = _clip(error, 800) or _clip(text, _TEXT_LIMIT) or "The turn failed."
+                elif status == "cancelled":
+                    report = "The turn was stopped before it finished."
+                else:
+                    report = _clip(text, _TEXT_LIMIT) or "(no text)"
+                return {"status": status or "done", "report": report}
+            if kind == "question_required":
+                return {
+                    "status": "needs_input",
+                    "report": describe_questions(payload) or "The thread asks a question.",
+                }
+            if kind == "approval_required":
+                summary = str(payload.get("summary") or payload.get("name") or "a tool call")
+                return {
+                    "status": "needs_input",
+                    "report": f"The thread waits for the person to approve: {summary}",
+                }
+            if kind == "plan_ready":
+                status, text, _error = last_turn(events)
+                return {
+                    "status": "needs_input",
+                    "report": _clip(text, _TEXT_LIMIT) or "The thread has a plan ready.",
+                }
+        return None
+
+    register_delegated_work(
+        DelegatedWork(
+            key=f"coding-thread:{thread_id}:{turn_id}",
+            name=label,
+            probe=probe,
+        )
+    )
 
 
 async def _installed_clis() -> dict[str, bool]:
