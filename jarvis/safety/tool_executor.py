@@ -40,6 +40,7 @@ from .approval_surface import (
     UNATTENDED,
     resolve_approval_surface,
 )
+from .destructive import is_destructive
 from .origin import OriginLedger, TargetOrigin, classify_targets
 from .risk_tier import ActionBlocked, RiskTierEvaluator
 
@@ -348,22 +349,25 @@ class ToolExecutor:
         approved_by = decision.approved_by or "auto"
         tier_confirm = self._evaluator.needs_user_confirmation(decision)
         plaus_confirm = plaus is not None and plaus.require_confirmation
-        # Explicit intent (Claude-Code permission model, mandate 2026-08-08):
-        # a consequential action the user's own utterance already asked for by
-        # name ("delete the folder X") skips the redundant confirmation. Only
-        # the TIER requirement may be waived — a plausibility-forced
-        # confirmation (low STT confidence, stale wake) stays binding, because
-        # the whole doubt there is whether the utterance was heard right.
+        # Explicit intent (Claude-Code permission model, mandate 2026-08-08;
+        # decision 0002): a consequential action the user's own utterance
+        # already asked for by name ("delete the folder X") is a valid
+        # authorization, but it must still arm the ticket and publish
+        # ActionApprovalRequired so the audit trail records who said yes.
+        # Only the TIER requirement may be pre-answered this way — a
+        # plausibility-forced confirmation (low STT confidence, stale wake)
+        # stays binding, because the whole doubt there is whether the
+        # utterance was heard right.
+        explicit_intent_grant = False
         if tier_confirm and not plaus_confirm and user_utterance:
             confirms = getattr(tool, "intent_confirms_args", None)
             if callable(confirms):
                 try:
                     if confirms(args, user_utterance):
-                        tier_confirm = False
-                        approved_by = "explicit-intent"
+                        explicit_intent_grant = True
                         log.info(
                             "explicit-intent: %s authorized by the utterance, "
-                            "skipping confirmation", tool.name,
+                            "pre-answering the armed ticket", tool.name,
                         )
                 except Exception as exc:  # noqa: BLE001 — keep the confirmation on a broken hook
                     log.warning(
@@ -390,7 +394,11 @@ class ToolExecutor:
         # park the executor forever.
         approval_timeout_s = self._approval_timeout(config_snapshot)
         approval_ticket = None
-        if needs_confirm and not voice_confirm:
+        # Arm whenever a decision can land on a ticket. Conversational turns
+        # normally skip the ticket and defer to two-turn voice confirm, but an
+        # explicit-intent grant still needs the armed ticket so the approval
+        # is recorded (decision 0002) instead of silently skipping.
+        if needs_confirm and (not voice_confirm or explicit_intent_grant):
             # An unattended call arms too: the pre-authorization bridges answer
             # synchronously on the ActionApprovalRequired publish below, and
             # ADR-0031 relies on the ticket existing before that publish.
@@ -451,16 +459,27 @@ class ToolExecutor:
                 )
             )
             # Scoped authorizers have the first decision, including explicit
-            # denials. Bypass supplies an immediate standing approval only
-            # when none has answered; it never overwrites their decision.
-            if bypass_default and approval_ticket.peek() is None:
-                await self._bus.publish(
-                    ActionApproved(
-                        trace_id=tid,
-                        tool_name=tool.name,
-                        approved_by="bypass",
+            # denials. Explicit-intent and bypass are standing pre-answers
+            # only when none has answered; they never overwrite that
+            # decision. Bypass cannot answer for a destructive call
+            # (decision 0002) — the ticket stays open for a person.
+            if approval_ticket.peek() is None:
+                if explicit_intent_grant:
+                    await self._bus.publish(
+                        ActionApproved(
+                            trace_id=tid,
+                            tool_name=tool.name,
+                            approved_by="explicit-intent",
+                        )
                     )
-                )
+                elif bypass_default and not is_destructive(tool, args):
+                    await self._bus.publish(
+                        ActionApproved(
+                            trace_id=tid,
+                            tool_name=tool.name,
+                            approved_by="bypass",
+                        )
+                    )
 
         if needs_confirm:
             # Two-turn confirmation on a conversational turn: do NOT block on the
@@ -470,7 +489,9 @@ class ToolExecutor:
             # ``execute_confirmed`` (AD-OE: the talker never awaits heavy/blocking
             # work on the turn). ``needs_confirm`` already excludes whitelist
             # downgrades, so this fires only for genuinely consequential tools.
-            if voice_confirm:
+            # An explicit-intent grant already answered the armed ticket above,
+            # so the conversational deferral must not fire on top of it.
+            if voice_confirm and not explicit_intent_grant:
                 self._pending_voice[tid] = (tool, dict(args))
                 log.info(
                     "voice-confirm: deferring %s (tier=%s) for two-turn confirmation",
@@ -577,6 +598,7 @@ class ToolExecutor:
                 success=False,
                 duration_ms=duration_ms,
                 error=str(exc),
+                approved_by=approved_by,
             ))
             return ToolResult(success=False, output=None, error=str(exc))
 
@@ -589,6 +611,7 @@ class ToolExecutor:
             duration_ms=duration_ms,
             error=result.error,
             output_preview=safe_preview(result.output),
+            approved_by=approved_by,
         ))
         return result
 
@@ -623,12 +646,13 @@ class ToolExecutor:
                 error="voice-confirm expired (no pending action for this turn)",
             )
         tool, args = pending
+        approved_by = "user"
         ctx = ExecutionContext(
             trace_id=trace_id,
             user_utterance=user_utterance,
             config=config_snapshot or {},
             memory_read=memory_read,
-            approved_by="user",
+            approved_by=approved_by,
         )
         t_start = time.perf_counter()
         try:
@@ -641,6 +665,7 @@ class ToolExecutor:
                 success=False,
                 duration_ms=duration_ms,
                 error=str(exc),
+                approved_by=approved_by,
             ))
             return ToolResult(success=False, output=None, error=str(exc))
         self._record_result_origin(tool, trace_id, result, args)
@@ -652,6 +677,7 @@ class ToolExecutor:
             duration_ms=duration_ms,
             error=result.error,
             output_preview=safe_preview(result.output),
+            approved_by=approved_by,
         ))
         return result
 
