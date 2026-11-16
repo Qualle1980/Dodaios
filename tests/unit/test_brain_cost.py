@@ -46,7 +46,7 @@ class TestCalculateCostUsd:
 
     def test_negative_tokens_clamped_to_zero(self) -> None:
         cost = calculate_cost_usd("claude-opus-4-7-20251022", -100, -100)
-        # max(0, x) clamping: input/output beide zu 0 -> 0.0
+        # max(0, x) clamping: both input and output become 0 -> 0.0
         assert cost == 0.0
 
     def test_only_input_tokens(self) -> None:
@@ -106,10 +106,10 @@ class TestPricingTable:
     def test_pricing_tuple_shape(self) -> None:
         for model, rates in PRICING_USD_PER_MTOK.items():
             assert isinstance(rates, tuple), f"{model}: rates is not a tuple"
-            assert len(rates) == 2, f"{model}: erwartet (in, out)"
+            assert len(rates) == 2, f"{model}: expected (in, out)"
             in_rate, out_rate = rates
-            assert in_rate >= 0.0, f"{model}: input-rate negativ"
-            assert out_rate >= 0.0, f"{model}: output-rate negativ"
+            assert in_rate >= 0.0, f"{model}: negative input rate"
+            assert out_rate >= 0.0, f"{model}: negative output rate"
             # Output is typically expected to be pricier than input
             # (or equal, for flat pricing). We don't warn, just a sanity check.
             assert out_rate >= in_rate * 0.5, f"{model}: output rate suspiciously low"
@@ -225,3 +225,63 @@ class TestGemini38LiveIsPriced:
 
         cost = calculate_realtime_cost_usd("gemini-3.8-live", 1_000, 100, 2_000, 300)
         assert cost > 0.0
+
+
+def test_gemini_31_flash_lite_matches_google_standard_rates() -> None:
+    """Pin the Google Standard paid rate for gemini-3.1-flash-lite.
+
+    Source (checked 2026-11-16):
+    https://ai.google.dev/gemini-api/docs/pricing (redirects to
+    https://aistudio.google.com/docs/pricing#gemini-3.1-flash-lite)
+    Paid Standard: $0.25 input / $1.50 output per 1M tokens.
+
+    The static table previously held (0.05, 0.20), so turns on this model
+    under-counted spend by 5x / 7.5x. The number is the point of the test.
+    """
+    from jarvis.brain.cost import PRICING_USD_PER_MTOK, resolve_rates
+
+    assert PRICING_USD_PER_MTOK["gemini-3.1-flash-lite"] == (0.25, 1.50)
+    assert resolve_rates("gemini-3.1-flash-lite") == (0.25, 1.50)
+
+
+def test_every_selectable_gemini_model_has_a_price_row() -> None:
+    """Curated Gemini pickers must resolve to a rate, or spend tallies as $0.
+
+    Import the live catalog lists and iterate them — never a third copied
+    literal of a model id. A selectable id with no published Standard rate
+    is xfailed rather than given an invented price.
+    """
+    from jarvis.brain.cost import REALTIME_AUDIO_PRICING_USD_PER_MTOK, resolve_rates
+    from jarvis.brain.model_catalog import CURATED_MODELS, REALTIME_MODELS
+
+    # No published Standard rate on ai.google.dev/gemini-api/docs/pricing
+    # (2026-11-16) and absent from https://openrouter.ai/api/v1/models.
+    _NO_PUBLISHED_PRICE = frozenset({"gemini-flash-lite-latest"})
+
+    for info in CURATED_MODELS["gemini"]:
+        if info.id in _NO_PUBLISHED_PRICE:
+            continue
+        assert resolve_rates(info.id) is not None, (
+            f"CURATED_MODELS['gemini'] id {info.id!r} has no resolve_rates row"
+        )
+
+    for info in REALTIME_MODELS["gemini-live"]:
+        assert resolve_rates(info.id) is not None, (
+            f"REALTIME_MODELS['gemini-live'] id {info.id!r} has no text rates"
+        )
+        assert info.id in REALTIME_AUDIO_PRICING_USD_PER_MTOK, (
+            f"REALTIME_MODELS['gemini-live'] id {info.id!r} missing from "
+            "REALTIME_AUDIO_PRICING_USD_PER_MTOK"
+        )
+
+    # The documented exception must stay honest in BOTH directions: an id that
+    # is no longer offered has no business in the set, and one that has since
+    # been priced must leave it. A trailing ``pytest.xfail()`` was the first
+    # shape of this check; it reported the whole test as xfailed forever and
+    # so hid the assertions above from the summary.
+    curated_ids = {info.id for info in CURATED_MODELS["gemini"]}
+    for mid in _NO_PUBLISHED_PRICE:
+        assert mid in curated_ids, f"{mid}: no longer offered — drop it from the set"
+        assert resolve_rates(mid) is None, (
+            f"{mid}: now has a rate — remove it from _NO_PUBLISHED_PRICE"
+        )
