@@ -23,6 +23,12 @@ import unicodedata
 from collections.abc import Collection
 from typing import NamedTuple
 
+from jarvis.core.result_scope import (
+    annotate_command_sample,
+    format_sample_annotation,
+    sample_limit_from_command,
+)
+
 
 def _normalize(text: str) -> str:
     folded = unicodedata.normalize("NFKD", str(text or "").casefold())
@@ -671,12 +677,128 @@ def acknowledges_tool_failure(text: str) -> bool:
     return _FAILURE_ACK_RE.search(_normalize(text or "")) is not None
 
 
+# ---------------------------------------------------------------------------
+# Universal inventory claims over a limited sample (measured 2026-11-15).
+#
+# ``gh pr list --limit 3`` returned three merged rows; speech said there were
+# no open PRs while thirteen drafts were open. A successful tool of any kind
+# used to clear the rewrite; the hole is a universal claim grounded only in a
+# deliberate sample or a truncated tool payload. Pure regex (AP-11).
+# ---------------------------------------------------------------------------
+
+_SAMPLE_MARKER_RE = re.compile(
+    r"(?:"
+    r"\(sample\s+of\s+\d+\b|"
+    r"not\s+the\s+complete\s+set|"
+    r"…\[truncated,|"
+    r"\.\.\.\[truncated,|"
+    r"…stopped\s+at\s+\d+|"
+    r"\.\.\.stopped\s+at\s+\d+"
+    r")",
+    re.I,
+)
+
+# Universal "all / none / every" inventory claims. DE and EN are equal; a
+# match alone is not enough — only a sample-backed match is rewritten.
+_UNIVERSAL_CLAIM_RE = re.compile(
+    r"(?:"
+    r"\bgibt\s+es\b[^.\n]{0,48}\b(?:keine|keinen|kein|nicht)\b|"  # i18n-allow: DE
+    r"\b(?:keine|keinen|kein)\b[^.\n]{0,48}\bgibt\s+es\b|"  # i18n-allow: DE
+    r"\b(?:es\s+)?gibt\s+(?:im\s+moment\s+|gerade\s+|derzeit\s+|momentan\s+)?"  # i18n-allow: DE
+    r"(?:keine|keinen|kein)\b|"  # i18n-allow: DE
+    r"\bnirgends\b|"  # i18n-allow: DE
+    r"\bim\s+gesamten?\b[^.\n]{0,40}\b(?:kein|keine|keinen|nirgends)\b|"  # i18n-allow: DE
+    r"\b(?:alle|samtliche)\s+(?:\w+\s+){0,3}"  # i18n-allow: DE (NFKD folds ä→a)
+    r"(?:sind|waren|ist|war|wurden|wurde)\b|"  # i18n-allow: DE
+    r"\bthere\s+(?:are|is)\s+(?:no|none)\b|"
+    r"\bno\s+open\b|"
+    r"\b(?:none|nothing)\s+(?:left|remaining|open|found)\b|"
+    r"\bevery\s+\w+\s+(?:was|were|is|are|has|have)\b|"
+    r"\ball\s+(?:\w+\s+){0,3}(?:was|were|is|are|have|has)\b|"
+    r"\bnothing\s+(?:was|is)\s+found\b|"
+    r"\bnothing\s+left\b|"
+    r"\bnowhere\b"
+    r")",
+    re.I,
+)
+
+_SAMPLE_OVERCLAIM_PHRASES: dict[str, str] = {
+    "de": (
+        "Ich habe nur eine begrenzte Stichprobe gesehen und bestätige "  # i18n-allow
+        "daraus kein vollständiges Inventar."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": (
+        "I only saw a limited sample, so I cannot claim completeness of "
+        "the full set."
+    ),
+    "es": (
+        "Solo vi una muestra limitada; no puedo afirmar que cubra el "
+        "conjunto completo."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Só vi uma amostra limitada; não posso afirmar que cubra o "
+        "conjunto completo."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+
+
+
+
+def tool_evidence_is_sample(
+    *,
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
+) -> bool:
+    """True when a supporting command or result is marked as a limited sample."""
+    for command in tool_commands:
+        if sample_limit_from_command(command) is not None:
+            return True
+    for result in tool_results:
+        if _SAMPLE_MARKER_RE.search(str(result or "")):
+            return True
+    return False
+
+
+def has_universal_inventory_claim(text: str) -> bool:
+    """Whether ``text`` asserts an all/none inventory conclusion."""
+    normalized = _normalize(text or "")
+    if not normalized.strip():
+        return False
+    return _UNIVERSAL_CLAIM_RE.search(normalized) is not None
+
+
+def has_universal_claim_over_sample(
+    text: str,
+    *,
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
+) -> bool:
+    """Universal inventory claim whose only support is a limited sample."""
+    if not has_universal_inventory_claim(text):
+        return False
+    return tool_evidence_is_sample(
+        tool_commands=tool_commands,
+        tool_results=tool_results,
+    )
+
+
+def sample_overclaim_phrase(language: str) -> str:
+    """Honest fallback when a universal claim rests on a limited sample."""
+    return _SAMPLE_OVERCLAIM_PHRASES.get(
+        str(language or "").strip().lower(),
+        _SAMPLE_OVERCLAIM_PHRASES["en"],
+    )
+
+
 def replace_unbacked_action_claim(
     text: str,
     *,
     executed_tools: Collection[str],
     language: str,
     failed_tools: Collection[str] = (),
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
 ) -> str:
     """Drop an unbacked promise or wrong-domain success claim.
 
@@ -684,6 +806,10 @@ def replace_unbacked_action_claim(
     not license "the documents were updated"; UI navigation must not license
     "accepted". When tools failed and the reply still narrates success
     without acknowledging the failure, the failure clause wins.
+
+    A universal inventory claim ("none open", "every match") over a command
+    or result marked as a limited sample is rewritten the same way: the tool
+    ran, but the sample does not license completeness.
     """
     missing = unbacked_result_families(text, executed_tools)
     # Wrong-domain success (wiki_ingest vs "the documents") is the live hole:
@@ -699,6 +825,13 @@ def replace_unbacked_action_claim(
         and not acknowledges_tool_failure(text)
     ):
         return tool_failure_phrase(language)
+
+    if has_universal_claim_over_sample(
+        text,
+        tool_commands=tool_commands,
+        tool_results=tool_results,
+    ):
+        return sample_overclaim_phrase(language)
 
     if executed_tools:
         return text
@@ -806,12 +939,19 @@ def capability_denial_terms(text: str) -> tuple[str, ...]:
 __all__ = [
     "acknowledges_tool_failure",
     "action_not_started_phrase",
+    "annotate_command_sample",
     "capability_denial_terms",
     "claimed_result_families",
+    "format_sample_annotation",
     "has_deferred_action_claim",
     "has_false_completion_claim",
     "has_unbacked_action_claim",
+    "has_universal_claim_over_sample",
+    "has_universal_inventory_claim",
     "replace_unbacked_action_claim",
+    "sample_limit_from_command",
+    "sample_overclaim_phrase",
+    "tool_evidence_is_sample",
     "tool_failure_phrase",
     "tools_satisfy_family",
     "unbacked_result_families",
