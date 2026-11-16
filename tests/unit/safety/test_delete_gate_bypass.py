@@ -7,6 +7,7 @@ delete gate must hold after the fix.
 """
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -29,8 +30,12 @@ from jarvis.safety.tool_executor import (
     ToolExecutor,
 )
 
-_DESTRUCTIVE_CMD = r"rm C:\tmp\x"
-_DESTRUCTIVE_UTTERANCE = r"delete C:\tmp\x"
+# explicit_intent accepts only an absolute path of the host platform: a Windows
+# drive path on win32, a POSIX path elsewhere. A fixed Windows path made the
+# explicit-intent test pass on Windows and fail on the Linux runner.
+_TARGET = r"C:\tmp\x" if sys.platform == "win32" else "/tmp/x"
+_DESTRUCTIVE_CMD = f"rm {_TARGET}"
+_DESTRUCTIVE_UTTERANCE = f"delete {_TARGET}"
 _UNATTENDED = {"approval_surface": UNATTENDED}
 _CONVERSATIONAL = {"approval_surface": CONVERSATIONAL}
 
