@@ -3240,8 +3240,8 @@ async def run_cli_turn(
             resume=resume,
             with_file=(runner in _CLAUDE_CODE_RUNNERS),
             prompt_override=prompt_override,
-            provider=session.provider,
-            model=session.model,
+            provider=getattr(session, "provider", ""),
+            model=getattr(session, "model", None),
         )
         if bridge is not None:
             from jarvis.agent_chat.approval_bridge import ChatGrant
@@ -3303,8 +3303,8 @@ async def run_cli_turn(
                     resume=None,
                     with_file=(runner in _CLAUDE_CODE_RUNNERS),
                     prompt_override=prompt_override,
-                    provider=session.provider,
-                    model=session.model,
+                    provider=getattr(session, "provider", ""),
+                    model=getattr(session, "model", None),
                 )
             outcome = await _run_cli_once(
                 handle, user_text, runner, None, identity=ident, bridge=bridge
