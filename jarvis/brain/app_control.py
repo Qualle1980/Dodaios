@@ -48,6 +48,34 @@ if TYPE_CHECKING:  # annotations only — `from __future__ import annotations` k
 log = logging.getLogger(__name__)
 
 
+async def _signed_in_seat_hint(provider: str) -> str:
+    """Name a signed-in subscription seat of the same vendor, or return ``""``.
+
+    A brain row without an API key is not the vendor's only way in: its CLI
+    twin (``catalog.API_TWIN``) may be signed in to a subscription. Live
+    2026-11-15 the General read "API key missing" for the xAI row as "Grok is
+    unavailable" and did the work itself while Grok Build was signed in.
+    """
+    try:
+        from jarvis.agent_chat.catalog import API_TWIN, provider_row
+        from jarvis.agent_chat.seat_login import seat_signed_in
+
+        for seat, twin in API_TWIN.items():
+            if twin != provider:
+                continue
+            row = provider_row(seat)
+            if row is None or not row.runner:
+                continue
+            if await asyncio.to_thread(seat_signed_in, row.runner) is True:
+                return (
+                    f" Its subscription seat {row.label} is signed in: hand the task "
+                    f"to it with coding-session action=open agent={seat} instead."
+                )
+    except Exception:  # noqa: BLE001 — a hint, never a reason to fail the answer
+        log.info("app control: seat hint for %s failed", provider, exc_info=True)
+    return ""
+
+
 def _catalog() -> Any:
     """Lazy import of the provider catalog (a brain module must not import the
     UI layer at module-load time — keeps the dependency direction clean and
@@ -570,6 +598,7 @@ async def apply_provider_switch(
             "error": (
                 f"{spec.label} is not configured — its API key is missing. "
                 "Add it in the Settings tab first, then switch."
+                + await _signed_in_seat_hint(provider)
             ),
         }
     # The on-device equivalent of the check above, and it has to be its own

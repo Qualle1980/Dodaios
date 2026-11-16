@@ -439,13 +439,18 @@ class CodingThreadTool:
 
     async def _do_agents(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
         installed = await _installed_clis()
+        provider_rows = _provider_rows()
+        signed_in = await _signed_in([row.runner for row in provider_rows])
         rows = []
-        for row in _provider_rows():
+        for row in provider_rows:
             rows.append(
                 {
                     "agent": row.id,
                     "name": _label_of(row.id),
                     "installed": installed.get(row.agent, True),
+                    # True: its subscription login is there and usable; False:
+                    # not signed in; None: this app cannot read that CLI's login.
+                    "signed_in": signed_in.get(row.runner),
                     "default_model": row.default_model or "(its own default)",
                     "models": _models(row),
                 }
@@ -453,6 +458,7 @@ class CodingThreadTool:
         return {
             "coding_agents": rows,
             "access": "Threads you open run with full access: no approval prompts.",
+            "routing": _SEAT_ROUTING_NOTE,
         }
 
     async def _do_projects(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -740,6 +746,33 @@ def _thread_card(service: Any, session: Any) -> dict[str, Any]:
         "access": session.permission_mode,
         "running": bool(service.is_running(session.session_id)),
     }
+
+
+#: Live 2026-11-15: asked to give Grok a task, the General tried the brain
+#: switch for the xAI API row, hit "API key missing" and did the work itself,
+#: while the Grok Build subscription seat was signed in the whole time.
+_SEAT_ROUTING_NOTE: Final[str] = (
+    "A coding agent with signed_in=true runs on its subscription: hand work to it "
+    "here with action=open. A brain provider of the same vendor that lacks an API "
+    "key is a different seat and says nothing about this one."
+)
+
+
+async def _signed_in(runners: list[str]) -> dict[str, bool | None]:
+    """Each CLI seat's login, read in parallel off the event loop."""
+    from jarvis.agent_chat.seat_login import seat_signed_in
+
+    unique = sorted({runner for runner in runners if runner})
+
+    async def one(runner: str) -> bool | None:
+        try:
+            return await asyncio.to_thread(seat_signed_in, runner)
+        except Exception:  # noqa: BLE001 — unknown, not a failed listing
+            log.info("coding threads: login check for %s failed", runner, exc_info=True)
+            return None
+
+    answers = await asyncio.gather(*(one(runner) for runner in unique))
+    return dict(zip(unique, answers, strict=True))
 
 
 def _track_delegated_thread(
