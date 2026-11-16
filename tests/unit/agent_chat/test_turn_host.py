@@ -353,6 +353,8 @@ async def test_a_restarted_app_asks_again_on_the_card_already_on_screen(
         provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
     )
     sid = session.session_id
+    # The card is what this test is about: Bypass would answer it unasked.
+    store.update_session(sid, permission_mode="ask")
 
     def card(approval_id: str, call_id: str) -> dict[str, Any]:
         payload = {"turn_id": "t1", "approval_id": approval_id, "call_id": call_id, "name": "Bash"}
@@ -443,8 +445,14 @@ async def test_an_approval_the_old_app_never_answered_opens_again_after_a_restar
     host, task, port = await _start_host(tmp_path)
     store = AgentChatStore(":memory:")
     try:
+        # An "ask" session: Bypass would answer the prompt without a card.
         session = store.create_session(
-            provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+            provider="claude-api",
+            model="m",
+            effort="medium",
+            cwd=str(tmp_path),
+            surface="agent",
+            permission_mode="ask",
         )
         meta = {
             "session_id": session.session_id,
@@ -502,6 +510,83 @@ async def test_an_approval_the_old_app_never_answered_opens_again_after_a_restar
         assert events[-1]["payload"]["status"] == "done"
         second.detach()
     finally:
+        store.close()
+        await _stop(host, task)
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "carded"),
+    [("ask", True), ("bypassPermissions", False), ("bypass", False)],
+)
+async def test_a_claude_permission_prompt_opens_a_card_only_when_the_session_asks(
+    tmp_path: Path, permission_mode: str, carded: bool
+) -> None:
+    """Bypass answers Claude Code's own ``can_use_tool`` prompt without a card.
+
+    Live 2026-11-15: a chat set to Bypass permissions still showed an approval
+    card for a Claude seat's ``control_request``, and the CLI waited on it.
+    The approval bridge's bypass only covered Dodaios' own tools.
+    """
+    host, task, port = await _start_host(tmp_path)
+    store = AgentChatStore(":memory:")
+    client: turn_host_client.TurnHostClient | None = None
+    try:
+        session = store.create_session(
+            provider="claude-api",
+            model="m",
+            effort="medium",
+            cwd=str(tmp_path),
+            surface="agent",
+            permission_mode=permission_mode,
+        )
+        meta = {
+            "session_id": session.session_id,
+            "turn_id": "t6",
+            "runner": "claude-cli",
+            "shape": "claude",
+            "keep_stdin": True,
+            "control": True,
+            "vendor_session": None,
+            "discover": False,
+            "codex_home": "",
+            "cwd": str(tmp_path),
+            "started_at": time.time(),
+        }
+        client = await _client(port)
+        cli = await client.spawn(
+            [sys.executable, "-c", _ASKING_CHILD],
+            cwd=str(tmp_path),
+            env=None,
+            stdin='{"type": "control_request", "request": {"subtype": "initialize"}}\n',
+            keep_stdin=True,
+            meta=meta,
+        )
+        asked: list[str] = []
+        events: list[dict[str, Any]] = []
+
+        async def emit(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        async def approve(_call_id: str, name: str, _args: Any, _summary: str) -> str:
+            asked.append(name)
+            return "allow"
+
+        handle = runner_api.TurnHandle(
+            session=session,
+            turn_id="t6",
+            emit=emit,
+            request_approval=approve,
+            cancel=asyncio.Event(),
+        )
+        await asyncio.wait_for(resume_hosted_cli_turn(handle, cli), timeout=30)
+
+        assert asked == (["Bash"] if carded else [])
+        texts = [e["payload"]["text"] for e in events if e["kind"] == "assistant_text"]
+        assert texts == ["approval: allow"]
+        assert events[-1]["payload"]["status"] == "done"
+    finally:
+        if client is not None:
+            client.detach()
         store.close()
         await _stop(host, task)
 
