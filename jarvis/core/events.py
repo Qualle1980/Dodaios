@@ -716,6 +716,11 @@ class ActionExecuted(Event):
     # ToolExecutor before publish (``jarvis.core.redact.safe_preview``) so no
     # raw secret reaches the bus / session DB / local diary.
     output_preview: str = ""
+    # Who authorized this run ("user", "bypass", "explicit-intent", a scoped
+    # authorizer id, …). Default empty so older constructions keep working;
+    # decision 0002 requires the field so an audit can say who approved a
+    # deletion.
+    approved_by: str = ""
 
 
 # ----------------------------------------------------------------------

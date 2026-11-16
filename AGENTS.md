@@ -144,6 +144,9 @@ the install base, and "works on my machine" is the defect. (AP-23)
   pick must not restore a vendor's ask-first default. Preserve explicitly
   selected restrictions and blocked actions. Questions for missing task
   information remain available; do not turn them into permission prompts.
+  Carve-out: a destructive action (``jarvis.safety.destructive.is_destructive``)
+  is never approved by bypass — a person or scoped authorizer must still say
+  yes (decision 0002).
 - **Nothing the user did not start may bill a key on its own.** Health dots
   come from real calls, never a paid probe. Once a subscription is connected,
   background work runs only on subscriptions or local models
