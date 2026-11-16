@@ -10,6 +10,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from jarvis.agent_chat import folder_tools as ft
 from jarvis.agent_chat.approval_bridge import ChatApprovalBridge, ChatGrant, approval_ref
 from jarvis.core.bus import EventBus
@@ -170,6 +172,28 @@ async def test_bypass_asks_nothing(tmp_path: Path):
     executor, bridge, _ = _stack()
     card = _Card("deny")
     bridge.arm(REF, _grant(card, "bypass"))
+    tools = ft.folder_tools(tmp_path)
+    ran = await executor.execute(
+        tools["RunCommand"], {"command": "echo hi"}, config_snapshot=_snapshot()
+    )
+    assert ran.success, ran.error
+    assert card.asked == []
+
+
+@pytest.mark.parametrize(
+    "stance",
+    ["bypass", "bypassPermissions", "full-access", "skip-permissions"],
+)
+async def test_vendor_bypass_words_ask_nothing(tmp_path: Path, stance: str):
+    """A Claude/Codex/agy seat stores its own bypass id on the grant.
+
+    Live risk: the bridge compared ``grant.stance == "bypass"`` exactly, so a
+    Claude session on ``bypassPermissions`` still opened a card for Dodaios
+    tools even though the person already picked Bypass.
+    """
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, stance))
     tools = ft.folder_tools(tmp_path)
     ran = await executor.execute(
         tools["RunCommand"], {"command": "echo hi"}, config_snapshot=_snapshot()
