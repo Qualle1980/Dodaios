@@ -162,6 +162,17 @@ _TURN_OVERRIDE: ContextVar[TurnOverride | None] = ContextVar(
     "jarvis.brain.manager.turn_override",
     default=None,
 )
+#: The seat an external surface (a subscription CLI on the typed chat) answers
+#: on, set only while ``render_surface_prompt`` builds its head. ``None`` means
+#: "not a surface build": the manager's own ``_active_turn_identity`` applies.
+#: ``("", None)`` means "a surface build that named no seat": no identity line
+#: at all, because the manager's value belongs to the last voice/brain turn and
+#: would name the wrong model (live 2026-11-15: Claude and Antigravity seats
+#: both answered "I am Gemini").
+_SURFACE_IDENTITY: ContextVar[tuple[str, str | None] | None] = ContextVar(
+    "jarvis.brain.manager.surface_identity",
+    default=None,
+)
 
 
 class _SkillTurnState:
@@ -4010,7 +4021,9 @@ class BrainManager:
             kwargs["direct_tools"] = override.tools_direct
         return kwargs
 
-    async def render_surface_prompt(self, *, user_text: str) -> tuple[str, str]:
+    async def render_surface_prompt(
+        self, *, user_text: str, provider: str = "", model: str | None = None
+    ) -> tuple[str, str]:
         """(system prompt, turn context) for an external agent that should BE Jarvis.
 
         A subscription CLI seat on the typed chat runs its own loop, but the
@@ -4021,8 +4034,16 @@ class BrainManager:
         text pulls in, and the per-turn context (date). Read-only:
         nothing is stored on the manager, so a voice turn running alongside
         sees no trace of it.
+
+        ``provider``/``model`` name the seat that answers. The identity line
+        then names that seat; without them the prompt carries no identity line,
+        never the manager's own, which belongs to the last brain turn.
         """
-        base = self._build_system_prompt()
+        token = _SURFACE_IDENTITY.set(((provider or "").strip(), model))
+        try:
+            base = self._build_system_prompt()
+        finally:
+            _SURFACE_IDENTITY.reset(token)
         prompt = base
         if self._wiki_injector is not None:
             try:
@@ -4435,6 +4456,18 @@ class BrainManager:
             return target_prefix + raw_output[len(de_prefix):]
         return raw_output
 
+    def _prompt_identity(self) -> tuple[str, str | None] | None:
+        """The (provider, model) the identity line names, or ``None`` for none.
+
+        A surface build (``render_surface_prompt``) names its own seat or
+        nothing; every other build names the provider this manager's current
+        turn runs on. getattr: tolerates ``__new__``-constructed test managers.
+        """
+        surface = _SURFACE_IDENTITY.get()
+        if surface is not None:
+            return surface if surface[0] else None
+        return getattr(self, "_active_turn_identity", None)
+
     def _build_system_prompt(self) -> str:
         """Builds the system prompt with Jarvis-Agent-style workspace injection.
 
@@ -4463,7 +4496,7 @@ class BrainManager:
                 if CONVERSATIONAL_RESPONSE_STYLE in (private.system_extra or "")
                 else _WRITTEN_CHAT_STYLE,
             ]
-            identity = getattr(self, "_active_turn_identity", None)
+            identity = self._prompt_identity()
             if identity:
                 parts.append(_provider_identity_directive(identity[0], identity[1], "this agent"))
             parts.append(self._reply_language_directive())
@@ -4801,7 +4834,7 @@ class BrainManager:
         # is already a slow path (and matches the pre-existing per-turn mutable
         # flags). getattr: tolerates __new__-constructed test managers that bypass
         # __init__ (the attr is always set in __init__ for the production path).
-        identity = getattr(self, "_active_turn_identity", None)
+        identity = self._prompt_identity()
         if identity:
             parts.append(
                 _provider_identity_directive(identity[0], identity[1], name)

@@ -417,8 +417,14 @@ async def identity_prompt(
     history: list[dict[str, Any]],
     resume: str | None,
     prompt_override: str | None = None,
+    provider: str = "",
+    model: str | None = None,
 ) -> str:
     """Jarvis' real prompt layers + the chat's transcript + the addendum.
+
+    ``provider``/``model`` are the seat answering this turn; the identity line
+    in the layers names it, so "which model are you?" gets the seat, not the
+    provider of whatever brain turn ran last.
 
     The layers come from the live brain (``BrainManager.render_surface_prompt``:
     soul, persona, the assistant file, the user's profile, contacts, the
@@ -446,7 +452,9 @@ async def identity_prompt(
     render = getattr(brain, "render_surface_prompt", None) if brain is not None else None
     if callable(render):
         try:
-            system_prompt, turn_context = await render(user_text=user_text)
+            system_prompt, turn_context = await render(
+                user_text=user_text, provider=provider, model=model
+            )
             if system_prompt.strip():
                 parts.append(system_prompt.strip())
             if turn_context.strip():
@@ -629,10 +637,17 @@ async def build_identity(
     resume: str | None,
     with_file: bool,
     prompt_override: str | None = None,
+    provider: str = "",
+    model: str | None = None,
 ) -> Identity:
     """The identity for one CLI turn; ``with_file`` for a CLI that takes a file."""
     text = await identity_prompt(
-        user_text=user_text, history=history, resume=resume, prompt_override=prompt_override
+        user_text=user_text,
+        history=history,
+        resume=resume,
+        prompt_override=prompt_override,
+        provider=provider,
+        model=model,
     )
     path = write_identity_file(text, turn_id=turn_id) if with_file else None
     return Identity(session_id=session_id, text=text, compact=compact_identity(text), path=path)
