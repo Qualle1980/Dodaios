@@ -34,6 +34,7 @@ from typing import Any
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
 from jarvis.core.protocols import ExecutionContext, ToolResult
+from jarvis.core.result_scope import format_sample_annotation, sample_limit_from_command
 from jarvis.safety.command_impact import DESTRUCTIVE, classify_command
 from jarvis.safety.explicit_intent import command_confirms_destruction
 
@@ -243,12 +244,18 @@ class RunShellTool:
         stdout = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
         stderr = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
         success = proc.returncode == 0
+        output: dict[str, Any] = {
+            "exit_code": proc.returncode,
+            "stdout": stdout[:40_000],
+            "stderr": stderr[:20_000],
+        }
+        # A command that capped its own result set (``--limit 3``, ``| head``)
+        # says so, or the model reads three rows as the whole inventory.
+        limit = sample_limit_from_command(command)
+        if limit is not None:
+            output["scope"] = format_sample_annotation(limit)
         return ToolResult(
             success=success,
-            output={
-                "exit_code": proc.returncode,
-                "stdout": stdout[:40_000],
-                "stderr": stderr[:20_000],
-            },
+            output=output,
             error=None if success else f"exit {proc.returncode}",
         )

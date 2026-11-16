@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 from uuid import UUID
 
+from jarvis.agent_chat.permissions import is_bypass
 from jarvis.core.events import ActionApprovalRequired, ActionApproved, ActionDenied, ActionProposed
 
 log = logging.getLogger(__name__)
@@ -74,7 +75,8 @@ class ChatGrant:
 
     session_id: str
     turn_id: str
-    #: ``ask`` | ``accept-edits`` | ``bypass`` | ``plan`` (permissions.py).
+    #: Ladder id for this turn (``ask``, ``accept-edits``, ``bypass``,
+    #: ``bypassPermissions``, ``full-access``, … — see permissions.py).
     stance: str
     #: The tools the person waved through with "always allow" this session —
     #: shared with the service, which owns the set.
@@ -171,7 +173,7 @@ class ChatApprovalBridge:
         name = _bare(tool_name)
         if grant.stance == "always_ask" or grant.force_ask(name, args or {}):
             return None
-        if grant.stance == "bypass":
+        if is_bypass(grant.stance):
             if grant.force_ask(name, args or {}):
                 return None
             return "chat-bypass"

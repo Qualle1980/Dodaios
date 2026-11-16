@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
+from jarvis.core.result_scope import annotate_command_sample
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +143,8 @@ TOOL_SPECS: Final[tuple[dict[str, Any], ...]] = (
         "description": (
             "Run a shell command in the working directory and return its output. "
             "Use for git, tests, builds, package managers and anything the other "
-            "tools cannot do. Commands that need a terminal UI will not work."
+            "tools cannot do. Commands that need a terminal UI will not work. "
+            "A limited list is a sample."
         ),
         "input_schema": {
             "type": "object",
@@ -473,6 +475,7 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     took = time.perf_counter() - started
     code = proc.returncode
     out = _cap(text.rstrip(), _COMMAND_CAP_CHARS)
+    out = annotate_command_sample(out, command)
     footer = f"\n[exit {code} · {took:.1f}s]"
     return (out + footer).strip(), code != 0
 
