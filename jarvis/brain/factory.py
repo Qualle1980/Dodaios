@@ -1853,14 +1853,12 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
     "follow_brain" meta-value: resolve to whatever ``brain.primary``
     currently points at, so the user does not have to keep two provider
     settings in sync. If the main brain is on a provider the Flash-Brain
-    has no adapter for (openrouter, claude_api, a plan seat), fall back
-    only to a keyless local runtime, never to another family's API key: the
-    user picked a brain, not a second billed provider for spoken phrasing.
-    With no local runtime this returns ``None`` and every flash consumer
-    degrades honestly to its canned lines. An explicit ``[ack_brain].provider``
-    is the user's own choice and is honoured as set. Mutates
-    ``ack_cfg.provider`` to the resolved name so telemetry labels show the
-    concrete provider.
+    has no adapter for (openrouter, claude_api, a plan seat), return
+    ``None`` so every flash consumer degrades honestly to its canned
+    lines — never another family's API key, and never Ollama (Ahmad
+    2026-11-17). An explicit ``[ack_brain].provider`` is the user's own
+    choice and is honoured as set. Mutates ``ack_cfg.provider`` to the
+    resolved name so telemetry labels show the concrete provider.
     """
     from jarvis.brain.ack_brain.providers import REGISTRY
 
@@ -1907,32 +1905,100 @@ def _build_flash_provider(jcfg: Any, ack_cfg: Any) -> Any:
     return provider_cls(provider_cfg)
 
 
+#: Flash keyless fallbacks that are closed. Ollama stays importable for an
+#: explicit ``[ack_brain].provider = "ollama"`` pin; ``follow_brain`` must
+#: never land on it (Ahmad 2026-11-17).
+_FLASH_KEYLESS_BLOCKLIST = frozenset({"ollama"})
+
+#: The chat seat for spoken spawn/readback composition when Flash has no
+#: adapter for the plan primary (same pin as the Agentic IDE brief writer).
+_CHAT_SEAT = "chatgpt-plan"
+
+
+def _subscription_flash_provider(
+    jcfg: Any, ack_cfg: Any
+) -> tuple[Any, str] | tuple[None, None]:
+    """Wrap the chat-seat subscription Brain as a flash provider, or ``None``.
+
+    Used by the Spawn-Announcer and Readback-Composer when
+    :func:`_build_flash_provider` has no adapter for the plan seat. Prefers
+    ``chatgpt-plan`` before any other connected subscription; never Ollama
+    and never a keyed API family (Ahmad 2026-11-17).
+    """
+    from jarvis.brain.ack_brain.providers.subscription import SubscriptionBrainFlashAck
+    from jarvis.brain.resolver import resolve_subscription_brain
+
+    timeout_ms = int(getattr(ack_cfg, "timeout_ms", 1500) or 1500)
+    cli_timeout_s = max(timeout_ms / 1000.0, 1.0)
+    try:
+        brain = resolve_subscription_brain(
+            jcfg, prefer=_CHAT_SEAT, cli_timeout_s=cli_timeout_s
+        )
+    except Exception:  # noqa: BLE001 — flash wiring must never kill boot
+        log.warning(
+            "Flash subscription seat resolve failed; using canned lines.",
+            exc_info=True,
+        )
+        return None, None
+    if brain is None:
+        return None, None
+    name = str(getattr(brain, "name", "") or _CHAT_SEAT)
+    return (
+        SubscriptionBrainFlashAck(
+            brain,
+            provider_name=name,
+            temperature=0.6,
+            max_output_tokens=40,
+        ),
+        name,
+    )
+
+
+def _flash_or_chat_seat(jcfg: Any, ack_cfg: Any) -> Any | None:
+    """Flash REGISTRY adapter, else the chat-seat subscription wrapper."""
+    provider = _build_flash_provider(jcfg, ack_cfg)
+    if provider is not None:
+        return provider
+    seat_provider, seat_name = _subscription_flash_provider(jcfg, ack_cfg)
+    if seat_provider is None:
+        return None
+    ack_cfg.provider = seat_name
+    return seat_provider
+
+
 def _pick_keyless_flash_fallback(ack_cfg: Any) -> str | None:
     """First REGISTRY provider that needs no credential, or ``None``.
 
-    A provider config with no ``api_key_secret`` field (a local runtime such
-    as Ollama) bills nothing. Keyed families are never picked here: a flash
-    call the user did not configure must not land on an API key (AGENTS.md
-    "nothing the user did not start may bill a key on its own").
+    A provider config with no ``api_key_secret`` field (a local runtime)
+    bills nothing. Keyed families are never picked here: a flash call the
+    user did not configure must not land on an API key (AGENTS.md "nothing
+    the user did not start may bill a key on its own"). Ollama is never
+    returned: without a Flash adapter for the plan seat the canned line is
+    the honest answer.
     """
     from jarvis.brain.ack_brain.providers import REGISTRY
 
     for name in REGISTRY:
+        if name in _FLASH_KEYLESS_BLOCKLIST:
+            continue
         provider_cfg = getattr(ack_cfg.providers, name, None)
         if provider_cfg is None or getattr(provider_cfg, "api_key_secret", None) is not None:
             continue
-        if _keyless_runtime_present(provider_cfg):
+        if _keyless_runtime_present(provider_cfg, name=name):
             return name
     return None
 
 
-def _keyless_runtime_present(provider_cfg: Any) -> bool:
+def _keyless_runtime_present(provider_cfg: Any, *, name: str = "") -> bool:
     """Whether a keyless runtime can answer at all, without a network call.
 
     A remote endpoint is the user's own server and counts as present. A
     local one needs the runtime installed on this machine: an absent binary
     would make every flash call a refused connection before the canned line.
+    Ollama is never affirmed here — it is not a Flash fallback target.
     """
+    if name == "ollama" or type(provider_cfg).__name__ == "OllamaAckProviderConfig":
+        return False
     from urllib.parse import urlparse
 
     resolve = getattr(provider_cfg, "resolved_endpoint", None)
@@ -1940,9 +2006,7 @@ def _keyless_runtime_present(provider_cfg: Any) -> bool:
     host = (urlparse(endpoint).hostname or "").lower()
     if host and host not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:  # noqa: S104 - a host comparison, not a bind
         return True
-    from jarvis.brain.ollama_runtime import find_binary
-
-    return bool(find_binary())
+    return False
 
 
 def _build_ack_fallback(ack_cfg: Any, preferences_provider: Any = None) -> Any:
@@ -2095,7 +2159,7 @@ def build_spawn_announcer(jcfg: Any | None = None) -> Any:
 
         from jarvis.brain.ack_brain import CircuitBreaker
 
-        provider = _build_flash_provider(jcfg, ack_cfg)
+        provider = _flash_or_chat_seat(jcfg, ack_cfg)
         if provider is None:
             return SpawnAnnouncementComposer(brand_provider=_live_agent_brand)
         breaker = CircuitBreaker(
@@ -2109,7 +2173,11 @@ def build_spawn_announcer(jcfg: Any | None = None) -> Any:
         # Failover on a separate provider/key so a dead primary flash provider
         # degrades to the live secondary, not to the canned pool (2026-06-21
         # regression: gemini 429 with no spawn-path failover -> stock phrases).
-        fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
+        # A chat-seat primary has no Flash REGISTRY failover; skip the keyed
+        # secondary so we never bill another family for the announcement.
+        fb_provider, fb_breaker = (None, None)
+        if ack_cfg.provider in {"gemini", "grok", "openai"}:
+            fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
         return SpawnAnnouncementComposer(
             provider=provider,
             config=ack_cfg,
@@ -2159,17 +2227,19 @@ def build_readback_composer(jcfg: Any | None = None) -> Any:
 
         from jarvis.brain.ack_brain import CircuitBreaker
 
-        provider = _build_flash_provider(jcfg, ack_cfg)
+        provider = _flash_or_chat_seat(jcfg, ack_cfg)
         if provider is None:
             return ReadbackComposer()
         breaker = CircuitBreaker(
             threshold=ack_cfg.circuit_breaker_threshold,
             cooldown_s=ack_cfg.circuit_breaker_cooldown_s,
         )
-        # Failover on a separate provider/key (built AFTER _build_flash_provider
-        # so ack_cfg.provider is the resolved primary). Reuses the spawn-path
-        # bare-provider failover builder — the composer owns its validate logic.
-        fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
+        # Failover on a separate provider/key (built AFTER the primary resolve
+        # so ack_cfg.provider is the concrete seat). A chat-seat primary has no
+        # Flash REGISTRY failover — skip the keyed secondary.
+        fb_provider, fb_breaker = (None, None)
+        if ack_cfg.provider in {"gemini", "grok", "openai"}:
+            fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
         log.info(
             "Readback-Composer: LLM composition wired (provider=%s).",
             ack_cfg.provider,

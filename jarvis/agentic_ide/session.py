@@ -554,18 +554,22 @@ def _input_line_holds(tail: list[str], needle: str) -> bool:
     > contains the text" reports every successful submit as a failure — measured,
     it did exactly that. The live input line is always the bottom-most one, and
     after a submit it is empty.
+
+    Box-drawing borders around the composer (Grok ``│ > … │``, Claude ``─``
+    rules) are stripped before the marker is matched; a no-break space after
+    ``❯`` is part of Claude Code's live marker.
     """
     if not needle:
         return False
+    from .fleet_actions import match_input_marker
+
     current: str | None = None
     for line in tail:
-        stripped = line.strip()
-        if not stripped:
+        if not line.strip():
             continue
-        for marker in _INPUT_MARKERS:
-            if stripped.startswith(marker):
-                current = stripped[len(marker) :].strip()
-                break
+        matched = match_input_marker(line, _INPUT_MARKERS)
+        if matched is not None:
+            current = matched
     if not current:
         return False
     if _PASTE_PLACEHOLDER_RE.search(current):
