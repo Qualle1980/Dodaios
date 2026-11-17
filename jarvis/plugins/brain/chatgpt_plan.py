@@ -221,11 +221,20 @@ class ChatGPTPlanBrain:
     #: time and reads this instead (its own comment names the incident).
     last_model: str = ""
 
-    def __init__(self, model: str | None = None, structured_prompts: bool = True) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        structured_prompts: bool = True,
+        cli_timeout_s: float | None = None,
+    ) -> None:
         # ``structured_prompts`` is accepted for resolve_subscription_brain: an
         # API brain has no conversational wrapper, so every request already
         # carries the caller's contract and full history verbatim.
-        del structured_prompts
+        # ``cli_timeout_s`` is accepted for the same resolver: the CLI brains take
+        # it, and without it this seat was skipped ("cannot forward a system
+        # contract") and the composer fell to claude-cli. This route is HTTP, so
+        # the value is not used here.
+        del structured_prompts, cli_timeout_s
         model = (model or "").strip()
         self._model = model.removeprefix("chatgpt-plan/")
 
