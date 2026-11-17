@@ -33,6 +33,32 @@ __all__ = [
 #: spelled here so the kit table does not import the permissions module.
 _JARVIS_LADDER: Final[str] = "jarvis"
 _SOCIETY_LADDER: Final[str] = "society"
+#: Hands the General (``jarvis`` surface) must never be offered. Gating them
+#: as ``ask`` is not enough: a model that never sees the name cannot call it.
+#: Society agents and coding sessions keep Write/Edit (and their own shell);
+#: only this surface drops them from the schema. Includes the brain plugin
+#: spellings of the machine-wide shell, computer use, skill/coding spawn
+#: paths, the society browser, and contact/profile writes so a merged tool set
+#: cannot smuggle them back in. ``wiki-ingest`` stays: the chat writes Ahmad's
+#: Obsidian memory (decision 2026-11-17). Pane handoff stays via
+#: ``workspace-orchestrate``.
+_GENERAL_DENIED_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "Write",
+        "Edit",
+        "RunCommand",
+        "run_shell",
+        "run-shell",
+        "computer_use",
+        "run-skill",
+        "parallel",
+        "coding-session",
+        "society_browser",
+        "contact-upsert",
+        "call-contact",
+        "update_profile",
+    }
+)
 
 ToolsBuilder = Callable[[Any, Any], dict[str, Tool]]
 ExtraBuilder = Callable[[Any, Any], Awaitable[str]]
@@ -164,9 +190,18 @@ def _society_tools(cfg: Any, brain: Any, session: Any) -> dict[str, Tool]:
     return society_tools(cfg, brain, session)
 
 
+def _without_general_denied(tools: dict[str, Tool]) -> dict[str, Tool]:
+    """Drop the mutating hands the General must never see (schema-level)."""
+    return {name: tool for name, tool in tools.items() if name not in _GENERAL_DENIED_TOOLS}
+
+
+def _jarvis_tool_filter(tools: dict[str, Tool]) -> dict[str, Tool]:
+    """Last pass over the merged brain + kit set for a jarvis-surface turn."""
+    return _without_general_denied(tools)
+
+
 def _jarvis_tools(_cfg: Any, _brain: Any, session: Any) -> dict[str, Tool]:
     from jarvis.agent_chat.folder_tools import folder_tools
-    from jarvis.society.browser.tool import lead_browser_tools
 
     stance = "plan" if getattr(session, "permission_mode", "") == "plan" else "ask"
     # Where the chat STARTS when it was given no folder. The scratch workspace
@@ -176,9 +211,11 @@ def _jarvis_tools(_cfg: Any, _brain: Any, session: Any) -> dict[str, Tool]:
     # question spoken was answered, because run-shell inherits the app's own
     # working directory (live 2026-10-30). This is not a permission change:
     # agent_chat.tools.resolve_path always passed an absolute path through.
+    # The General keeps read folder hands only; writes, shell, browser, and
+    # coding-session stay out of the offered schema. Pane handoff is
+    # ``workspace-orchestrate`` from the brain set.
     tools = folder_tools(Path(getattr(session, "cwd", "") or Path.home()), stance=stance)
-    tools.update(lead_browser_tools(session))
-    return tools
+    return _without_general_denied(tools)
 
 
 async def _society_extra(cfg: Any, brain: Any, session: Any) -> str:
@@ -269,6 +306,11 @@ _KITS: Final[dict[str, SurfaceKit]] = {
         ladder=_JARVIS_LADDER,
         uses_stance=True,
         session_tools=_jarvis_tools,
+        # Strip mutating / write / spawn hands from the merged set too —
+        # ``session_tools`` already omits them from the kit hands, and this
+        # catches a brain plugin that registered ``run_shell``, ``computer_use``,
+        # ``wiki-ingest``, ``coding-session``, or ``society_browser``.
+        tool_filter=_jarvis_tool_filter,
         # Typed turns teach Jarvis the same way spoken ones do.
         turn_completed=_jarvis_completed,
         # Not the home directory: this surface hands out the folder tools, and
