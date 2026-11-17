@@ -617,22 +617,43 @@ async def run_brain_turn(
                 answer, ledger, language=handle.output_language or DEFAULT_LOCALE
             )
             if rewritten is not None:
+                from jarvis.agent_chat.codex_fallback import serialize_receipts
                 from jarvis.agent_chat.delegation_correction import correctable
+                from jarvis.agent_chat.review_routing import ReviewEvidence, choose_reviewer
 
                 missing = list(gate.gaps(ledger))
                 # A job that was handed back may be sent after the missing
                 # evidence once more; one that is blocked, crashed or
                 # superseded may not be re-dispatched on suspicion.
                 pending = correctable(gate) if handle.corrections_left > 0 else ()
+                # Instant's receipts travel with the notice so the wait can
+                # decide whether Codex should take the review when the
+                # Instant correction budget is spent.
+                review_evidence = ReviewEvidence(
+                    receipts=tuple(ledger.receipts),
+                    verdict_text=answer,
+                    tool_error=bool(ledger.observer_error),
+                )
+                codex_next = (
+                    not pending and choose_reviewer(review_evidence) == "codex"
+                )
                 await emit(
                     "notice",
                     {
-                        "kind": "delegation_correction" if pending else "delegation_unverified",
+                        "kind": (
+                            "delegation_correction"
+                            if pending or codex_next
+                            else "delegation_unverified"
+                        ),
                         "turn_id": turn_id,
                         "work": list(gate.work),
                         "missing": missing,
+                        "receipts": serialize_receipts(ledger.receipts),
+                        "verdict_text": answer,
+                        "tool_error": bool(ledger.observer_error),
                         **({"correcting": list(pending),
                             "left": handle.corrections_left} if pending else {}),
+                        **({"codex_fallback": True} if codex_next else {}),
                     },
                 )
                 # The rejection is written down either way, and the conductor's
@@ -641,12 +662,13 @@ async def run_brain_turn(
                 from jarvis.agent_chat.delegation_lessons import document_rejection
 
                 await document_rejection(gate, ledger, person_request)
-                if pending:
+                if pending or codex_next:
                     # The honest line is NOT spoken yet: a correction follows,
                     # and the gate's own rule is that a rewritten verdict must
                     # not arrive after the person has already read a claim.
                     # Saying "unverified" now and "all good" two waves later is
-                    # exactly that, in the other direction.
+                    # exactly that, in the other direction. The same hold applies
+                    # when Codex takes the review after Instant's budget is spent.
                     answer = ""
                 else:
                     answer = rewritten

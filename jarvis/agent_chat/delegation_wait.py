@@ -57,6 +57,69 @@ CONTINUE_TURN = (
 )
 
 
+async def _maybe_codex_fallback(
+    gate: DelegationWait,
+    handle: Any,
+    original: str,
+    corrections: int,
+) -> bool:
+    """Send the review to Codex when Instant's budget is spent and evidence is empty.
+
+    Returns True when a Codex pane was given the review and the wait should
+    collect its report. Busy / missing / skipped outcomes leave an honest
+    message on the gate and return False.
+    """
+    # Budget still available means Instant can still correct — leave that path alone.
+    if corrections > 0:
+        return False
+    # Only after a real Instant rejection about handed-back work.
+    payload = gate.review_evidence_payload or gate.correction
+    if not payload and not gate.owed_honesty:
+        return False
+    from jarvis.agent_chat.codex_fallback import (
+        attempt_codex_fallback,
+        evidence_from_payload,
+        review_prompt_for_codex,
+    )
+
+    payload = payload or {}
+    evidence = evidence_from_payload(payload)
+    gaps = tuple(payload.get("missing") or gate.owed_honesty or ())
+    work = tuple(
+        payload.get("correcting") or payload.get("work") or ()
+    )
+    prompt = review_prompt_for_codex(original=original, gaps=gaps, work=work)
+    result = await attempt_codex_fallback(evidence=evidence, prompt=prompt)
+    if result.action == "sent":
+        log.info(
+            "agent chat %s: turn %s Instant budget spent without evidence; "
+            "Codex pane %s is reviewing",
+            handle.session.session_id,
+            handle.turn_id,
+            result.pane or "Codex",
+        )
+        # Codex owns the next evidence; the held-back Instant honesty is not owed.
+        # Clear the rejection payload so a later synthesis wave does not send again.
+        gate.owed_honesty = ()
+        gate.correction = None
+        gate.review_evidence_payload = None
+        return True
+    if result.action == "skipped":
+        return False
+    # busy / missing / error — surface honesty, never silent drop, never retry here.
+    gate.codex_fallback_message = result.message or (
+        "The Codex review could not be started after Instant's correction budget was spent."
+    )
+    log.info(
+        "agent chat %s: turn %s Codex fallback %s: %s",
+        handle.session.session_id,
+        handle.turn_id,
+        result.action,
+        gate.codex_fallback_message,
+    )
+    return False
+
+
 def is_continuation_prompt(prompt: str) -> bool:
     """Whether ``prompt`` was composed here rather than typed by the person.
 
@@ -111,11 +174,16 @@ class DelegationWait:
         #: The last wave's ``delegation_correction`` notice, when it rejected an
         #: answer about handed-back work and one more attempt is allowed.
         self.correction: dict[str, Any] | None = None
+        #: Instant's review receipts from the latest rejection notice, used when
+        #: the Instant correction budget is spent to decide on a Codex pane.
+        self.review_evidence_payload: dict[str, Any] | None = None
         #: The gaps of a rejection whose honest line was held back for a
         #: correction, until some wave actually answers. Without this a
         #: correction wave that returns nothing would leave the person with
         #: silence where the honest line used to be -- worse than the claim.
         self.owed_honesty: tuple[str, ...] = ()
+        #: Set when a Codex fallback send failed honestly (busy / missing).
+        self.codex_fallback_message: str = ""
 
     def add(self, work: DelegatedWork) -> None:
         if work.key not in self.work:
@@ -126,7 +194,12 @@ class DelegationWait:
         if event.get("kind") != "turn_finished":
             if event.get("kind") == "notice":
                 payload = event.get("payload") or {}
-                if payload.get("kind") == "delegation_correction":
+                kind = payload.get("kind")
+                if kind in {"delegation_correction", "delegation_unverified"}:
+                    # Instant's receipts travel here so the wait can choose
+                    # Codex after the Instant correction budget is spent.
+                    self.review_evidence_payload = dict(payload)
+                if kind == "delegation_correction":
                     # The wave answered handed-back work without the evidence
                     # for it, and asked for one more attempt. The loop below
                     # reads this; nothing else changes about the event.
@@ -331,45 +404,90 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 ]
                 break
             if not rows:
-                if gate.correction is None or corrections <= 0:
-                    break
-                # The wave answered handed-back work without the evidence for
-                # it. Nothing new was delegated, so the old loop would end the
-                # request here; instead the turn gets one more attempt, with
-                # the gaps and whatever the first failure taught named up
-                # front. The gate stays armed, so the corrected answer is
-                # judged exactly like the first one.
-                from jarvis.agent_chat.delegation_correction import correction_prompt
-                from jarvis.missions.conductor.lessons import lessons_block
+                if gate.correction is not None and corrections > 0:
+                    # The wave answered handed-back work without the evidence for
+                    # it. Nothing new was delegated, so the old loop would end the
+                    # request here; instead the turn gets one more attempt, with
+                    # the gaps and whatever the first failure taught named up
+                    # front. The gate stays armed, so the corrected answer is
+                    # judged exactly like the first one.
+                    from jarvis.agent_chat.delegation_correction import correction_prompt
+                    from jarvis.missions.conductor.lessons import lessons_block
 
-                attempt = MAX_CORRECTIONS - corrections + 1
-                corrections -= 1
-                log.info(
-                    "agent chat %s: turn %s was rejected for missing evidence on %s; "
-                    "correction attempt %d of %d",
-                    handle.session.session_id, handle.turn_id,
-                    gate.correction.get("correcting"), attempt, MAX_CORRECTIONS,
-                )
-                prompt = correction_prompt(
-                    gaps=tuple(gate.correction.get("missing") or ()),
-                    work=tuple(gate.correction.get("correcting") or ()),
-                    original=original,
-                    rules=lessons_block(original),
-                    attempt=attempt,
-                )
-                stored = service.store.get_session(handle.session.session_id)
-                active = replace(
-                    active,
-                    session=replace(
-                        active.session, vendor_session=stored.vendor_session if stored else None
-                    ),
-                    history=service.store.list_events(handle.session.session_id),
-                    continuation=True,
-                    # Spent down to zero, so the LAST attempt's rejection is
-                    # final and its honest answer is the one the person reads.
-                    corrections_left=corrections,
-                )
-                continue
+                    attempt = MAX_CORRECTIONS - corrections + 1
+                    corrections -= 1
+                    log.info(
+                        "agent chat %s: turn %s was rejected for missing evidence on %s; "
+                        "correction attempt %d of %d",
+                        handle.session.session_id, handle.turn_id,
+                        gate.correction.get("correcting"), attempt, MAX_CORRECTIONS,
+                    )
+                    prompt = correction_prompt(
+                        gaps=tuple(gate.correction.get("missing") or ()),
+                        work=tuple(gate.correction.get("correcting") or ()),
+                        original=original,
+                        rules=lessons_block(original),
+                        attempt=attempt,
+                    )
+                    stored = service.store.get_session(handle.session.session_id)
+                    active = replace(
+                        active,
+                        session=replace(
+                            active.session,
+                            vendor_session=stored.vendor_session if stored else None,
+                        ),
+                        history=service.store.list_events(handle.session.session_id),
+                        continuation=True,
+                        # Spent down to zero, so the LAST attempt's rejection is
+                        # final and its honest answer is the one the person reads.
+                        corrections_left=corrections,
+                    )
+                    continue
+                # Instant correction budget spent (or no Instant correction left).
+                # When Instant's own review still lacks evidence, one Codex pane
+                # takes the check and this wait holds for its report.
+                if await _maybe_codex_fallback(gate, handle, original, corrections):
+                    try:
+                        if waiting is None:
+                            rows = await gate.collect()
+                        else:
+                            with waiting(handle, gate):
+                                rows = await gate.collect()
+                    except SeatYielded as yielded:
+                        parked = yielded.rows
+                        log.info(
+                            "agent chat %s: turn %s only waits for its delegates and makes "
+                            "room for the next message",
+                            handle.session.session_id, handle.turn_id,
+                        )
+                        gate.finish["payload"]["background"] = [
+                            work.name
+                            for key, work in gate.work.items()
+                            if key not in gate.delivered
+                        ]
+                        break
+                    if rows:
+                        if wave == MAX_WAVES - 1:
+                            gate.finish["payload"].update(
+                                status="error", error="delegation_continuation_limit"
+                            )
+                            break
+                        prompt = continuation_prompt(rows, original)
+                        stored = service.store.get_session(handle.session.session_id)
+                        acceptance = gate_for(rows)
+                        active = replace(
+                            active,
+                            session=replace(
+                                active.session,
+                                vendor_session=stored.vendor_session if stored else None,
+                            ),
+                            history=service.store.list_events(handle.session.session_id),
+                            continuation=True,
+                            acceptance_gate=acceptance,
+                            corrections_left=0,
+                        )
+                        continue
+                break
             if wave == MAX_WAVES - 1:
                 gate.finish["payload"].update(status="error", error="delegation_continuation_limit")
                 break
@@ -397,22 +515,34 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 # evidence instead of ending the request (delegation_correction).
                 corrections_left=corrections,
             )
-        if gate.owed_honesty:
-            # Every correction wave came back empty. The rejection still has to
-            # reach the person, in the language the turn was answering in.
+        if gate.owed_honesty or gate.codex_fallback_message:
+            # Every correction wave came back empty, or Codex could not take the
+            # review. The rejection still has to reach the person, in the
+            # language the turn was answering in.
             from .delegation_acceptance import unverified_answer
             from .events import make_event
 
-            log.info(
-                "agent chat %s: turn %s corrected nothing and said nothing; speaking the "
-                "held-back honest line",
-                handle.session.session_id, handle.turn_id,
-            )
+            if gate.owed_honesty:
+                log.info(
+                    "agent chat %s: turn %s corrected nothing and said nothing; speaking "
+                    "the held-back honest line",
+                    handle.session.session_id, handle.turn_id,
+                )
+                text = unverified_answer(
+                    gate.owed_honesty, language=handle.output_language or "en"
+                )
+            else:
+                text = gate.codex_fallback_message
+                log.info(
+                    "agent chat %s: turn %s Codex fallback could not run; speaking the "
+                    "honest line",
+                    handle.session.session_id, handle.turn_id,
+                )
+            if gate.codex_fallback_message and gate.owed_honesty:
+                text = text.rstrip() + "\n" + gate.codex_fallback_message
             await handle.emit(make_event("assistant_text", {
                 "turn_id": handle.turn_id,
-                "text": unverified_answer(
-                    gate.owed_honesty, language=handle.output_language or "en"
-                ),
+                "text": text,
             }))
         await gate.publish()
     if parked is not None:
