@@ -76,10 +76,17 @@ class FakeRegistry:
     workspaces: list[FakeWorkspace] = field(default_factory=list)
     sends: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
     busy: bool = False
+    open_fails: bool = False
+    open_error: str = "Codex CLI is not installed on this machine."
+    opened: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def sessions(self) -> list[FakeWorkspace]:
         return self.workspaces
+
+    @property
+    def session(self) -> FakeWorkspace | None:
+        return self.workspaces[0] if self.workspaces else None
 
     def find_terminal(
         self, wanted: str, workspace_id: str | None = None
@@ -95,6 +102,37 @@ class FakeRegistry:
                 ):
                     return space, term
         return None
+
+    async def add_terminal(
+        self,
+        *,
+        agent: str | None = None,
+        workspace_id: str | None = None,
+        name: str | None = None,
+        **kwargs: Any,
+    ) -> FakeTerminal:
+        """Same create path workspace-orchestrate uses for a coding CLI pane."""
+        if self.open_fails:
+            raise SessionError(self.open_error)
+        space: FakeWorkspace | None = None
+        for candidate in self.workspaces:
+            if workspace_id is None or candidate.id == workspace_id:
+                space = candidate
+                break
+        if space is None:
+            raise SessionError("No Agentic-IDE session is running.")
+        chosen = str(agent or "codex")
+        term_name = (name or "").strip() or ("Codex" if chosen == "codex" else chosen)
+        term = FakeTerminal(
+            term_name,
+            chosen,
+            f"{chosen}-hist-{len(space.terminals) + 1}",
+        )
+        space.terminals.append(term)
+        self.opened.append(
+            {"agent": chosen, "workspace_id": space.id, "name": term_name}
+        )
+        return term
 
     async def send_prompt(
         self,
@@ -208,8 +246,8 @@ def test_c_busy_codex_pane_reports_honestly_without_retry_loop() -> None:
     asyncio.run(run())
 
 
-def test_d_missing_codex_pane_reports_honestly_without_crash() -> None:
-    """(d) No Codex pane open: honest line, no exception escapes."""
+def test_d_no_workspace_reports_review_not_run() -> None:
+    """(d) No workspace at all: cannot open a Codex pane; honest not-run line."""
     from jarvis.agent_chat.codex_fallback import attempt_codex_fallback
 
     registry = FakeRegistry(workspaces=[])
@@ -222,7 +260,83 @@ def test_d_missing_codex_pane_reports_honestly_without_crash() -> None:
         )
         assert result.action == "missing"
         assert result.message
+        assert "review not run" in result.message.lower()
+        assert "could not open" in result.message.lower()
         assert registry.sends == []
+        assert registry.opened == []
+
+    asyncio.run(run())
+
+
+def test_e_opens_codex_pane_when_none_open_then_sends() -> None:
+    """(e) Workspace open without Codex: open one pane, then send the brief."""
+    from jarvis.agent_chat.codex_fallback import attempt_codex_fallback
+    from jarvis.core.delegated_work import DelegatedWork, collect_delegated_work
+    from jarvis.core.protocols import ChatTurn, current_chat_turn
+
+    registry = FakeRegistry(
+        workspaces=[
+            FakeWorkspace(
+                "ws-1",
+                terminals=[FakeTerminal("Claude", "claude", "claude-hist")],
+            )
+        ]
+    )
+    accepted: list[DelegatedWork] = []
+    prompt = "Review the coding handback for: " + ORDER
+    token = current_chat_turn.set(ChatTurn("s1", "t1", ORDER, True, "trace"))
+    try:
+
+        async def run() -> None:
+            with collect_delegated_work(accepted.append):
+                result = await attempt_codex_fallback(
+                    evidence=ReviewEvidence(),
+                    prompt=prompt,
+                    registry=registry,
+                )
+            assert result.action == "sent"
+            assert registry.opened == [
+                {"agent": "codex", "workspace_id": "ws-1", "name": "Codex"}
+            ]
+            assert any(t.agent == "codex" for t in registry.workspaces[0].terminals)
+            assert len(registry.sends) == 1
+            wanted, text, _meta = registry.sends[0]
+            assert wanted == "Codex"
+            assert text == prompt
+            assert accepted, "opened Codex submission must be waited for like other delegates"
+
+        asyncio.run(run())
+    finally:
+        current_chat_turn.reset(token)
+
+
+def test_f_open_failure_reports_review_not_run() -> None:
+    """(f) Open fails: honest not-run line, no send, no crash."""
+    from jarvis.agent_chat.codex_fallback import attempt_codex_fallback
+
+    registry = FakeRegistry(
+        workspaces=[
+            FakeWorkspace(
+                "ws-1",
+                terminals=[FakeTerminal("Claude", "claude", "claude-hist")],
+            )
+        ],
+        open_fails=True,
+        open_error="Codex CLI is not installed on this machine.",
+    )
+
+    async def run() -> None:
+        result = await attempt_codex_fallback(
+            evidence=ReviewEvidence(),
+            prompt="Review the handback.",
+            registry=registry,
+        )
+        assert result.action == "missing"
+        assert "review not run" in result.message.lower()
+        assert "could not open" in result.message.lower()
+        assert "not installed" in result.message.lower()
+        assert registry.sends == []
+        assert not any(t.agent == "codex" for t in registry.workspaces[0].terminals)
 
     asyncio.run(run())
 

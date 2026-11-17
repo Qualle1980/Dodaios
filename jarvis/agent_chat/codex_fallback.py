@@ -4,8 +4,11 @@ Instant (ChatGPT plan) always reviews first. After its correction budget is
 spent, :func:`jarvis.agent_chat.review_routing.choose_reviewer` decides whether
 Instant already carried the evidence. When it did not, this module delivers
 one review prompt to a Codex coding pane through the same Agentic-IDE registry
-``workspace-orchestrate`` already uses (:func:`jarvis.agentic_ide.session.get_registry`),
-and ``Registry.send_prompt`` registers the wait via ``track_submission``.
+``workspace-orchestrate`` already uses (:func:`jarvis.agentic_ide.session.get_registry`).
+If no Codex pane is open, it opens one with ``add_terminal(agent=\"codex\")`` —
+the same create path used for other coding CLIs — then sends the brief.
+``Registry.send_prompt`` registers the wait via ``track_submission``. An open
+failure returns an honest ``review not run`` line; nothing claims a review ran.
 """
 
 from __future__ import annotations
@@ -124,6 +127,72 @@ def find_codex_pane(registry: Any) -> tuple[Any, Any] | None:
     return None
 
 
+def _workspace_for_open(registry: Any) -> Any | None:
+    """Active workspace first, else the first open session — same order as find."""
+    active = getattr(registry, "session", None)
+    if active is not None:
+        return active
+    sessions = list(getattr(registry, "sessions", None) or [])
+    return sessions[0] if sessions else None
+
+
+async def open_codex_pane(registry: Any) -> tuple[Any, Any] | CodexFallbackResult:
+    """Open one Codex pane the way workspace-orchestrate create opens a CLI.
+
+    Uses ``registry.add_terminal(agent=\"codex\")`` on an existing workspace.
+    Returns ``(workspace, terminal)`` on success, or a :class:`CodexFallbackResult`
+    with ``action=\"missing\"`` / ``\"error\"`` and an honest not-run message.
+    """
+    space = _workspace_for_open(registry)
+    if space is None:
+        message = (
+            "review not run: could not open a Codex pane because "
+            "no Agentic-IDE workspace is open."
+        )
+        log.info("codex fallback: %s", message)
+        return CodexFallbackResult(action="missing", message=message)
+
+    add = getattr(registry, "add_terminal", None)
+    if add is None or not callable(add):
+        message = (
+            "review not run: could not open a Codex pane because "
+            "the workspace registry cannot open panes."
+        )
+        log.info("codex fallback: %s", message)
+        return CodexFallbackResult(action="missing", message=message)
+
+    workspace_id = str(getattr(space, "id", "") or "") or None
+    try:
+        term = await add(agent="codex", workspace_id=workspace_id)
+    except SessionError as exc:
+        message = f"review not run: could not open a Codex pane because {exc}"
+        log.warning("codex fallback: %s", message)
+        return CodexFallbackResult(action="missing", message=message)
+    except Exception as exc:  # noqa: BLE001 - must surface honesty, never swallow
+        log.exception("codex fallback: opening a Codex pane failed")
+        return CodexFallbackResult(
+            action="error",
+            message=(
+                "review not run: could not open a Codex pane because "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
+
+    if term is None:
+        message = (
+            "review not run: could not open a Codex pane because "
+            "add_terminal returned no pane."
+        )
+        log.warning("codex fallback: %s", message)
+        return CodexFallbackResult(action="missing", message=message)
+
+    # Prefer the workspace that owns the new pane when the registry returns one.
+    found = find_codex_pane(registry)
+    if found is not None:
+        return found
+    return space, term
+
+
 async def attempt_codex_fallback(
     *,
     evidence: ReviewEvidence | None,
@@ -132,10 +201,13 @@ async def attempt_codex_fallback(
 ) -> CodexFallbackResult:
     """Send ``prompt`` to a Codex pane when Instant's evidence is incomplete.
 
-    On ``sent``, ``Registry.send_prompt`` (or a test double that mirrors it)
-    registers delegated work through ``track_submission`` so the chat wait can
-    hold for the report. Busy and missing panes return an honest message; the
-    caller must not retry in a loop.
+    When no Codex pane is open, opens one via ``add_terminal(agent=\"codex\")``
+    (the same create path workspace-orchestrate uses for Grok and Claude panes),
+    then sends the brief. On ``sent``, ``Registry.send_prompt`` (or a test
+    double that mirrors it) registers delegated work through
+    ``track_submission`` so the chat wait can hold for the report. Busy panes
+    and open failures return an honest message; the caller must not retry in a
+    loop.
     """
     if choose_reviewer(evidence) == "instant":
         return CodexFallbackResult(action="skipped")
@@ -143,12 +215,10 @@ async def attempt_codex_fallback(
     reg = registry if registry is not None else default_registry()
     found = find_codex_pane(reg)
     if found is None:
-        message = (
-            "No Codex coding pane is open to take the review after Instant "
-            "could not produce the evidence."
-        )
-        log.info("codex fallback: %s", message)
-        return CodexFallbackResult(action="missing", message=message)
+        opened = await open_codex_pane(reg)
+        if isinstance(opened, CodexFallbackResult):
+            return opened
+        found = opened
 
     owner, term = found
     name = str(getattr(term, "name", "") or "Codex")
@@ -173,12 +243,16 @@ async def attempt_codex_fallback(
             name,
             exc,
         )
-        return CodexFallbackResult(action="missing", message=str(exc), pane=name)
+        return CodexFallbackResult(
+            action="missing",
+            message=f"review not run: could not send to a Codex pane because {exc}",
+            pane=name,
+        )
     except Exception as exc:  # noqa: BLE001 - must surface honesty, never swallow
         log.exception("codex fallback: send to %s failed", name)
         return CodexFallbackResult(
             action="error",
-            message=f"{type(exc).__name__}: {exc}",
+            message=f"review not run: could not send to a Codex pane because {type(exc).__name__}: {exc}",
             pane=name,
         )
     log.info("codex fallback: sent review to Codex pane %s", name)
@@ -191,6 +265,7 @@ __all__ = [
     "default_registry",
     "evidence_from_payload",
     "find_codex_pane",
+    "open_codex_pane",
     "review_prompt_for_codex",
     "serialize_receipts",
 ]

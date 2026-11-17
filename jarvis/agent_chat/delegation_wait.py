@@ -103,12 +103,14 @@ async def _maybe_codex_fallback(
         gate.owed_honesty = ()
         gate.correction = None
         gate.review_evidence_payload = None
+        gate.awaiting_codex_review = True
         return True
     if result.action == "skipped":
         return False
     # busy / missing / error — surface honesty, never silent drop, never retry here.
     gate.codex_fallback_message = result.message or (
-        "The Codex review could not be started after Instant's correction budget was spent."
+        "review not run: The Codex review could not be started after Instant's "
+        "correction budget was spent."
     )
     log.info(
         "agent chat %s: turn %s Codex fallback %s: %s",
@@ -171,6 +173,9 @@ class DelegationWait:
         self.started = time.monotonic()
         self.failures: dict[str, int] = {}
         self.progress: dict[str, str] = {}
+        #: Set when Instant handed the review to a Codex pane; cleared when its report arrives.
+        self.awaiting_codex_review: bool = False
+        self._pipeline_progress_emitted: set[str] = set()
         #: The last wave's ``delegation_correction`` notice, when it rejected an
         #: answer about handed-back work and one more attempt is allowed.
         self.correction: dict[str, Any] | None = None
@@ -252,6 +257,19 @@ class DelegationWait:
             }
         return result
 
+    async def _emit_pipeline_progress(self, phase: str) -> None:
+        """One operator progress notice per phase for this wait."""
+        if phase in self._pipeline_progress_emitted:
+            return
+        from jarvis.agent_chat.pipeline_progress import progress_notice_payload
+
+        language = str(getattr(self.handle, "output_language", None) or "de")
+        payload = progress_notice_payload(
+            phase, turn_id=self.handle.turn_id, language=language
+        )
+        await self.handle.emit(make_event("notice", payload))
+        self._pipeline_progress_emitted.add(phase)
+
     async def collect(self) -> list[dict[str, Any]]:
         pending = {key: work for key, work in self.work.items() if key not in self.delivered}
         if not pending:
@@ -268,6 +286,13 @@ class DelegationWait:
             if attached:
                 if self.yield_seat.is_set():
                     raise SeatYielded(rows)
+                if self.awaiting_codex_review:
+                    # Review is in flight; the done phase fires when its report lands.
+                    pass
+                else:
+                    from jarvis.agent_chat.pipeline_progress import PHASE_CODING_RUNNING
+
+                    await self._emit_pipeline_progress(PHASE_CODING_RUNNING)
                 names = ", ".join(work.name for work in pending.values())
                 await self.handle.emit(
                     make_event(
@@ -320,6 +345,13 @@ class DelegationWait:
                                 },
                             )
                         )
+                        if self.awaiting_codex_review:
+                            from jarvis.agent_chat.pipeline_progress import (
+                                PHASE_REVIEW_DONE,
+                            )
+
+                            await self._emit_pipeline_progress(PHASE_REVIEW_DONE)
+                            self.awaiting_codex_review = False
                     self.delivered.add(key)
                     changed = True
                 # A reserved launch can register its actual jobs after the first scan.
