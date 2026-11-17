@@ -31,12 +31,15 @@ class IterationBudget:
     max_tokens_total: int = 2_000_000
     #: Cost backstop over the CUMULATIVE re-sent prompt. Distinct from the
     #: 2026-06-01 trap above: input never counts against the small OUTPUT
-    #: ceiling. Tightened 2026-11-17 from 50M so Instant coding-dispatch
-    #: turns cannot burn hundreds of thousands of input tokens on a simple
-    #: hand-off. Tripping this behaves exactly like the other two bounds:
-    #: the loop's budget directive forces one final grounded synthesis
-    #: round — an honest answer with open gaps, never a silent drop.
-    max_input_tokens_total: int = 80_000
+    #: ceiling — this is its own bound, sized so no legitimate flow reaches
+    #: it (~15 rounds of a 27k-token fixed block). Live 2026-07-26: one
+    #: voice turn summed 686k input tokens across loop rounds ≈ $1 on the
+    #: configured tool model. Tripping this behaves exactly like the other
+    #: two bounds: the loop's budget directive forces one final grounded
+    #: synthesis round — an honest answer, never a silent drop.
+    #: Maintainer mandate 2026-08-24 (7c985c1ba): bounds may only encode
+    #: hard API / hardware / safety limits, never save context on purpose.
+    max_input_tokens_total: int = 50_000_000
     turns_used: int = 0
     tokens_used: int = 0           # OUTPUT tokens accumulated (runaway-generation signal)
     input_tokens_seen: int = 0     # cumulative re-sent prompt (cost backstop + telemetry)

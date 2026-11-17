@@ -21,10 +21,14 @@ ORDER = "Create hallo.txt with hallo, then independent review."
 
 
 @pytest.mark.asyncio
-async def test_waves_share_one_budget_and_stop_when_input_exceeds_80k(
+async def test_waves_share_one_budget_and_stop_when_input_exceeds_explicit_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Waves accumulate input on one budget; the next wave does not start past 80k."""
+    """Waves accumulate input on one budget; the next wave stops past an explicit ceiling.
+
+    The shipped default input backstop is 50M (mandate 2026-08-24). This pins the
+    turn-wide stop itself with an operator-set 80k ceiling on the handle.
+    """
     monkeypatch.setattr(delegation_wait, "POLL_SECONDS", 0.001)
     monkeypatch.setattr(delegation_wait, "WAIT_TIMEOUT_SECONDS", 2.0)
     monkeypatch.setattr(delegation_wait, "MAX_CORRECTIONS", 0)
@@ -41,6 +45,7 @@ async def test_waves_share_one_budget_and_stop_when_input_exceeds_80k(
     session = store.create_session(
         provider="chatgpt-plan", model="gpt-x", effort="", surface="jarvis", cwd="."
     )
+    ceiling = IterationBudget(max_turns=40, max_input_tokens_total=80_000)
     handle = TurnHandle(
         session=session,
         turn_id="t-budget",
@@ -48,6 +53,7 @@ async def test_waves_share_one_budget_and_stop_when_input_exceeds_80k(
         request_approval=approve,
         cancel=asyncio.Event(),
         output_language="en",
+        iteration_budget=ceiling,
     )
     service = SimpleNamespace(store=store, delegate_wait=None)
     seen: list[IterationBudget] = []
@@ -94,9 +100,10 @@ async def test_waves_share_one_budget_and_stop_when_input_exceeds_80k(
         current_chat_turn.reset(token)
         store.close()
 
-    assert waves["n"] == 2, "wave 3 must not start after cumulative input crossed 80k"
+    assert waves["n"] == 2, "wave 3 must not start after cumulative input crossed the ceiling"
     assert seen[0] is seen[1]
     assert seen[0].input_tokens_seen >= 80_000
+    assert seen[0] is ceiling
 
 
 @pytest.mark.asyncio

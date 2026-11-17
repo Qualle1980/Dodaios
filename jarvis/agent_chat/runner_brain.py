@@ -71,10 +71,6 @@ APPROVAL_TIMEOUT_S: Final[float] = 600.0
 #: The tool-loop ceiling of a chat turn — the API runner's own round budget.
 MAX_TURNS: Final[int] = 40
 
-#: Instant (chatgpt-plan) coding-dispatch turns: hand off, observe, answer.
-#: Hard ceiling so a simple create cannot burn dozens of tool rounds.
-CODING_DISPATCH_MAX_TURNS: Final[int] = 6
-
 #: How much of the chat's own log rides along as history.
 _HISTORY_MAX: Final[int] = 40
 
@@ -190,27 +186,9 @@ def build_override(
             "tool_origin": kit.tool_origin,
             **({"chat_read_only": True} if stance == PLAN_STANCE else {}),
             "cwd": str(cwd),
-            # Instant (chatgpt-plan) keeps a tight tool-result backstop so
-            # observe/Read dumps cannot dominate the next model call.
-            # Tightened 2026-11-17 from 20_000 after _log_weight showed
-            # conversation growth dominating mid-turn (~5k→14k).
-            **(
-                {"max_tool_result_chars": 12_000}
-                if session.provider == "chatgpt-plan"
-                else {}
-            ),
         },
-        max_turns=_max_turns_for(session, kit),
+        max_turns=kit.max_turns or MAX_TURNS,
     )
-
-
-def _max_turns_for(session: AgentChatSession, kit: Any) -> int:
-    """Coding-dispatch Instant turns get a tight round envelope; others keep kit/default."""
-    if kit.max_turns is not None:
-        return int(kit.max_turns)
-    if str(getattr(session, "provider", "") or "") == "chatgpt-plan":
-        return CODING_DISPATCH_MAX_TURNS
-    return MAX_TURNS
 
 
 def _compose_filters(
@@ -667,14 +645,18 @@ async def run_brain_turn(
                 codex_next = (
                     not pending and choose_reviewer(review_evidence) == "codex"
                 )
+                if pending:
+                    notice_kind = "delegation_correction"
+                elif codex_next:
+                    # Codex takes the review; this is not an Instant correction
+                    # and must not spend corrections_left.
+                    notice_kind = "delegation_codex_handoff"
+                else:
+                    notice_kind = "delegation_unverified"
                 await emit(
                     "notice",
                     {
-                        "kind": (
-                            "delegation_correction"
-                            if pending or codex_next
-                            else "delegation_unverified"
-                        ),
+                        "kind": notice_kind,
                         "turn_id": turn_id,
                         "work": list(gate.work),
                         "missing": missing,
@@ -896,7 +878,6 @@ def _note_skill_trigger(brain: Any, text: str) -> None:
 
 __all__ = [
     "APPROVAL_TIMEOUT_S",
-    "CODING_DISPATCH_MAX_TURNS",
     "MAX_TURNS",
     "RUNNER",
     "SOURCE_LAYER",

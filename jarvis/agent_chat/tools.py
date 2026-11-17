@@ -43,9 +43,10 @@ EDIT_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit"})
 MUTATING_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit", "RunCommand"})
 
 #: Instant / chat folder path only. Coding panes and mission harness keep
-#: their own output limits.
-_READ_CAP_CHARS = 12_000
-_COMMAND_CAP_CHARS = 8_000
+#: their own output limits. Caps mark a sample (annotate / truncated), they
+#: must not starve a real turn of context (mandate 2026-08-24 / 7c985c1ba).
+_READ_CAP_CHARS = 60_000
+_COMMAND_CAP_CHARS = 30_000
 _GREP_MAX_RESULTS = 200
 _GLOB_MAX_RESULTS = 500
 _DEFAULT_COMMAND_TIMEOUT_S = 120.0

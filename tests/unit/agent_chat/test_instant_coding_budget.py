@@ -1,4 +1,4 @@
-"""Instant coding-dispatch envelope and Codex-always review (slice 2, 2026-11-17)."""
+"""Instant coding-dispatch envelope and Codex-always review."""
 
 from __future__ import annotations
 
@@ -34,16 +34,16 @@ def _full_evidence() -> ReviewEvidence:
     )
 
 
-def test_iteration_budget_default_is_80k_input_tokens() -> None:
-    assert IterationBudget().max_input_tokens_total == 80_000
-    assert IterationBudget.max_input_tokens_total == 80_000
+def test_iteration_budget_default_is_50m_input_tokens() -> None:
+    """Hard cost backstop only — not a context-saving Instant cap (7c985c1ba)."""
+    assert IterationBudget().max_input_tokens_total == 50_000_000
+    assert IterationBudget.max_input_tokens_total == 50_000_000
 
 
-def test_coding_dispatch_turn_has_max_six_rounds() -> None:
-    from jarvis.agent_chat.runner_brain import CODING_DISPATCH_MAX_TURNS, build_override
+def test_chatgpt_plan_turn_uses_default_max_turns() -> None:
+    from jarvis.agent_chat.runner_brain import MAX_TURNS, build_override
     from jarvis.agent_chat.store import AgentChatSession
 
-    assert CODING_DISPATCH_MAX_TURNS == 6
     session = AgentChatSession(
         session_id="s1",
         title="",
@@ -62,7 +62,7 @@ def test_coding_dispatch_turn_has_max_six_rounds() -> None:
     override = build_override(
         session, brain=None, stance="ask", cwd=Path("."), ref="r"
     )
-    assert override.max_turns == 6
+    assert override.max_turns == MAX_TURNS == 40
 
     ordinary = AgentChatSession(
         session_id="s2",
@@ -121,7 +121,7 @@ class _GreedyBrain:
 
 @pytest.mark.asyncio
 async def test_cap_hit_answers_now_with_gaps_and_no_new_round() -> None:
-    """When the Instant coding envelope is spent, answer now; no new tool round."""
+    """When an explicit round envelope is spent, answer now; no new tool round."""
     brain = _GreedyBrain()
     executor = _ExecOK()
     loop = ToolUseLoop(
