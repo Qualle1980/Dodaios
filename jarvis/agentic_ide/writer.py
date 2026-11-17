@@ -129,10 +129,16 @@ def _load_config() -> Any:
     return load_config()
 
 
+#: The chat seat. Briefs go through ChatGPT Instant before any API-billed tier
+#: (Ahmad, 2026-11-17). The global brain may be on another provider; this pins
+#: the writer, not the brain.
+_CHAT_SEAT = "chatgpt-plan"
+
+
 def _subscription(config: Any, cli_timeout_s: float | None) -> Any:
     from jarvis.brain.resolver import resolve_subscription_brain
 
-    return resolve_subscription_brain(config, cli_timeout_s=cli_timeout_s)
+    return resolve_subscription_brain(config, cli_timeout_s=cli_timeout_s, prefer=_CHAT_SEAT)
 
 
 def _quality(config: Any) -> Any:
@@ -214,7 +220,7 @@ def _resolve_writer_uncached(*, cli_timeout_s: float | None) -> tuple[Any | None
 # CLI pays 5-19 s of spawn per brief (measured 2026-08-18, see the module
 # docstring) and therefore goes last in BOTH orders — the writer of last resort
 # under ``auto``, and the last rescue after a failed one.
-_AUTO_ORDER = ("tool_model", "api", "subscription")
+_AUTO_ORDER = ("subscription", "tool_model", "api")
 
 
 def _writer_for_rung(rung: str, config: Any, cli_timeout_s: float | None) -> tuple[Any | None, str]:
