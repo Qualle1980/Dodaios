@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 
 #: App-side max age before re-reading the CLI caches (research: 600 s).
 REFRESH_TTL_S: Final[float] = 600.0
+#: An unconfirmed list (cache file, failed account probe) is re-read at most
+#: this often. Without it every description access ran the CLI again — a
+#: synchronous subprocess on the event loop for each tool-declaration build.
+UNCONFIRMED_RETRY_TTL_S: Final[float] = 60.0
 #: Codex account listing waits this long (research: warm ~6 s, 8 s default timed out).
 CODEX_LIST_TIMEOUT_S: Final[float] = 15.0
 
@@ -382,6 +386,14 @@ class ModelListStore:
             and not force
             and age < self.refresh_ttl_s
         ):
+            return current
+        if (
+            current is not None
+            and not current.confirmed
+            and not force
+            and age < UNCONFIRMED_RETRY_TTL_S
+        ):
+            # Asked again soon: answer from the last read instead of running the CLI.
             return current
         return self._refresh(key, previous=current)
 
