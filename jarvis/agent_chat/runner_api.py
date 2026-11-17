@@ -176,6 +176,14 @@ class TurnHandle:
     #: (:mod:`jarvis.agent_chat.delegation_correction`). Zero means the
     #: rejection is final, and the honest answer is shown now.
     corrections_left: int = 0
+    #: Shared ``IterationBudget`` for every wave of this chat turn (Instant
+    #: coding via ``run_with_delegates``). ``None`` on ordinary single-wave
+    #: turns; the dispatcher then allocates its own budget.
+    iteration_budget: Any = None
+    #: Continuation wave briefing (delegate reports). Carried as a user
+    #: history message so the cached instruction prefix stays byte-stable;
+    #: empty on the first wave.
+    continuation_briefing: str = ""
 
 
 # ------------------------------------------------------------ history

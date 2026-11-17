@@ -13,7 +13,6 @@ class, one layer up. These tests pin the three things that make the feature real
 """
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -176,37 +175,29 @@ async def test_live_recombined_pipeline_turn_opens_five_claude_panes(
     assert _event_names(bus) == ["AgenticIdeTerminalsAdded", "NavigateSidebar"]
 
 
-async def test_spawn_and_prompt_queues_exactly_the_new_codex_fleet(
+async def test_spawn_and_prompt_stands_down_for_instant(
     manager: tuple[BrainManager, FakeBus],
     registry: Registry,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Open-plus-task is Instant's job (model/effort/brief), not the fast-path.
+
+    2026-11-17: a message that names panes AND carries work must not open panes
+    here — Instant checks, chooses model and effort, and briefs.
+    """
     mgr, _bus = manager
     await _open(registry, tmp_path, 1, agent="claude")
-    received: list[tuple[list[str], str]] = []
-    called = asyncio.Event()
-
-    async def _brief(_session: object, names: list[str], utterance: str) -> None:
-        received.append((names, utterance))
-        called.set()
-
-    monkeypatch.setattr(mgr, "_brief_spawned_agentic_ide_fleet", _brief)
+    before = len(registry.session.terminals)
     utterance = (
         "Spawn five Codex terminals and prompt each one to start 50 subagents "
         "for a read-only platform review"
     )
 
     reply = await mgr._run_agentic_ide_spawn_fast_path(utterance)
-    await asyncio.wait_for(called.wait(), timeout=1)
 
+    assert reply is None
     assert registry.session is not None
-    new_terms = registry.session.terminals[1:]
-    assert len(new_terms) == 5
-    assert {term.agent for term in new_terms} == {"codex"}
-    assert received == [([term.name for term in new_terms], utterance)]
-    assert reply is not None
-    assert "as soon as the terminals are ready" in reply
+    assert len(registry.session.terminals) == before
 
 
 async def test_queued_fleet_receives_the_task_not_the_spawn_scaffolding(
@@ -567,32 +558,20 @@ async def test_a_clearly_german_turn_is_answered_in_german_without_a_pin(
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_conditional_spawn_opens_one_pane_and_briefs_it(
+async def test_a_conditional_spawn_with_task_stands_down_for_instant(
     manager: tuple[BrainManager, FakeBus],
     registry: Registry,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole reported failure, pinned at the layer that produced it.
+    """Work-plus-fallback-spawn carries a task: Instant owns it, not the fast-path.
 
-    The user described the work, named a pane that was not running, and made
-    the spawn a fallback: "let Lee do a deep dive on this and fix it — if there
-    is no terminal by that name, open one and prompt it right there". The task
-    sits in FRONT of the spawn clause, and only what followed it was read, so a
-    blank pane opened, "ready" was spoken, and nobody was briefed. What the user
-    said next was "you did nothing" — followed by four more panes as the router
-    tried to reach a call-sign that could never exist.
+    2026-11-17: the fast-path opens panes only for pure open requests. A turn
+    that describes work and only then asks to open a pane if needed goes to
+    Instant so model and effort are chosen before any pane starts.
     """
     mgr, _bus = manager
     await _open(registry, tmp_path, 2)
-    received: list[tuple[list[str], str]] = []
-    called = asyncio.Event()
-
-    async def _brief(_session: object, names: list[str], utterance: str) -> None:
-        received.append((names, utterance))
-        called.set()
-
-    monkeypatch.setattr(mgr, "_brief_spawned_agentic_ide_fleet", _brief)
+    before = len(registry.session.terminals)
     utterance = (
         "Kannst du bitte dazu Lee einen Deep Dive machen lassen? Und das fixen. "
         "Wenn es kein Terminal gibt, welches so heißt, spawn ein neues und lass "
@@ -600,14 +579,10 @@ async def test_a_conditional_spawn_opens_one_pane_and_briefs_it(
     )  # i18n-allow: production transcript under test
 
     reply = await mgr._run_agentic_ide_spawn_fast_path(utterance)
-    await asyncio.wait_for(called.wait(), timeout=1)
 
+    assert reply is None
     assert registry.session is not None
-    opened = registry.session.terminals[2:]
-    assert len(opened) == 1, "one pane was asked for — the four extra ones are the bug"
-    assert received == [([opened[0].name], utterance)]
-    assert reply is not None
-    assert opened[0].name in reply, "the pane's real call-sign is spoken back"
+    assert len(registry.session.terminals) == before
 
 
 async def test_the_conditional_brief_carries_the_task_and_not_the_fallback(
@@ -743,3 +718,162 @@ async def test_a_clearly_named_cli_never_asks(
     assert "did you mean" not in reply.lower()
     assert registry.session is not None
     assert len(registry.session.terminals) == 4
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-17: pure open vs task → Instant (typed chat must not bypass Instant)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_pure_open_request_accepts_german_open_only() -> None:
+    from jarvis.brain.manager import is_pure_open_request
+
+    assert is_pure_open_request("Öffne zwei Claude-Code-Terminals") is True  # i18n-allow
+
+
+def test_is_pure_open_request_rejects_german_auftrag() -> None:
+    from jarvis.brain.manager import is_pure_open_request
+
+    assert (
+        is_pure_open_request(
+            "Gib dem Claude-Code-Terminal einen Auftrag: lege hallo.txt an"  # i18n-allow
+        )
+        is False
+    )
+
+
+def test_is_pure_open_request_rejects_grok_pruefen() -> None:
+    from jarvis.brain.manager import is_pure_open_request
+
+    assert (
+        is_pure_open_request(
+            "Gib dem Grok-Terminal den Auftrag, mul.py zu prüfen"  # i18n-allow
+        )
+        is False
+    )
+
+
+async def test_pure_german_open_still_opens_panes(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """(a) Pure open request: fast-path opens panes (unchanged behaviour)."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path(
+        "Öffne zwei Claude-Code-Terminals"  # i18n-allow
+    )
+
+    assert reply is not None
+    assert registry.session is not None
+    assert len(registry.session.terminals) == 3
+    assert [t.agent for t in registry.session.terminals[1:]] == ["claude", "claude"]
+
+
+async def test_auftrag_message_does_not_open_panes_via_fast_path(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """(b) Task text: fast-path stands down so Instant can choose model/effort."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1)
+    before = len(registry.session.terminals)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path(
+        "Gib dem Claude-Code-Terminal einen Auftrag: lege hallo.txt an"  # i18n-allow
+    )
+
+    assert reply is None
+    assert registry.session is not None
+    assert len(registry.session.terminals) == before
+
+
+async def test_grok_pruefen_message_does_not_open_panes_via_fast_path(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """(c) Another task shape: fast-path must not open panes."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1, agent="grok-build")
+    before = len(registry.session.terminals)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path(
+        "Gib dem Grok-Terminal den Auftrag, mul.py zu prüfen"  # i18n-allow
+    )
+
+    assert reply is None
+    assert registry.session is not None
+    assert len(registry.session.terminals) == before
+
+
+async def test_voice_pure_open_still_opens_panes(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """(d) Voice path behaviour unchanged for pure open requests."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 2)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path("Spawn three more terminals")
+
+    assert reply is not None
+    assert registry.session is not None
+    assert len(registry.session.terminals) == 5
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-17 Slice 2: pure open carries cheap-default / validated model+effort
+# --------------------------------------------------------------------------- #
+
+
+async def test_pure_open_claude_uses_cheap_default_model(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """Pure open without a chosen model uses the CLI cheap default (Haiku)."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path("Open two Claude Code terminals")
+
+    assert reply is not None
+    assert registry.session is not None
+    new_terms = registry.session.terminals[1:]
+    assert len(new_terms) == 2
+    for term in new_terms:
+        assert term.agent == "claude"
+        assert term.model == "claude-haiku-4-5-20251001"
+        assert term.effort == ""
+
+
+async def test_pure_open_honours_explicit_valid_model(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """An explicit catalog model on a pure open is validated and used."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path(
+        "Open one Claude Code terminal with model claude-sonnet-5"
+    )
+
+    assert reply is not None
+    assert registry.session is not None
+    opened = registry.session.terminals[-1]
+    assert opened.agent == "claude"
+    assert opened.model == "claude-sonnet-5"
+
+
+async def test_pure_open_refuses_unknown_model_without_opening(
+    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+) -> None:
+    """Unknown model: honest refusal, no pane opened."""
+    mgr, _bus = manager
+    await _open(registry, tmp_path, 1)
+    before = len(registry.session.terminals)
+
+    reply = await mgr._run_agentic_ide_spawn_fast_path(
+        "Open one Claude Code terminal with model not-a-real-model-id"
+    )
+
+    assert reply is not None
+    reason = reply.lower()
+    assert "not-a-real-model-id" in reason or "catalog" in reason or "model" in reason
+    assert registry.session is not None
+    assert len(registry.session.terminals) == before

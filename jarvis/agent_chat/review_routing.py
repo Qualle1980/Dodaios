@@ -1,11 +1,9 @@
 """Decide who reviews a coding handback after Instant tried first.
 
-The General (Instant / ``chatgpt-plan``) always gets the first look. This
-module only answers whether Instant's own review already carries the evidence
-the acceptance gate requires. When it does, Instant stays the reviewer; when
-it does not, Codex takes the check.
-
-Slice 1: pure decision. The continuation_prompt wire-up is a later slice.
+The General (Instant / ``chatgpt-plan``) always gets the first look and may
+still record whether its own receipts are complete. Ahmad's rule (2026-11-17):
+Codex reviews after EVERY coding run — Instant evidence completeness never
+skips that Codex pass.
 """
 
 from __future__ import annotations
@@ -74,26 +72,34 @@ def _has_test_run(receipts: Iterable[Receipt]) -> bool:
     return False
 
 
-def choose_reviewer(evidence: ReviewEvidence | None) -> Reviewer:
-    """Return ``\"instant\"`` when Instant's review has full evidence, else Codex.
+def instant_evidence_complete(evidence: ReviewEvidence | None) -> bool:
+    """True when Instant's own receipts already carry change + tests + verdict.
 
-    Full evidence means a change read, a passing test run (as the acceptance
-    gate defines both), and a verdict Instant actually stated. Any gap, an
-    empty payload, or an Instant tool error routes to Codex.
+    Recorded for honesty and status; it does not skip Codex review.
     """
     if evidence is None or evidence.tool_error:
-        return "codex"
+        return False
     if not _has_change_read(evidence.receipts):
-        return "codex"
+        return False
     if not _has_test_run(evidence.receipts):
-        return "codex"
+        return False
     if not claims_acceptance(evidence.verdict_text):
-        return "codex"
-    return "instant"
+        return False
+    return True
+
+
+def choose_reviewer(_evidence: ReviewEvidence | None) -> Reviewer:
+    """Always Codex after a coding run.
+
+    ``instant_evidence_complete`` still reports whether Instant already had
+    full evidence; that fact is never a skip.
+    """
+    return "codex"
 
 
 __all__ = [
     "ReviewEvidence",
     "Reviewer",
     "choose_reviewer",
+    "instant_evidence_complete",
 ]

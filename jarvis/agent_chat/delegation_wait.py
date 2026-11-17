@@ -31,11 +31,12 @@ PROBE_TIMEOUT_SECONDS = 5.0
 WAIT_TIMEOUT_SECONDS = 30 * 60.0  # No new evidence, not a limit on active work.
 MAX_WAVES = 8
 #: Correction waves one turn may spend after the acceptance gate rejected an
-#: answer about work that was handed back. Two, because each one is a real turn
-#: that may drive a paid coding agent. It lives here, next to the wave budget
-#: it is spent from; :mod:`jarvis.agent_chat.delegation_correction` re-exports
-#: it and would import this module anyway (``_CONTINUATION_LEAD``).
-MAX_CORRECTIONS = 2
+#: answer about work that was handed back. One, because each is a real turn
+#: that may drive a paid coding agent. A second rejection ends the request
+#: honestly. It lives here, next to the wave budget it is spent from;
+#: :mod:`jarvis.agent_chat.delegation_correction` re-exports it and would
+#: import this module anyway (``_CONTINUATION_LEAD``).
+MAX_CORRECTIONS = 1
 
 
 class SeatYielded(Exception):  # noqa: N818 - a hand-over, not an error
@@ -405,6 +406,21 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
     original = prompt
     gate = DelegationWait(handle)
     active = replace(handle, emit=gate.emit)
+    # One IterationBudget for the whole chat turn so input_tokens_seen
+    # accumulates across waves. Without this, each wave's generate() built a
+    # fresh budget and the 80k Instant coding cap never saw the turn total
+    # (measured 2026-11-17: 79k+62k+15k = 156k with no trip). Round counters
+    # reset per wave so CODING_DISPATCH_MAX_TURNS stays a per-wave envelope.
+    from jarvis.agent_chat.runner_brain import CODING_DISPATCH_MAX_TURNS
+    from jarvis.brain.iteration_budget import IterationBudget
+
+    turn_budget = getattr(handle, "iteration_budget", None)
+    if turn_budget is None:
+        turn_budget = IterationBudget(
+            max_turns=CODING_DISPATCH_MAX_TURNS,
+            max_input_tokens_total=80_000,
+        )
+    active = replace(active, iteration_budget=turn_budget)
     # A chat that takes the next message while this one waits (the service
     # decides which chats do); elsewhere the turn holds its seat as before.
     waiting = getattr(service, "delegate_wait", None)
@@ -412,6 +428,22 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
     corrections = MAX_CORRECTIONS
     with collect_delegated_work(gate.add):
         for wave in range(MAX_WAVES):
+            if (
+                wave > 0
+                and turn_budget.input_tokens_seen >= turn_budget.max_input_tokens_total
+            ):
+                log.info(
+                    "agent chat %s: turn %s input budget exhausted (%d >= %d); "
+                    "no further wave",
+                    handle.session.session_id,
+                    handle.turn_id,
+                    turn_budget.input_tokens_seen,
+                    turn_budget.max_input_tokens_total,
+                )
+                break
+            # Per-wave round / output envelope; input accumulates on the same object.
+            turn_budget.turns_used = 0
+            turn_budget.tokens_used = 0
             gate.finish = None
             gate.correction = None
             await run_attempt(active, prompt)
@@ -454,12 +486,30 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                         handle.session.session_id, handle.turn_id,
                         gate.correction.get("correcting"), attempt, MAX_CORRECTIONS,
                     )
+                    # One-line status per job; do not replay earlier in-turn
+                    # tool dumps into the correction provider call.
+                    gate_jobs = getattr(active.acceptance_gate, "jobs", ()) or ()
+                    statuses = tuple(
+                        (
+                            str(getattr(job, "task_id", "") or ""),
+                            str(getattr(job, "status", "") or ""),
+                        )
+                        for job in gate_jobs
+                        if str(getattr(job, "task_id", "") or "")
+                    )
+                    if not statuses:
+                        statuses = tuple(
+                            (str(task_id), "completed")
+                            for task_id in (gate.correction.get("correcting") or ())
+                            if task_id
+                        )
                     prompt = correction_prompt(
                         gaps=tuple(gate.correction.get("missing") or ()),
                         work=tuple(gate.correction.get("correcting") or ()),
                         original=original,
                         rules=lessons_block(original),
                         attempt=attempt,
+                        statuses=statuses,
                     )
                     stored = service.store.get_session(handle.session.session_id)
                     active = replace(
@@ -468,7 +518,8 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                             active.session,
                             vendor_session=stored.vendor_session if stored else None,
                         ),
-                        history=service.store.list_events(handle.session.session_id),
+                        # Correction carries the briefing + job status only.
+                        history=[],
                         continuation=True,
                         # Spent down to zero, so the LAST attempt's rejection is
                         # final and its honest answer is the one the person reads.

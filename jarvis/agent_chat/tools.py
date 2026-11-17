@@ -42,8 +42,10 @@ READ_ONLY_TOOLS: Final[frozenset[str]] = frozenset({"Read", "Ls", "Glob", "Grep"
 EDIT_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit"})
 MUTATING_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit", "RunCommand"})
 
-_READ_CAP_CHARS = 60_000
-_COMMAND_CAP_CHARS = 30_000
+#: Instant / chat folder path only. Coding panes and mission harness keep
+#: their own output limits.
+_READ_CAP_CHARS = 12_000
+_COMMAND_CAP_CHARS = 8_000
 _GREP_MAX_RESULTS = 200
 _GLOB_MAX_RESULTS = 500
 _DEFAULT_COMMAND_TIMEOUT_S = 120.0
@@ -245,6 +247,31 @@ def _cap(text: str, limit: int) -> str:
     return text[:limit] + f"\n…[truncated, {len(text) - limit} more characters]"
 
 
+def _cap_read(text: str, limit: int = _READ_CAP_CHARS) -> str:
+    """Cap a Read payload and point the model at offset/limit for the rest."""
+    if len(text) <= limit:
+        return text
+    kept = text[:limit]
+    omitted = len(text) - limit
+    return (
+        f"{kept}\n…[truncated, {omitted} more characters; "
+        "use offset/limit to read the rest]"
+    )
+
+
+def _cap_command_output(text: str, limit: int = _COMMAND_CAP_CHARS) -> str:
+    """Cap RunCommand / test output with head and tail around a marker."""
+    if len(text) <= limit:
+        return text
+    marker = f"\n…[truncated middle, {len(text) - limit} characters omitted]…\n"
+    keep = max(0, limit - len(marker))
+    head = keep // 2
+    tail = keep - head
+    if tail <= 0:
+        return text[:limit] + "\n…[truncated]"
+    return text[:head] + marker + text[-tail:]
+
+
 # ---------------------------------------------------------------- tools
 
 
@@ -290,7 +317,7 @@ def _read(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     if start or end < len(lines):
         header += f", showing {start + 1}-{min(end, len(lines))}"
     header += ")"
-    return _cap(header + "\n" + body, _READ_CAP_CHARS), False
+    return _cap_read(header + "\n" + body, _READ_CAP_CHARS), False
 
 
 def _write(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
@@ -474,7 +501,7 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     text = raw.decode("utf-8", errors="replace")
     took = time.perf_counter() - started
     code = proc.returncode
-    out = _cap(text.rstrip(), _COMMAND_CAP_CHARS)
+    out = _cap_command_output(text.rstrip(), _COMMAND_CAP_CHARS)
     out = annotate_command_sample(out, command)
     footer = f"\n[exit {code} · {took:.1f}s]"
     return (out + footer).strip(), code != 0

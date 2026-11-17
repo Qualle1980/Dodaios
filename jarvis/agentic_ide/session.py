@@ -6422,6 +6422,9 @@ class Registry:
         agent: str | None = None,
         account: str | None = None,
         workspace_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> tuple[list[Terminal], bool]:
         """Open a batch in one pinned workspace, rejecting oversized requests.
 
@@ -6435,6 +6438,8 @@ class Registry:
         already decided there, and a batch that placed panes its own way would
         drift from what the split buttons do. No anchor is named, so without an
         explicit ``account`` every pane opens on the workspace's active one.
+        ``model`` / ``effort`` / ``permission_mode`` forward to each pane the
+        same way a single ``add_terminal`` would (Instant create uses them).
 
         A failure before creating any pane is raised to the caller.
         """
@@ -6454,6 +6459,9 @@ class Registry:
                         agent=agent,
                         account=account,
                         workspace_id=selected.id,
+                        model=model,
+                        effort=effort,
+                        permission_mode=permission_mode,
                     )
                 )
             except SessionError as exc:

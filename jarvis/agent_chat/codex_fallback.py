@@ -162,8 +162,37 @@ async def open_codex_pane(registry: Any) -> tuple[Any, Any] | CodexFallbackResul
         return CodexFallbackResult(action="missing", message=message)
 
     workspace_id = str(getattr(space, "id", "") or "") or None
+    model = ""
+    effort = ""
     try:
-        term = await add(agent="codex", workspace_id=workspace_id)
+        from jarvis.agentic_ide.hand_off_retry import review_key, shared_gate
+        from jarvis.agentic_ide.model_lists import shared_store
+
+        store = shared_store()
+        picked = store.pick_codex_reviewer()
+        if picked is None:
+            listing = store.ensure("codex", force=True)
+            note = listing.error or "no confirmed Codex model for this account"
+            message = f"review not run: {note}"
+            log.info("codex fallback: %s", message)
+            return CodexFallbackResult(action="missing", message=message)
+        model = picked.id
+        effort = store.highest_effort(picked)
+        gate_key = review_key(owner_session=workspace_id or "codex-fallback", title="codex-review")
+        blocked = shared_gate().allow_open(gate_key, model)
+        if blocked:
+            log.info("codex fallback: %s", blocked)
+            return CodexFallbackResult(action="missing", message=blocked)
+        shared_gate().note_open(gate_key, model)
+    except Exception:  # noqa: BLE001 — opening without a model still lets the CLI default
+        log.warning("codex fallback: live reviewer model unavailable", exc_info=True)
+    try:
+        term = await add(
+            agent="codex",
+            workspace_id=workspace_id,
+            **({"model": model} if model else {}),
+            **({"effort": effort} if effort else {}),
+        )
     except SessionError as exc:
         message = f"review not run: could not open a Codex pane because {exc}"
         log.warning("codex fallback: %s", message)
@@ -199,18 +228,20 @@ async def attempt_codex_fallback(
     prompt: str,
     registry: Any | None = None,
 ) -> CodexFallbackResult:
-    """Send ``prompt`` to a Codex pane when Instant's evidence is incomplete.
+    """Send ``prompt`` to a Codex pane after every coding run.
 
-    When no Codex pane is open, opens one via ``add_terminal(agent=\"codex\")``
-    (the same create path workspace-orchestrate uses for Grok and Claude panes),
-    then sends the brief. On ``sent``, ``Registry.send_prompt`` (or a test
-    double that mirrors it) registers delegated work through
-    ``track_submission`` so the chat wait can hold for the report. Busy panes
-    and open failures return an honest message; the caller must not retry in a
-    loop.
+    Instant may already have complete evidence; Codex still reviews
+    (``choose_reviewer`` always returns Codex). When no Codex pane is open,
+    opens one via ``add_terminal(agent=\"codex\")`` (the same create path
+    workspace-orchestrate uses for Grok and Claude panes), then sends the
+    brief. On ``sent``, ``Registry.send_prompt`` (or a test double that
+    mirrors it) registers delegated work through ``track_submission`` so the
+    chat wait can hold for the report. Busy panes and open failures return an
+    honest ``review not run`` message — never ``passed``. The caller must not
+    retry in a loop.
     """
-    if choose_reviewer(evidence) == "instant":
-        return CodexFallbackResult(action="skipped")
+    # Evidence completeness is recorded for status; it never skips Codex.
+    _ = choose_reviewer(evidence)
 
     reg = registry if registry is not None else default_registry()
     found = find_codex_pane(reg)

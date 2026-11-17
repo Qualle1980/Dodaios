@@ -1,9 +1,10 @@
-"""When Instant's correction budget is spent, empty evidence goes to a Codex pane.
+"""After a coding run, Instant always sends a Codex review brief.
 
-Instant keeps the review when its own receipts already carry full evidence.
-Otherwise one send goes to a Codex coding pane and the wait loop holds for its
-report — the same path delegated coding work already uses. A busy or missing
-pane must surface an honest line; nothing is retried in a loop.
+Codex reviews even when Instant's own receipts already look complete. One send
+goes to a Codex coding pane and the wait loop holds for its report — the same
+path delegated coding work already uses. A busy or missing pane must surface
+an honest ``review not run`` line; nothing is retried in a loop, and the
+result is never ``passed``.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,10 +20,42 @@ import pytest
 
 from jarvis.agent_chat.delegation_acceptance import Receipt
 from jarvis.agent_chat.review_routing import ReviewEvidence
+from jarvis.agentic_ide.model_lists import (
+    ModelListSources,
+    ModelListStore,
+    install_shared_store,
+)
 from jarvis.agentic_ide.session import AgentBusyError, SessionError
 
 ROOT = os.path.join(os.sep + "work", "bubble")
 ORDER = "Add subtract() to the calculator and run the tests."
+
+
+@pytest.fixture(autouse=True)
+def _confirmed_codex_list(tmp_path: Path):
+    """Fake account listing so open_codex_pane never calls a real app-server."""
+    from jarvis.agentic_ide.hand_off_retry import shared_gate
+
+    def lister():
+        return [
+            {
+                "id": "gpt-6-sol",
+                "label": "Sol",
+                "efforts": ["low", "medium", "high"],
+                "default_effort": "medium",
+            }
+        ]
+
+    store = ModelListStore(
+        store_path=tmp_path / "cli_model_lists.json",
+        sources=ModelListSources(codex_lister=lister),
+        now=lambda: 1_000.0,
+    )
+    previous = install_shared_store(store)
+    shared_gate().clear_all()
+    yield store
+    shared_gate().clear_all()
+    install_shared_store(previous)
 
 
 def _run(command: str, *, ok: bool = True, out: str = "x", cwd: str = ROOT) -> Receipt:
@@ -167,8 +201,8 @@ def _codex_registry() -> FakeRegistry:
     )
 
 
-def test_a_full_instant_evidence_skips_codex_when_budget_spent() -> None:
-    """(a) Instant already has change+tests+verdict: no Codex send."""
+def test_a_full_instant_evidence_still_sends_to_codex() -> None:
+    """(a) Instant already has change+tests+verdict: Codex still reviews."""
     from jarvis.agent_chat.codex_fallback import attempt_codex_fallback
 
     registry = _codex_registry()
@@ -179,8 +213,8 @@ def test_a_full_instant_evidence_skips_codex_when_budget_spent() -> None:
             prompt="Review the handback.",
             registry=registry,
         )
-        assert result.action == "skipped"
-        assert registry.sends == []
+        assert result.action == "sent"
+        assert len(registry.sends) == 1
 
     asyncio.run(run())
 

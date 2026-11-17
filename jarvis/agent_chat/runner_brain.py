@@ -71,6 +71,10 @@ APPROVAL_TIMEOUT_S: Final[float] = 600.0
 #: The tool-loop ceiling of a chat turn — the API runner's own round budget.
 MAX_TURNS: Final[int] = 40
 
+#: Instant (chatgpt-plan) coding-dispatch turns: hand off, observe, answer.
+#: Hard ceiling so a simple create cannot burn dozens of tool rounds.
+CODING_DISPATCH_MAX_TURNS: Final[int] = 6
+
 #: How much of the chat's own log rides along as history.
 _HISTORY_MAX: Final[int] = 40
 
@@ -186,9 +190,27 @@ def build_override(
             "tool_origin": kit.tool_origin,
             **({"chat_read_only": True} if stance == PLAN_STANCE else {}),
             "cwd": str(cwd),
+            # Instant (chatgpt-plan) keeps a tight tool-result backstop so
+            # observe/Read dumps cannot dominate the next model call.
+            # Tightened 2026-11-17 from 20_000 after _log_weight showed
+            # conversation growth dominating mid-turn (~5k→14k).
+            **(
+                {"max_tool_result_chars": 12_000}
+                if session.provider == "chatgpt-plan"
+                else {}
+            ),
         },
-        max_turns=kit.max_turns or MAX_TURNS,
+        max_turns=_max_turns_for(session, kit),
     )
+
+
+def _max_turns_for(session: AgentChatSession, kit: Any) -> int:
+    """Coding-dispatch Instant turns get a tight round envelope; others keep kit/default."""
+    if kit.max_turns is not None:
+        return int(kit.max_turns)
+    if str(getattr(session, "provider", "") or "") == "chatgpt-plan":
+        return CODING_DISPATCH_MAX_TURNS
+    return MAX_TURNS
 
 
 def _compose_filters(
@@ -475,8 +497,12 @@ async def run_brain_turn(
         # coding pane is addressed, what to cancel, where to navigate. A
         # continuation quotes the original order and the agents' reports, so
         # read as the person's words it would send that order to the pane
-        # again. It is this turn's briefing instead.
-        system_extra += "\n\n" + text
+        # again. Keep CONTINUE_TURN as the generate() user text (routes stay
+        # safe) and put the briefing on the handle as a history user message
+        # — not system_extra — so instructions+tools stay a stable prompt-cache
+        # prefix across waves (measured Instant coding: instructions 12078→11149
+        # when the briefing was folded into the system prompt).
+        handle.continuation_briefing = text
         text = CONTINUE_TURN
         from jarvis.core.protocols import current_chat_turn
 
@@ -528,6 +554,10 @@ async def run_brain_turn(
         kit_tools=kit_tools,
         system_extra=system_extra,
     )
+    shared_budget = getattr(handle, "iteration_budget", None)
+    if shared_budget is not None:
+        # Multi-wave Instant turns share one budget across generate() calls.
+        override = replace(override, budget=shared_budget)
     if ledger is not None:
         # Last in the chain, so it wraps the surface the model really gets:
         # the folder tools AND the workspace tools, with their own tiers and
@@ -707,7 +737,11 @@ async def _generate(
     from jarvis.core.config import get_jarvis_agent_secret, override_provider_secrets
 
     session = handle.session
-    history = brain_history_from_events(handle.history)
+    history = list(brain_history_from_events(handle.history))
+    briefing = str(getattr(handle, "continuation_briefing", "") or "").strip()
+    if briefing:
+        # Evidence for this wave only; not part of the cached system prefix.
+        history.append(BrainMessage(role="user", content=briefing))
     output_language = getattr(handle, "output_language", "")
     if session.surface == "society" and not handle.continuation:
         from jarvis.society.reply_preference import resolve_agent_reply_language
@@ -862,6 +896,7 @@ def _note_skill_trigger(brain: Any, text: str) -> None:
 
 __all__ = [
     "APPROVAL_TIMEOUT_S",
+    "CODING_DISPATCH_MAX_TURNS",
     "MAX_TURNS",
     "RUNNER",
     "SOURCE_LAYER",
