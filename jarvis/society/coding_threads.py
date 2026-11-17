@@ -490,7 +490,8 @@ class CodingThreadTool:
         # the same catalog from being re-paid in the next model call (research:
         # hallo3 re-sent ~2000-char agents results four times in one turn).
         now = time.time()
-        memo = self._agents_memo
+        # ``__new__`` without ``__init__`` (unit tests) has no memo attribute.
+        memo = getattr(self, "_agents_memo", None)
         if memo is not None and now - memo[0] < 60.0:
             cached = dict(memo[1])
             cached["cached"] = True
@@ -551,6 +552,25 @@ class CodingThreadTool:
             raise ValueError(f"Unknown coding agent. Choose one of: {names}.")
         if not (await _installed_clis()).get(row.agent, True):
             raise ValueError(f"{row.label} is not installed on this computer.")
+        # Validate the folder before taking a coder slot so a bad path cannot
+        # leak capacity (CI: eight queued opens after folder failures).
+        folder = await asyncio.to_thread(resolve_folder, str(args.get("folder") or ""))
+        # Same brief within DUPLICATE_OPEN_S reuses the live thread. Check
+        # before acquire: the first open still holds the coder slot, so a
+        # retry would otherwise raise Queued and never reach the fingerprint
+        # match inside _open_after_slot.
+        fingerprint = hashlib.sha256(
+            f"{row.id}\n{folder}\n{prompt}".encode()
+        ).hexdigest()[:24]
+        for owner in service.store.thread_owners(self._owner_session):
+            state = owner["state"]
+            if (
+                state.get("fingerprint") == fingerprint
+                and time.time() - owner["created_ms"] / 1000 < DUPLICATE_OPEN_S
+            ):
+                session = service.store.get_session(owner["session_id"])
+                if session is not None:
+                    return {**_thread_card(service, session), "note": "Already open."}
         # Same one-task-per-coder rule as workspace-orchestrate create.
         from jarvis.agent_chat.loop_scheduler import (
             Acquired,
@@ -573,17 +593,45 @@ class CodingThreadTool:
         if acquire_agent is not None:
             outcome = SCHEDULER.try_acquire(acquire_agent, "code")
             if isinstance(outcome, Queued):
-                return {
-                    "status": "queued",
-                    "success": False,
-                    "reason": outcome.message,
-                    "slot": outcome.agent,
-                    "queue_position": outcome.position,
-                    "loop_slot_handle": outcome.handle,
-                }
+                # Raise so ToolResult.success is False (queued is not started).
+                raise ValueError(outcome.message)
             if isinstance(outcome, Acquired):
                 loop_slot_handle = outcome.handle
-        folder = await asyncio.to_thread(resolve_folder, str(args.get("folder") or ""))
+        # Mutable so a raise after set_thread_owner still keeps the slot.
+        retained = [False]
+        try:
+            return await self._open_after_slot(
+                service,
+                agent,
+                args,
+                row=row,
+                folder=folder,
+                prompt=prompt,
+                loop_slot_handle=loop_slot_handle,
+                resolve_runner=resolve_runner,
+                retained=retained,
+            )
+        finally:
+            if loop_slot_handle and not retained[0]:
+                SCHEDULER.release(loop_slot_handle)
+
+    async def _open_after_slot(
+        self,
+        service: Any,
+        agent: Any,
+        args: dict[str, Any],
+        *,
+        row: Any,
+        folder: str,
+        prompt: str,
+        loop_slot_handle: str,
+        resolve_runner: Any,
+        retained: list[bool],
+    ) -> dict[str, Any]:
+        """Open after a coder slot is held. Sets ``retained[0]`` once the handle
+        is owned by the thread (or already released for a duplicate)."""
+        from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
         fingerprint = hashlib.sha256(
             f"{row.id}\n{folder}\n{prompt}".encode()
         ).hexdigest()[:24]
@@ -597,6 +645,8 @@ class CodingThreadTool:
                 if session is not None:
                     if loop_slot_handle:
                         SCHEDULER.release(loop_slot_handle)
+                    # Slot released here; caller must not release again.
+                    retained[0] = True
                     return {**_thread_card(service, session), "note": "Already open."}
         await asyncio.to_thread(_ensure_project, folder)
         runner = resolve_runner(row.id, surface=THREAD_SURFACE)
@@ -664,22 +714,17 @@ class CodingThreadTool:
             if blocked:
                 raise ValueError(blocked)
             shared_gate().note_open(gate_key, pick or "(default)")
-        try:
-            session = service.create_session(
-                provider=row.id,
-                model=resolved_model,
-                effort=(str(args["effort"]).strip() or None) if args.get("effort") else None,
-                cwd=folder,
-                # The maintainer's choice: an agent's coding threads never stop for
-                # approvals, so they always run in the runner's bypass mode.
-                permission_mode=access_mode(runner, "full"),
-                title=_clip(str(args.get("title") or ""), 80),
-                surface=THREAD_SURFACE,
-            )
-        except Exception:
-            if loop_slot_handle:
-                SCHEDULER.release(loop_slot_handle)
-            raise
+        session = service.create_session(
+            provider=row.id,
+            model=resolved_model,
+            effort=(str(args["effort"]).strip() or None) if args.get("effort") else None,
+            cwd=folder,
+            # The maintainer's choice: an agent's coding threads never stop for
+            # approvals, so they always run in the runner's bypass mode.
+            permission_mode=access_mode(runner, "full"),
+            title=_clip(str(args.get("title") or ""), 80),
+            surface=THREAD_SURFACE,
+        )
         service.store.set_thread_owner(
             session.session_id,
             owner_session=self._owner_session,
@@ -692,6 +737,8 @@ class CodingThreadTool:
                 **({"loop_slot_handle": loop_slot_handle} if loop_slot_handle else {}),
             },
         )
+        # Slot now belongs to the thread; do not release on later send failures.
+        retained[0] = True
         coordinator = self.runtime.coding_threads
         coordinator.track(session.session_id, self._owner_session)
         turn_id = await service.send(session.session_id, prompt, author=_author(agent))
@@ -789,6 +836,7 @@ class CodingThreadTool:
         stopped = await service.cancel(session.session_id)
         if not stopped:
             stopped = await service.seal_stopped_turn(session.session_id)
+        _release_thread_slot(service, session.session_id)
         return {"stopped": bool(stopped), "thread_id": session.session_id}
 
     async def _do_read(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -918,6 +966,24 @@ def _thread_card(service: Any, session: Any) -> dict[str, Any]:
         "access": session.permission_mode,
         "running": bool(service.is_running(session.session_id)),
     }
+
+
+def _release_thread_slot(service: Any, thread_id: str) -> None:
+    """Free the coder loop slot held by a finished or stopped thread."""
+    if service is None:
+        return
+    row = service.store.thread_owner(thread_id)
+    if row is None:
+        return
+    handle = str((row.get("state") or {}).get("loop_slot_handle") or "").strip()
+    if not handle:
+        return
+    from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
+    SCHEDULER.release(handle)
+    state = {**(row.get("state") or {})}
+    state.pop("loop_slot_handle", None)
+    service.store.update_thread_owner_state(thread_id, state)
 
 
 #: Live 2026-11-15: asked to give Grok a task, the General tried the brain
@@ -1248,6 +1314,8 @@ class CodingThreads:
                     # answer to the thread's own card continues the agent's turn.)
                     self._queue_state(session_id, origin="person")
             elif kind in WAKE_KINDS:
+                if kind == "turn_finished":
+                    _release_thread_slot(self._service or self._attach(), session_id)
                 self._dirty.add(session_id)
                 self._kick()
         elif session_id in self._owners and kind == "user_message":

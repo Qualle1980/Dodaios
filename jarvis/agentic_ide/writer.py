@@ -17,23 +17,19 @@ The order, and why each rung is where it is:
    tab, for work the assistant does on its own behalf. It resolves through
    ``resolve_tool_model_brain`` and nowhere else: a Tool Model pin that quietly
    landed on a coding CLI would make the setting meaningless.
-3. **``auto`` prefers the writer that answers soonest**: the pinned Tool
-   Model first, then the API-billed quality tier, then a connected coding
-   subscription. A brief written for a SPOKEN instruction sits on the voice
-   turn's critical path — the user is standing there, waiting for the text to
-   land in the pane — and a subscription CLI pays a cold process start before
-   it thinks at all. Measured live 2026-08-18 16:10: the CLI wrote a 1248-char
-   brief in 18.9 s, nearly all of it the spawn (an EMPTY answer from the same
-   CLI took 17-19 s in the same minute, against 5-6 s an hour earlier — the
-   start-up cost triples under load), while the Tool Model on the same box
-   wrote the same brief in 5 s warm. Until 2026-08-18 ``auto`` put the subscription
-   first because it is work the user has already paid for; it now writes under
-   ``auto`` only when nothing API-side qualifies — an install whose ONLY
-   credential is a coding CLI still gets its brief — and a user who wants the
-   plan spent on purpose pins ``subscription``. The Tool Model rung leads
-   because it is, by the Tool Model tab's own words, the model that "routes
-   spoken commands and starts background agents": a spoken instruction to a
-   pane is exactly that work.
+3. **``auto`` prefers a connected coding subscription first**, then the
+   pinned Tool Model, then the API-billed quality tier. Briefs are work the
+   user has already paid a plan for when a CLI is signed in; spending an API
+   key while that seat sits idle is the billing surprise this order removes.
+   The Tool Model and quality rungs still answer when no subscription
+   qualifies — an install with only an API key still gets its brief — and a
+   user who wants a specific rung pins ``tool_model``, ``api``, or
+   ``subscription``. A subscription CLI can pay a cold process start (measured
+   live 2026-08-18 16:10 at 18.9 s for a 1248-char brief, nearly all spawn);
+   that cost is accepted under ``auto`` because the alternative is billing a
+   key for work the plan already covers. Spoken turns that must not wait on a
+   CLI cold start pin ``tool_model`` or ``api``, or the spoken rescue path
+   skips the subscription with ``allow_subscription=False``.
 4. **Nothing qualifies → ``(None, "")``**, and the caller says so.
 
 The distinction users actually make here is "an API key I pay per token for"
@@ -213,13 +209,8 @@ def _resolve_writer_uncached(*, cli_timeout_s: float | None) -> tuple[Any | None
 
 
 # The ``auto`` order — and the order a dead call crosses over in. ONE tuple for
-# both on purpose: "who writes" and "who rescues" must never drift apart, and
-# both answer the same question the same way — which reachable writer delivers
-# the brief soonest without a demotion in quality. Direct API calls (the Tool
-# Model and the quality tier) have no process to cold-start; the subscription
-# CLI pays 5-19 s of spawn per brief (measured 2026-08-18, see the module
-# docstring) and therefore goes last in BOTH orders — the writer of last resort
-# under ``auto``, and the last rescue after a failed one.
+# both on purpose: "who writes" and "who rescues" must never drift apart.
+# Subscription first (already-paid plan), then Tool Model, then API quality.
 _AUTO_ORDER = ("subscription", "tool_model", "api")
 
 

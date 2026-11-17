@@ -11479,7 +11479,6 @@ class BrainManager:
         """
         from jarvis.brain.background_policy import (
             chat_fallback_providers,
-            keyless_local,
             login_state,
         )
         from jarvis.brain.resolver import _resolve_chain
@@ -11528,8 +11527,16 @@ class BrainManager:
             primary=override.provider,
         )
         stand_ins = [entry for entry in resolved if policy.permits(entry[0])]
-        cloud = [entry for entry in stand_ins if not keyless_local(entry[0])]
-        local = [entry for entry in stand_ins if keyless_local(entry[0])]
+        # Sort by card billing, not keyless_local: ollama stays "local" on the
+        # card even when it is blocklisted as an automatic seat successor, and
+        # a connected subscription seat must still answer before any local.
+        billing = {spec.id: provider_billing(spec) for spec in PROVIDERS}
+        cloud = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") != "local"
+        ]
+        local = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") == "local"
+        ]
         chain.extend(cloud)
         chain.extend(local)
         return list(dict.fromkeys(chain))

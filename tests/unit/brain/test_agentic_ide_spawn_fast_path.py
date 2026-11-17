@@ -824,22 +824,67 @@ async def test_voice_pure_open_still_opens_panes(
 
 
 async def test_pure_open_claude_uses_cheap_default_model(
-    manager: tuple[BrainManager, FakeBus], registry: Registry, tmp_path: Path
+    manager: tuple[BrainManager, FakeBus],
+    registry: Registry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pure open without a chosen model uses the CLI cheap default (Haiku)."""
+    """Pure open without a chosen model uses the live-list cheap default (Haiku)."""
+    import json
+
+    from jarvis.agentic_ide.model_lists import (
+        ModelListSources,
+        ModelListStore,
+        install_shared_store,
+    )
+
+    claude = tmp_path / "claude-catalog.json"
+    claude.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "fetchedAt": 1,
+                "staleAt": 2,
+                "catalog": {
+                    "config": {
+                        "models": [
+                            {
+                                "id": "claude-haiku-4-5-20251001",
+                                "display_name": "Haiku",
+                            },
+                            {
+                                "id": "claude-sonnet-5",
+                                "display_name": "Sonnet",
+                            },
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = ModelListStore(
+        store_path=tmp_path / "cli_model_lists.json",
+        sources=ModelListSources(claude_catalog_file=claude),
+        now=lambda: 1_000.0,
+    )
+    previous = install_shared_store(store)
     mgr, _bus = manager
     await _open(registry, tmp_path, 1)
 
-    reply = await mgr._run_agentic_ide_spawn_fast_path("Open two Claude Code terminals")
+    try:
+        reply = await mgr._run_agentic_ide_spawn_fast_path("Open two Claude Code terminals")
 
-    assert reply is not None
-    assert registry.session is not None
-    new_terms = registry.session.terminals[1:]
-    assert len(new_terms) == 2
-    for term in new_terms:
-        assert term.agent == "claude"
-        assert term.model == "claude-haiku-4-5-20251001"
-        assert term.effort == ""
+        assert reply is not None
+        assert registry.session is not None
+        new_terms = registry.session.terminals[1:]
+        assert len(new_terms) == 2
+        for term in new_terms:
+            assert term.agent == "claude"
+            assert term.model == "claude-haiku-4-5-20251001"
+            assert term.effort == ""
+    finally:
+        install_shared_store(previous)
 
 
 async def test_pure_open_honours_explicit_valid_model(

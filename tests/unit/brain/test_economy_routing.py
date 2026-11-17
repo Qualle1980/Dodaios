@@ -44,12 +44,8 @@ _SUBSTANTIVE = (
     "fuehre die tests aus",  # i18n-allow: simulated German user utterance
 )
 
-@pytest.fixture(autouse=True)
-def _ollama_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These turns assume an installed local runtime (Ollama gates its tool
-    capability on the binary since 2026-10-23)."""
-    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama")
-
+class _ToolCapableBrain:
+    supports_tools = True
 
 
 class _SpawnTool:
@@ -86,6 +82,20 @@ def _manager(primary: str = "chatgpt-web") -> tuple[BrainManager, _SpawnTool]:
         tool_executor=_Executor(spawn),  # type: ignore[arg-type]
     )
     mgr._active_name = primary  # type: ignore[attr-defined]
+    # Seat turns need a keyless local lead; ollama is blocklisted from that
+    # path, so seed a configured local-openai brain the seat filter permits.
+    if primary != "ollama":
+        _ = mgr._registry.available()
+        orig_fast = mgr._fast_model
+        orig_deep = mgr._deep_model
+        mgr._fast_model = (  # type: ignore[method-assign]
+            lambda name: "qwen2.5-7b" if name == "local-openai" else orig_fast(name)
+        )
+        mgr._deep_model = (  # type: ignore[method-assign]
+            lambda name: "qwen2.5-7b" if name == "local-openai" else orig_deep(name)
+        )
+        mgr._registry._classes["local-openai"] = object  # type: ignore[attr-defined]
+        mgr._brain_cache[("local-openai", "qwen2.5-7b")] = _ToolCapableBrain()
     return mgr, spawn
 
 

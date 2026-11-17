@@ -820,9 +820,12 @@ async def test_a_rejected_claim_is_corrected_and_then_accepted(chat):
     assert _finished(events)[-1]["status"] == "done"
 
 
-async def test_a_claim_that_stays_unproven_ends_honestly_after_two_corrections(chat):
-    """The bound is real: two correction waves, then the honest answer. A model
-    that keeps claiming a pass cannot spend the owner's money forever."""
+async def test_a_claim_that_stays_unproven_ends_honestly_after_one_correction(chat):
+    """The Instant correction budget is one wave (``MAX_CORRECTIONS``). A model
+    that keeps claiming a pass cannot spend the owner's money forever: after
+    Instant's one correction, the next rejection hands the review to Codex
+    (``codex_fallback``) or speaks the held-back honest line — never another
+    Instant correction loop."""
     pane = FakePane(name="T1")
     workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
@@ -834,7 +837,7 @@ async def test_a_claim_that_stays_unproven_ends_honestly_after_two_corrections(c
                 calls=(Call(delegate.name, {"terminal_id": "T1", "prompt": "Add subtract()."}),),
                 reply="Sent to T1.",
             ),
-            claim, claim, claim, claim,
+            claim, claim, claim,
         ],
         tools={delegate.name: delegate},
     )
@@ -844,14 +847,18 @@ async def test_a_claim_that_stays_unproven_ends_honestly_after_two_corrections(c
     )
     events = await _run(rig, CONTINUE_REQUEST)
 
-    kinds = [
-        e["payload"]["kind"] for e in events if e["kind"] == "notice"
+    notices = [
+        e["payload"] for e in events if e["kind"] == "notice"
         and e["payload"].get("kind") in {"delegation_correction", "delegation_unverified"}
     ]
-    assert kinds == ["delegation_correction", "delegation_correction", "delegation_unverified"]
-    # Three answering waves at most: the claim, two corrections. Nothing more.
+    kinds = [n["kind"] for n in notices]
+    # Instant correction once, then Codex takes the review (no Instant loop).
+    assert kinds == ["delegation_correction", "delegation_correction"], notices
+    assert notices[0].get("left") == 1 and notices[0].get("correcting")
+    assert notices[1].get("codex_fallback") is True
+    # Delegate wave + rejected claim + one Instant correction. Nothing more.
     chief: ScriptedChief = rig["chief"]
-    assert len(chief.calls) == 4, len(chief.calls)
+    assert len(chief.calls) == 3, len(chief.calls)
     assert len(delegate.briefs) == 1
     assert "PASS" not in _said(events).upper(), _said(events)
 

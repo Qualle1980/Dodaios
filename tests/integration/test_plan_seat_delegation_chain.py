@@ -92,13 +92,13 @@ def _infra() -> dict[str, Any]:
     ])
     manager._registry._loaded = True
     manager._registry._classes = {  # type: ignore[attr-defined]
-        "chatgpt-web": type(talker), "ollama": type(lead),
+        "chatgpt-web": type(talker), "local-openai": type(lead),
     }
     # Deterministic cache keys: no per-provider model, so (name, None).
     manager._fast_model = lambda name: None  # type: ignore[method-assign]
     manager._deep_model = lambda name: None  # type: ignore[method-assign]
     manager._brain_cache[("chatgpt-web", None)] = talker
-    manager._brain_cache[("ollama", None)] = lead
+    manager._brain_cache[("local-openai", None)] = lead
     return {"manager": manager, "talker": talker, "lead": lead, "tool": tool}
 
 
@@ -110,8 +110,8 @@ def test_the_local_lead_is_the_plan_seat_talkers_tool_turn() -> None:
 
     chain = manager._build_fallback_chain("fast")
 
-    assert manager._router_lead_key == ("ollama", None)
-    assert chain[0] == ("ollama", None), "the lead must answer first"
+    assert manager._router_lead_key == ("local-openai", None)
+    assert chain[0] == ("local-openai", None), "the lead must answer first"
     assert ("chatgpt-web", None) in chain, "the seat stays as the conversational fallback"
 
 
@@ -120,7 +120,7 @@ async def test_the_led_turn_runs_the_tool_and_returns_its_result() -> None:
     """End of the chain: the tool ran, and Jarvis got the agent's result."""
     infra = _infra()
     manager: BrainManager = infra["manager"]
-    manager._build_fallback_chain = lambda level: [("ollama", None)]  # type: ignore[assignment]
+    manager._build_fallback_chain = lambda level: [("local-openai", None)]  # type: ignore[assignment]
 
     answer = await manager.generate(f"Please {_TASK.lower()}")
 

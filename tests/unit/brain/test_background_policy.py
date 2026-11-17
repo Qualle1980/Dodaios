@@ -24,7 +24,9 @@ def _probe(states: dict[str, bool | None]):
 def test_cards_classify_billing():
     assert policy.subscription_capable("claude-cli")
     assert policy.subscription_capable("codex")
-    assert policy.keyless_local("ollama")
+    # Ollama is never an automatic keyless successor (Ahmad 2026-11-17).
+    assert not policy.keyless_local("ollama")
+    assert policy.keyless_local("local-openai")
     assert not policy.subscription_capable("openrouter")
     assert not policy.keyless_local("openrouter")
 

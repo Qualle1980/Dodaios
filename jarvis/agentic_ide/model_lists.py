@@ -97,39 +97,16 @@ class ModelListSources:
     codex_lister: CodexLister | None = None
 
 
-def _discover_codex_rows_sync() -> Sequence[Mapping[str, Any]] | None:
-    """Run ``model/list`` off any calling event loop (``asyncio.run`` is unsafe in-loop)."""
-    import concurrent.futures
-
-    from jarvis.agent_chat.cli_catalog import discover_codex_models
-    from jarvis.agent_chat.runner_cli import _account_env, _catalog_cwd, codex_argv_prefix
-
-    def _call() -> Sequence[Mapping[str, Any]] | None:
-        return discover_codex_models(
-            codex_argv_prefix(),
-            _account_env("codex"),
-            _catalog_cwd(),
-            timeout_s=CODEX_LIST_TIMEOUT_S,
-        )
-
-    try:
-        import asyncio
-
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return _call()
-    # Already inside an event loop (async tests / open_codex_pane): use a worker.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_call).result(timeout=CODEX_LIST_TIMEOUT_S + 5.0)
-
-
 def _production_codex_lister() -> Sequence[Mapping[str, Any]] | None:
     """Ask the installed Codex CLI via ``model/list`` (no coding turn).
 
     Uses the 15 s listing budget from research (the 8 s discovery default timed
-    out on this PC and poisoned confirmation for every id).
+    out on this PC and poisoned confirmation for every id). Imported from
+    ``agent_chat.codex_listing`` so this package never touches ``runner_cli``.
     """
-    rows = _discover_codex_rows_sync()
+    from jarvis.agent_chat.codex_listing import list_confirmed_codex_models
+
+    rows = list_confirmed_codex_models(timeout_s=CODEX_LIST_TIMEOUT_S)
     if rows is None:
         return None
     out: list[dict[str, Any]] = []
@@ -653,7 +630,14 @@ class ModelListStore:
                     loaded = json.loads(path.read_text(encoding="utf-8"))
                     if isinstance(loaded, dict):
                         existing = loaded
-                except (OSError, ValueError):
+                except (OSError, ValueError) as exc:
+                    # Corrupt or unreadable snapshot: start fresh for this write.
+                    log.warning(
+                        "model lists: ignored unreadable store %s while saving %s: %s",
+                        path,
+                        cli,
+                        exc,
+                    )
                     existing = {}
             existing[cli] = {
                 "read_at": result.read_at,
