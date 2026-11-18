@@ -293,6 +293,12 @@ ROUTER_TOOLS = frozenset({
     # safe-gated action — never a spawn, so it never enters a worker tool-set
     # (AP-5/AP-14). See ADR-0011 amendment "Inline web search".
     "search-web",
+    # Subscription plan usage (2026-11-18): read used/remaining percent for
+    # connected Claude / Codex / Grok Build seats via jarvis.agent_usage.
+    # Ask-only (hidden unless the utterance asks for usage/quota/limit);
+    # risk safe, never a spawn (AP-5/AP-14). See ADR-0011 amendment
+    # "agent-usage router tool".
+    "agent-usage",
 })
 
 # Phase 7.3 — self-mod tools are registered directly in the router loader in
@@ -661,6 +667,18 @@ def _load_tools_for_tier(
                 tools[name] = inst
         except Exception as exc:  # noqa: BLE001 — defensive, no tool block fail-stops the Brain
             log.debug("Self-mod tools not loadable (Phase 7.3): %s", exc)
+
+        # agent-usage: also register directly so a worktree that already imports
+        # this tree still offers the tool before the installed distribution's
+        # entry_points.txt is refreshed (importlib.metadata reads the install,
+        # not the worktree pyproject).
+        if "agent-usage" not in tools:
+            try:
+                from jarvis.plugins.tool.agent_usage import AgentUsageTool
+
+                register_tool(AgentUsageTool(), source="agent-usage", virtual=False)
+            except Exception as exc:  # noqa: BLE001 — never block the brain on one tool
+                log.debug("agent-usage tool not loadable: %s", exc)
 
     return tools
 

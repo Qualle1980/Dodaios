@@ -190,3 +190,62 @@ async def test_a_work_turn_keeps_the_task_shape(monkeypatch: pytest.MonkeyPatch)
     assert prompt.startswith("Aufgabe: Fuege der Datei bar.py")
     assert "Urspruengliche Nutzeranfrage: bau mir die funktion foo in bar.py" in prompt
     assert not is_informational_request(prompt)
+
+
+@pytest.mark.asyncio
+async def test_host_intent_json_never_stays_raw_when_project_mode_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Open-PR style question in project mode: host JSON must become text.
+
+    Live-m10 q3 streamed ``{"kind":"REPORT_PROGRESS",...}``. When the host
+    path returns None (fault), parse_route_decision treats that shape as
+    kind=self and used to leave the raw JSON as the answer. With project mode
+    on, the reply must be plain text.
+    """
+    from jarvis.host_controller import chat_bridge
+
+    chat_bridge.set_active_project("Feature X", "Qualle1980/Dodaios", data_dir=tmp_path)
+    monkeypatch.setattr(chat_bridge, "_default_data_dir", lambda: tmp_path)
+
+    def boom(_reply: str, **_kwargs: Any) -> None:
+        raise RuntimeError("host store unreachable")
+
+    monkeypatch.setattr(chat_bridge, "route_reply", boom)
+
+    reply = (
+        '{"kind":"REPORT_PROGRESS","intent_id":"dodaios-open-pull-requests",'
+        '"project":"Feature X"}'
+    )
+    out = await _route(
+        _Stub(),
+        reply,
+        "Wie viele offene Pull Requests hat der GitHub-Fork?",
+        language="de",
+        may_delegate=False,
+    )
+    assert out is not None
+    assert "{" not in out
+    assert "REPORT_PROGRESS" not in out
+    assert "Host-Aktion" in out
+
+
+@pytest.mark.asyncio
+async def test_host_intent_success_returns_plain_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from jarvis.host_controller import chat_bridge
+
+    chat_bridge.set_active_project("Feature X", "Qualle1980/Dodaios", data_dir=tmp_path)
+    monkeypatch.setattr(chat_bridge, "_default_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        chat_bridge,
+        "route_reply",
+        lambda _reply, **_kwargs: "Stand: 40 % abgenommen (2 von 5 Aufgaben), 1 in Arbeit.",
+    )
+
+    reply = '{"kind":"REPORT_PROGRESS","intent_id":"r1","project":"Feature X"}'
+    out = await _route(_Stub(), reply, "STATUS", language="de", may_delegate=False)
+    assert out is not None
+    assert out.startswith("Stand:")
+    assert "{" not in out

@@ -2032,6 +2032,11 @@ def test_router_tools_is_pure_dispatcher_set() -> None:
             "memory-search",
             "memory-history",
             "memory-topics",
+            # Subscription plan usage (2026-11-18): used/remaining percent
+            # for Claude / Codex / Grok Build seats via jarvis.agent_usage.
+            # Ask-only, safe, never a spawn (AP-5/AP-14). See ADR-0011
+            # amendment "agent-usage router tool".
+            "agent-usage",
         }
     )
     assert ROUTER_TOOLS == expected, (

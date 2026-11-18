@@ -882,6 +882,11 @@ create-skill = "jarvis.plugins.tool.create_skill:CreateSkillTool"
 describe-app-settings = "jarvis.plugins.tool.describe_app_settings:DescribeAppSettingsTool"
 switch-provider = "jarvis.plugins.tool.switch_provider:SwitchProviderTool"
 manage-mcp-server = "jarvis.plugins.tool.manage_mcp_server:ManageMcpServerTool"
+# Subscription plan usage (2026-11-18) — read used/remaining percent for
+# connected Claude / Codex / Grok Build seats from jarvis.agent_usage. Router-
+# tier, safe, ask-only (BrainManager hides it unless the utterance asks).
+# Never a spawn (AP-5/AP-14). See ADR-0011 amendment "agent-usage router tool".
+agent-usage = "jarvis.plugins.tool.agent_usage:AgentUsageTool"
 # Masked key preview (2026-05-31, user mandate) — speaks first 3 + last 3 chars of
 # a stored API key ("AIz...xQ2"), never the full value. monitor-tier (logged, no
 # nag). Narrow, safe exception to AP-2; the full-key refusal lives in router.py.

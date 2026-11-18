@@ -1595,3 +1595,37 @@ because `wiki-recall` was router-visible and in no voice catalog.
 - `tests/unit/brain/test_voice_catalog_vault.py` (all three in the voice
   catalog, safe tier, not action tools)
 - `tests/unit/brain/test_routing.py` (exact router set)
+
+## Amendment 2026-11-18 — gent-usage router tool
+
+**Status:** Amendment 2026-11-18
+
+gent-usage joins ROUTER_TOOLS. It reads used and remaining plan percent for
+connected Claude / Codex / Grok Build seats through jarvis.agent_usage.collect
+(the same figures the Accounts panel shows) and returns a plain-text report with
+an explicit live or cached source. Risk safe, read-only, never a spawn
+(AP-5/AP-14).
+
+### Context
+
+The M10 DevApp live test (2026-11-18) asked for Claude's weekly-limit percent.
+The model called ind-app-action, never reached gent_usage, and answered
+that it could not fetch the figure. The numbers already exist in-process; chat
+had no tool that returned them.
+
+### Decision
+
+- Entry point gent-usage → jarvis.plugins.tool.agent_usage:AgentUsageTool.
+- **Ask-only, structurally.** BrainManager._hide_agent_usage_tool_without_request
+  removes the tool unless jarvis.brain.agent_usage_gate.wants_agent_usage matches
+  the utterance (usage / quota / Wochenlimit / percent+provider). Ordinary turns
+  never see the schema, so remaining percent is not volunteered.
+- No estimation: unavailable seats are reported as unavailable; cached readings
+  stay labelled cached.
+
+### Regression guards
+
+- 	ests/unit/brain/test_agent_usage_gate.py
+- 	ests/unit/plugins/tool/test_agent_usage.py
+- 	ests/unit/brain/test_routing.py (gent-usage in ROUTER_TOOLS)
+- 	ests/unit/brain/test_text_only_delegation.py (host JSON never stays raw)

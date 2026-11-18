@@ -938,6 +938,9 @@ _SPAWN_TOOL_NAMES: frozenset[str] = frozenset({"spawn_worker", "multi_spawn"})
 # rule is that an artifact is something the user asks for, never something the
 # assistant decides an answer deserves.
 _ARTIFACT_TOOL_NAME: str = "create_artifact"
+# Subscription plan usage. Offered ONLY when the user asks for usage / quota /
+# remaining percent (see _hide_agent_usage_tool_without_request).
+_AGENT_USAGE_TOOL_NAME: str = "agent-usage"
 
 # Agentic-IDE pane tools that only make sense RELATIVE TO AN OPEN WORKSPACE.
 _AGENTIC_IDE_WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset({
@@ -7272,6 +7275,33 @@ class BrainManager:
             log.debug("artifact request gate failed", exc_info=True)
             return tools
 
+    def _hide_agent_usage_tool_without_request(
+        self, tools: dict[str, Tool], user_text: str
+    ) -> dict[str, Tool]:
+        """Drop ``agent-usage`` from every turn that did not ask for plan usage.
+
+        Plan percentages must not appear in ordinary answers. Hiding the tool
+        unless the utterance asks keeps those figures off the wire until the
+        user wants them (live-m10 2026-11-18: without a dedicated tool the
+        model guessed; with an always-visible tool it would volunteer the
+        numbers). Regex gate only (AP-11); any fault leaves the tools alone.
+        """
+        if not isinstance(tools, dict) or _AGENT_USAGE_TOOL_NAME not in tools:
+            return tools
+        try:
+            from jarvis.brain.agent_usage_gate import wants_agent_usage  # noqa: PLC0415
+
+            if wants_agent_usage(user_text or ""):
+                return tools
+            return {
+                name: tool
+                for name, tool in tools.items()
+                if name != _AGENT_USAGE_TOOL_NAME
+            }
+        except Exception:  # noqa: BLE001 — gate must never blind the brain
+            log.debug("agent-usage request gate failed", exc_info=True)
+            return tools
+
     @staticmethod
     def _desktop_episode_is_live() -> bool:
         """True while a Computer-Use mission is running or has just ended.
@@ -11020,8 +11050,10 @@ class BrainManager:
         # Project mode: a reply that is one host intent is executed by the host.
         # Anything else falls through to the envelope handling below. A host
         # fault is logged and never breaks the chat.
+        from jarvis.host_controller.chat_bridge import active_project, parse_host_intent
         from jarvis.host_controller.chat_bridge import route_reply as host_route_reply
 
+        host_intent = parse_host_intent(reply)
         try:
             hosted = await asyncio.to_thread(host_route_reply, reply)
         except Exception as exc:  # noqa: BLE001 - a host fault must not break chat
@@ -11029,6 +11061,15 @@ class BrainManager:
             hosted = None
         if hosted is not None:
             return hosted
+        # A recognised host intent must never reach the user as raw JSON.
+        # Commit 117eaa63b3 opened this path for tool-capable leads, but when
+        # the host returned None (fault, or parse_route_decision treating the
+        # intent as kind=self) the original JSON stayed as the answer.
+        if host_intent is not None and active_project() is not None:
+            return (
+                "Die Host-Aktion konnte nicht als Text ausgeführt werden. "  # i18n-allow
+                "Bitte stelle die Frage noch einmal in normalen Worten."  # i18n-allow
+            )
 
         from jarvis.plugins.brain.chatgpt_web import parse_route_decision
 
@@ -13025,6 +13066,12 @@ class BrainManager:
                 _turn_tools = self._hide_artifact_tool_without_request(
                     _turn_tools, user_text
                 )
+            # Plan usage figures only when the user asked for them — never as
+            # ambient colour on an ordinary answer (M10 live 2026-11-18).
+            if isinstance(_turn_tools, dict):
+                _turn_tools = self._hide_agent_usage_tool_without_request(
+                    _turn_tools, user_text
+                )
             # A referential follow-up that inherited a currently registered
             # plugin/MCP tool remains inline even when that tool has no usage
             # card. The explicit heavy-work and artifact requests above retain
@@ -13133,8 +13180,23 @@ class BrainManager:
             # tool, the result is surfaced by generate_stream's final reconciliation
             # (nothing was yielded → it yields holder["final"]); if it picks none,
             # the chosen talker streams the answer normally after the fall-through.
+            #
+            # Project mode: also hold back streaming. Host intents are one JSON
+            # object that is executed after dispatch; streaming that JSON to the
+            # chat (live-m10 q3) shows the user a host instruction before the
+            # post-route rewrite can replace it. The final reply still lands via
+            # ResponseGenerated / chat_store after host routing.
             _is_router_lead = self._router_lead_key == (prov_name, model)
-            _attempt_consumer = None if _is_router_lead else text_consumer
+            try:
+                from jarvis.host_controller.chat_bridge import active_project as _proj_on
+
+                _hold_for_project = _proj_on() is not None
+            except Exception:  # noqa: BLE001 — streaming hold must never break a turn
+                log.debug("project mode stream hold check failed", exc_info=True)
+                _hold_for_project = False
+            _attempt_consumer = (
+                None if (_is_router_lead or _hold_for_project) else text_consumer
+            )
             attempt_streamed = False
             attempt_had_tool_calls = False
             if turn_override is not None and _attempt_consumer is not None:
@@ -13698,7 +13760,10 @@ class BrainManager:
         # Project mode checks the reply whichever brain led the turn: the host's
         # intent format is in the prompt for every brain, so a tool-capable
         # lead must be able to hand an intent to the host too.
-        from jarvis.host_controller.chat_bridge import active_project
+        from jarvis.host_controller.chat_bridge import (
+            active_project,
+            parse_host_intent,
+        )
 
         project_on = active_project() is not None
         if (
@@ -13714,6 +13779,12 @@ class BrainManager:
             )
             if routed is not None:
                 response_text = routed
+            elif project_on and parse_host_intent(response_text) is not None:
+                # Safety net: host-shaped JSON must never be the stored answer.
+                response_text = (
+                    "Die Host-Aktion konnte nicht als Text ausgeführt werden. "  # i18n-allow
+                    "Bitte stelle die Frage noch einmal in normalen Worten."  # i18n-allow
+                )
 
         # 4. History + Events
         if use_history:
