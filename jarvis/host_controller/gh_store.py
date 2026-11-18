@@ -358,7 +358,6 @@ class GhProjectStore:
                 *self._repo_args(),
                 "--json",
                 "number,title,body,labels,milestone,state,comments",
-                "--comments",
             ]
         )
         if not isinstance(payload, dict):

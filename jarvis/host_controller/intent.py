@@ -142,11 +142,21 @@ def parse_intent(text: str) -> ParsedIntent:
             raise IntentParseError("PLAN requires title")
         if not isinstance(tasks, list) or not tasks:
             raise IntentParseError("PLAN requires a non-empty tasks list")
-        for item in tasks:
+        for position, item in enumerate(tasks):
             if not isinstance(item, dict):
                 raise IntentParseError("each PLAN task must be an object")
-            if set(item) - {"title", "acceptance", "depends_on"}:
+            if set(item) - {"title", "acceptance", "depends_on", "depends_on_tasks"}:
                 raise IntentParseError("unknown key in PLAN task")
+            if "depends_on_tasks" in item:
+                idxs = item["depends_on_tasks"]
+                if not isinstance(idxs, list) or not all(
+                    isinstance(i, int) and not isinstance(i, bool) for i in idxs
+                ):
+                    raise IntentParseError("PLAN task depends_on_tasks must be list[int]")
+                if any(i < 0 or i >= len(tasks) or i >= position for i in idxs):
+                    raise IntentParseError(
+                        "depends_on_tasks must name an earlier task of the same plan"
+                    )
             if not isinstance(item.get("title"), str) or not item["title"].strip():
                 raise IntentParseError("PLAN task title is required")
             if "acceptance" in item and not isinstance(item["acceptance"], str):

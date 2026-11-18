@@ -210,6 +210,20 @@ class HostController:
                     # Only a store without set_depends_on lands here (the fakes).
                     issue.depends_on = [int(n) for n in deps]  # type: ignore[attr-defined]
             created.append(int(issue.number))
+        # depends_on_tasks names earlier tasks of the SAME plan by index. Issue
+        # numbers are unknown until the issues exist, so they resolve here.
+        for position, task in enumerate(data["tasks"]):
+            by_index = [created[i] for i in (task.get("depends_on_tasks") or [])]
+            if not by_index:
+                continue
+            setter = getattr(self.store, "set_depends_on", None)
+            if callable(setter):
+                setter(project, created[position], by_index)
+            else:
+                # Only a store without set_depends_on lands here (the fakes).
+                issue_obj = self.store.get_issue(project, created[position])
+                if issue_obj is not None:
+                    issue_obj.depends_on = by_index  # type: ignore[attr-defined]
         self.audit.append(
             intent_id=intent.intent_id,
             action="plan_created",

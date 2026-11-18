@@ -50,7 +50,12 @@ def is_risky_intent(intent: ParsedIntent) -> bool:
 def approval_question(intent: ParsedIntent) -> str:
     kind = intent.kind
     summary = ""
-    if kind == "ASSIGN_TASK":
+    if kind == "PLAN":
+        raw_tasks = intent.data.get("tasks") or []
+        titles = [str(t.get("title") or "") for t in raw_tasks if isinstance(t, dict)]
+        summary = f"{intent.data.get('title') or ''}: " + "; ".join(titles)
+        summary = summary[:200]
+    elif kind == "ASSIGN_TASK":
         summary = str(intent.data.get("task") or "")[:200]
     elif kind == "ACCEPT_TASK":
         summary = f"accept #{intent.data.get('issue_number')} @ {intent.data.get('commit_sha')}"

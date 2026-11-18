@@ -290,3 +290,21 @@ def test_live_gh_project_store_roundtrip() -> None:
     assert again.worker == "claude"
     snap = store.snapshot()
     assert title in snap["milestones"]
+
+
+def test_issue_view_never_combines_json_and_comments_flags() -> None:
+    """gh rejects `issue view --json ... --comments`; the live store must not send it."""
+    runner = ScriptedGhRunner()
+    runner.enqueue(
+        ScriptedGhResult(
+            stdout=_json(
+                {"number": 1, "title": "t", "body": "", "labels": [], "milestone": None,
+                 "state": "OPEN", "comments": []}
+            )
+        )
+    )
+    store = GhProjectStore(repo="acme/demo", runner=runner)
+    store.get_issue("demo", 1)
+    view = next(call.args for call in runner.calls if call.args[:2] == ["issue", "view"])
+    assert "--json" in view
+    assert "--comments" not in view
