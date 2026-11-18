@@ -34,6 +34,9 @@ def handle_instant_text(
     run_dir: Path | None = None,
     host: HostController | None = None,
     max_runs_per_project: int = 50,
+    code_search: Any | None = None,
+    pr_search: Any | None = None,
+    memory_bridge: Any | None = None,
 ) -> HostResult:
     """Parse Instant output, validate project, execute one intent, write progress.
 
@@ -62,6 +65,10 @@ def handle_instant_text(
             max_runs_per_project=max_runs_per_project,
             progress_path=run_path / "progress.md",
             progress_title=f"host controller ({project})",
+            report_path=run_path / "report.md",
+            code_search=code_search,
+            pr_search=pr_search,
+            memory_bridge=memory_bridge,
         )
     else:
         # Keep audit in the run folder when a pre-built host is reused.

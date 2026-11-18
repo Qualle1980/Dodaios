@@ -145,12 +145,18 @@ def parse_intent(text: str) -> ParsedIntent:
         for item in tasks:
             if not isinstance(item, dict):
                 raise IntentParseError("each PLAN task must be an object")
-            if set(item) - {"title", "acceptance"}:
+            if set(item) - {"title", "acceptance", "depends_on"}:
                 raise IntentParseError("unknown key in PLAN task")
             if not isinstance(item.get("title"), str) or not item["title"].strip():
                 raise IntentParseError("PLAN task title is required")
             if "acceptance" in item and not isinstance(item["acceptance"], str):
                 raise IntentParseError("PLAN task acceptance must be a string")
+            if "depends_on" in item:
+                deps = item["depends_on"]
+                if not isinstance(deps, list) or not all(
+                    isinstance(n, int) for n in deps
+                ):
+                    raise IntentParseError("PLAN task depends_on must be list[int]")
 
     if kind == "ASSIGN_TASK":
         if not isinstance(data.get("issue_number"), int):
@@ -163,6 +169,10 @@ def parse_intent(text: str) -> ParsedIntent:
         if "subagent_kind" in data and data["subagent_kind"] is not None:
             if not isinstance(data["subagent_kind"], str):
                 raise IntentParseError("subagent_kind must be a string or null")
+        if "files" in data and data["files"] is not None:
+            files = data["files"]
+            if not isinstance(files, list) or not all(isinstance(p, str) for p in files):
+                raise IntentParseError("ASSIGN_TASK files must be list[str]")
 
     if kind == "REQUEST_REVIEW":
         if not isinstance(data.get("issue_number"), int):

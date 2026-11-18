@@ -14,6 +14,16 @@ from typing import Any
 
 from jarvis.host_controller.audit import AuditLog
 from jarvis.host_controller.budget import ProjectBudget
+from jarvis.host_controller.deps import (
+    overlapping_files,
+    ready_issue_numbers,
+    unmet_dependencies,
+)
+from jarvis.host_controller.final_report import (
+    all_accepted,
+    format_final_report,
+    write_final_report,
+)
 from jarvis.host_controller.gates import (
     GateBook,
     can_accept,
@@ -21,6 +31,7 @@ from jarvis.host_controller.gates import (
     require_commit_for_review,
 )
 from jarvis.host_controller.intent import IntentParseError, ParsedIntent, parse_intent
+from jarvis.host_controller.research import collect_research, format_research_block
 from jarvis.host_controller.store import LocalCache, ProjectStore
 from jarvis.host_controller.types import MAX_FIX_ROUNDS
 
@@ -47,6 +58,10 @@ class HostController:
         merge_allowed: bool = True,
         progress_path: Path | None = None,
         progress_title: str | None = None,
+        report_path: Path | None = None,
+        code_search: Any | None = None,
+        pr_search: Any | None = None,
+        memory_bridge: Any | None = None,
     ) -> None:
         self.store = store
         self.workers = workers
@@ -57,13 +72,17 @@ class HostController:
         self.merge_allowed = merge_allowed
         self.progress_path = Path(progress_path) if progress_path is not None else None
         self.progress_title = progress_title
+        self.report_path = Path(report_path) if report_path is not None else None
+        self.code_search = code_search
+        self.pr_search = pr_search
+        self.memory_bridge = memory_bridge
         self.cache.rebuild(store)
 
     def recover(self) -> list[dict[str, Any]]:
         """Rebuild local cache from GitHub; in-progress without a live process → needs-check."""
         self.cache.rebuild(self.store)
         changed: list[dict[str, Any]] = []
-        milestones = (self.cache.data.get("milestones") or {})
+        milestones = self.cache.data.get("milestones") or {}
         for title, raw in milestones.items():
             for issue_raw in (raw.get("issues") or {}).values():
                 number = int(issue_raw["number"])
@@ -145,9 +164,34 @@ class HostController:
         data = intent.data
         project = str(data["project"]).strip()
         title = str(data.get("title") or project).strip()
+        research = collect_research(
+            title=title,
+            tasks=list(data.get("tasks") or []),
+            code_search=self.code_search,
+            pr_search=self.pr_search,
+        )
+        research_block = format_research_block(research)
         existing = self.store.get_milestone(project)
         if existing is None:
-            self.store.create_milestone(project, description=title)
+            self.store.create_milestone(project, description=research_block)
+        else:
+            updater = getattr(self.store, "update_milestone_description", None)
+            if callable(updater):
+                prior = str(getattr(existing, "description", "") or "").strip()
+                merged = f"{prior.rstrip()}\n\n{research_block}" if prior else research_block
+                updater(project, merged)
+            else:
+                # Best-effort: recreate description only when empty.
+                if not str(getattr(existing, "description", "") or "").strip():
+                    try:
+                        existing.description = research_block  # type: ignore[attr-defined]
+                    except (AttributeError, TypeError) as exc:
+                        # A read-only record cannot carry the research; say so.
+                        self.audit.append(
+                            intent_id=intent.intent_id,
+                            action="research_not_stored",
+                            detail={"project": project, "reason": str(exc)},
+                        )
         created: list[int] = []
         for task in data["tasks"]:
             body = str(task.get("acceptance") or "").strip()
@@ -157,17 +201,34 @@ class HostController:
                 body or "acceptance criteria TBD",
                 status="planned",
             )
+            deps = task.get("depends_on") or []
+            if deps:
+                setter = getattr(self.store, "set_depends_on", None)
+                if callable(setter):
+                    setter(project, int(issue.number), [int(n) for n in deps])
+                else:
+                    # Only a store without set_depends_on lands here (the fakes).
+                    issue.depends_on = [int(n) for n in deps]  # type: ignore[attr-defined]
             created.append(int(issue.number))
         self.audit.append(
             intent_id=intent.intent_id,
             action="plan_created",
-            detail={"project": project, "issues": created},
+            detail={
+                "project": project,
+                "issues": created,
+                "research": research,
+            },
         )
         return HostResult(
             ok=True,
             kind="PLAN",
             intent_id=intent.intent_id,
-            data={"project": project, "issues": created},
+            data={
+                "project": project,
+                "issues": created,
+                "research": research,
+                "research_summary": research_block,
+            },
         )
 
     def _assign(self, intent: ParsedIntent) -> HostResult:
@@ -177,6 +238,7 @@ class HostController:
         worker = str(data["worker"])
         allow_subagents = bool(data.get("allow_subagents", False))
         subagent_kind = data.get("subagent_kind")
+        files = [str(p) for p in (data.get("files") or []) if str(p).strip()]
         issue = self.store.get_issue(project, number)
         if issue is None:
             return HostResult(
@@ -185,6 +247,31 @@ class HostController:
                 intent_id=intent.intent_id,
                 error=f"issue #{number} not found",
             )
+        issues = list(self.store.list_issues(project))
+        by_number = {int(getattr(item, "number", 0)): item for item in issues}
+        unmet = unmet_dependencies(issue, issues_by_number=by_number)
+        if unmet:
+            return HostResult(
+                ok=False,
+                kind="ASSIGN_TASK",
+                intent_id=intent.intent_id,
+                error=f"dependencies not accepted: {unmet}",
+                data={"unmet_dependencies": unmet},
+            )
+        overlap = overlapping_files(
+            candidate_files=files or list(getattr(issue, "files", None) or []),
+            issues=issues,
+            skip_number=number,
+        )
+        if overlap:
+            detail = ", ".join(f"#{num}:{path}" for num, path in overlap)
+            return HostResult(
+                ok=False,
+                kind="ASSIGN_TASK",
+                intent_id=intent.intent_id,
+                error=f"files overlap in-progress work: {detail}",
+                data={"overlap": [{"issue": n, "path": p} for n, p in overlap]},
+            )
         if not self.budget.consume(project):
             return HostResult(
                 ok=False,
@@ -192,6 +279,10 @@ class HostController:
                 intent_id=intent.intent_id,
                 error="per-project run budget exhausted",
             )
+        if files:
+            setter = getattr(self.store, "set_files", None)
+            if callable(setter):
+                setter(project, number, files)
         self.store.set_worker(
             project,
             number,
@@ -306,8 +397,7 @@ class HostController:
         if pass_verdict and reviewed_sha and reviewed_sha != sha:
             pass_verdict = False
             findings = list(findings) + [
-                f"review SHA {reviewed_sha} differs from requested SHA {sha}; "
-                "treated as no review"
+                f"review SHA {reviewed_sha} differs from requested SHA {sha}; treated as no review"
             ]
         if pass_verdict and recorded and reviewed_sha and reviewed_sha != recorded:
             pass_verdict = False
@@ -518,11 +608,34 @@ class HostController:
             action="accepted",
             detail={"project": project, "issue_number": number, "commit_sha": sha},
         )
+        if self.memory_bridge is not None:
+            remember = getattr(self.memory_bridge, "remember_decision", None)
+            if callable(remember):
+                remember(
+                    f"Accepted {project} issue #{number} commit {sha} tests_green={tests_green}"
+                )
+        report_written = False
+        progress = self.store.progress(project)
+        issues = list(self.store.list_issues(project))
+        if self.report_path is not None and all_accepted(progress, issues):
+            markdown = format_final_report(project=project, issues=issues, progress=progress)
+            write_final_report(self.report_path, markdown)
+            report_written = True
+            self.audit.append(
+                intent_id=intent.intent_id,
+                action="final_report",
+                detail={"path": str(self.report_path), "percent": progress.get("percent")},
+            )
         return HostResult(
             ok=True,
             kind="ACCEPT_TASK",
             intent_id=intent.intent_id,
-            data={"issue_number": number, "status": "accepted", "commit_sha": sha},
+            data={
+                "issue_number": number,
+                "status": "accepted",
+                "commit_sha": sha,
+                "final_report": report_written,
+            },
         )
 
     def _blocked(self, intent: ParsedIntent) -> HostResult:
@@ -554,16 +667,20 @@ class HostController:
     def _progress(self, intent: ParsedIntent) -> HostResult:
         project = str(intent.data["project"]).strip()
         progress = self.store.progress(project)
+        issues = list(self.store.list_issues(project))
+        ready = ready_issue_numbers(issues)
+        payload = dict(progress)
+        payload["ready"] = ready
         self.audit.append(
             intent_id=intent.intent_id,
             action="progress",
-            detail={"project": project, **progress},
+            detail={"project": project, **payload},
         )
         return HostResult(
             ok=True,
             kind="REPORT_PROGRESS",
             intent_id=intent.intent_id,
-            data=dict(progress),
+            data=payload,
         )
 
 

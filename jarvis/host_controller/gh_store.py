@@ -48,6 +48,8 @@ class HostIssue:
     worker: str | None = None
     subagent_kind: str | None = None
     review_pass_sha: str | None = None
+    depends_on: list[int] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
     state_comment_id: int | None = None
@@ -119,7 +121,11 @@ def _render_state_block(
     subagent_kind: str | None,
     fix_rounds: int,
     review_pass_sha: str | None = None,
+    depends_on: list[int] | None = None,
+    files: list[str] | None = None,
 ) -> str:
+    deps = ",".join(str(int(n)) for n in (depends_on or []))
+    file_list = ",".join(str(p).replace("\\", "/") for p in (files or []))
     return (
         f"{STATE_MARKER_START}\n"
         f"commit_sha: {commit_sha or ''}\n"
@@ -127,8 +133,27 @@ def _render_state_block(
         f"subagent_kind: {subagent_kind or ''}\n"
         f"fix_rounds: {int(fix_rounds)}\n"
         f"review_pass_sha: {review_pass_sha or ''}\n"
+        f"depends_on: {deps}\n"
+        f"files: {file_list}\n"
         f"{STATE_MARKER_END}"
     )
+
+
+def _parse_int_list(raw: str) -> list[int]:
+    out: list[int] = []
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            out.append(int(part))
+        except ValueError:
+            continue
+    return out
+
+
+def _parse_str_list(raw: str) -> list[str]:
+    return [part.strip() for part in (raw or "").split(",") if part.strip()]
 
 
 def _status_from_labels(labels: list[str]) -> str:
@@ -442,6 +467,46 @@ class GhProjectStore:
         self._upsert_state_comment(issue)
         return issue
 
+    def update_milestone_description(self, title: str, description: str) -> HostMilestone:
+        ms = self.get_milestone(title)
+        if ms is None:
+            raise KeyError(f"milestone not found: {title}")
+        self._run_json(
+            [
+                "api",
+                self._api_path(f"milestones/{ms.number}"),
+                "-X",
+                "PATCH",
+                "-f",
+                f"description={description}",
+            ]
+        )
+        ms.description = description
+        return ms
+
+    def set_depends_on(
+        self, milestone_title: str, number: int, depends_on: list[int]
+    ) -> HostIssue:
+        issue = self._require_issue(milestone_title, number)
+        issue.depends_on = [int(n) for n in depends_on]
+        self._upsert_state_comment(issue)
+        return issue
+
+    def set_files(
+        self, milestone_title: str, number: int, files: list[str]
+    ) -> HostIssue:
+        issue = self._require_issue(milestone_title, number)
+        issue.files = [str(path) for path in files]
+        self._upsert_state_comment(issue)
+        return issue
+
+    def ready_issues(self, milestone_title: str) -> list[HostIssue]:
+        from jarvis.host_controller.deps import ready_issue_numbers
+
+        issues = self.list_issues(milestone_title)
+        ready = set(ready_issue_numbers(issues))
+        return [issue for issue in issues if issue.number in ready]
+
     def progress(self, milestone_title: str) -> dict[str, Any]:
         issues = self.list_issues(milestone_title)
         planned = len(issues)
@@ -491,6 +556,8 @@ class GhProjectStore:
                         "worker": issue.worker,
                         "subagent_kind": issue.subagent_kind,
                         "review_pass_sha": issue.review_pass_sha,
+                        "depends_on": list(issue.depends_on),
+                        "files": list(issue.files),
                         "labels": list(issue.labels),
                         "comments": list(issue.comments),
                     }
@@ -560,6 +627,8 @@ class GhProjectStore:
             fix_rounds = int(state.get("fix_rounds") or 0)
         except ValueError:
             fix_rounds = 0
+        depends_on = _parse_int_list(state.get("depends_on") or "")
+        files = _parse_str_list(state.get("files") or "")
         closed = str(payload.get("state") or "").upper() in {"CLOSED", "CLOSE"}
         return HostIssue(
             number=int(payload["number"]),
@@ -571,6 +640,8 @@ class GhProjectStore:
             worker=worker,
             subagent_kind=subagent_kind,
             review_pass_sha=review_pass_sha,
+            depends_on=depends_on,
+            files=files,
             labels=labels,
             comments=comment_bodies,
             state_comment_id=state_comment_id,
@@ -584,6 +655,8 @@ class GhProjectStore:
             subagent_kind=issue.subagent_kind,
             fix_rounds=issue.fix_rounds,
             review_pass_sha=issue.review_pass_sha,
+            depends_on=list(issue.depends_on or []),
+            files=list(issue.files or []),
         )
         if issue.state_comment_id is not None:
             self._run_json(

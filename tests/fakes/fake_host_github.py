@@ -33,6 +33,8 @@ class FakeIssue:
     worker: str | None = None
     subagent_kind: str | None = None
     review_pass_sha: str | None = None
+    depends_on: list[int] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
 
@@ -66,6 +68,14 @@ class FakeGitHubProjectStore:
         self._next_milestone += 1
         self.milestones[key] = ms
         self.actions.append({"op": "create_milestone", "title": title})
+        return ms
+
+    def update_milestone_description(self, title: str, description: str) -> FakeMilestone:
+        ms = self.milestones[title.strip()]
+        ms.description = description
+        self.actions.append(
+            {"op": "update_milestone_description", "title": title, "description": description}
+        )
         return ms
 
     def create_issue(
@@ -188,11 +198,48 @@ class FakeGitHubProjectStore:
         )
         return issue
 
+    def set_depends_on(
+        self, milestone_title: str, number: int, depends_on: list[int]
+    ) -> FakeIssue:
+        issue = self._require_issue(milestone_title, number)
+        issue.depends_on = [int(n) for n in depends_on]
+        self.actions.append(
+            {
+                "op": "set_depends_on",
+                "milestone": milestone_title,
+                "number": number,
+                "depends_on": list(issue.depends_on),
+            }
+        )
+        return issue
+
+    def set_files(
+        self, milestone_title: str, number: int, files: list[str]
+    ) -> FakeIssue:
+        issue = self._require_issue(milestone_title, number)
+        issue.files = [str(path) for path in files]
+        self.actions.append(
+            {
+                "op": "set_files",
+                "milestone": milestone_title,
+                "number": number,
+                "files": list(issue.files),
+            }
+        )
+        return issue
+
     def list_issues(self, milestone_title: str) -> list[FakeIssue]:
         ms = self.get_milestone(milestone_title)
         if ms is None:
             return []
         return sorted(ms.issues.values(), key=lambda item: item.number)
+
+    def ready_issues(self, milestone_title: str) -> list[FakeIssue]:
+        from jarvis.host_controller.deps import ready_issue_numbers
+
+        issues = self.list_issues(milestone_title)
+        ready = set(ready_issue_numbers(issues))
+        return [issue for issue in issues if issue.number in ready]
 
     def progress(self, milestone_title: str) -> dict[str, Any]:
         issues = self.list_issues(milestone_title)
@@ -226,6 +273,8 @@ class FakeGitHubProjectStore:
                         "worker": issue.worker,
                         "subagent_kind": issue.subagent_kind,
                         "review_pass_sha": issue.review_pass_sha,
+                        "depends_on": list(issue.depends_on),
+                        "files": list(issue.files),
                         "labels": list(issue.labels),
                         "comments": list(issue.comments),
                     }
@@ -255,6 +304,8 @@ class FakeGitHubProjectStore:
                     worker=issue_raw.get("worker"),
                     subagent_kind=issue_raw.get("subagent_kind"),
                     review_pass_sha=issue_raw.get("review_pass_sha"),
+                    depends_on=[int(n) for n in (issue_raw.get("depends_on") or [])],
+                    files=[str(p) for p in (issue_raw.get("files") or [])],
                     labels=list(issue_raw.get("labels") or []),
                     comments=list(issue_raw.get("comments") or []),
                 )
