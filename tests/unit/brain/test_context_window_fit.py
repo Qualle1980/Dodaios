@@ -244,9 +244,9 @@ class TestContextOverflowCause:
     def test_overflow_never_dead_lists_the_provider(self) -> None:
         assert "context_overflow" not in _DEAD_LIST_KINDS
 
-    def test_a_plain_400_still_falls_through(self) -> None:
+    def test_a_plain_400_is_a_model_error_not_overflow(self) -> None:
         kind = _classify_provider_error("Error code: 400 - bad request", default="call_fail")
-        assert kind == "call_fail"
+        assert kind == "model_error"
 
     def test_spoken_cause_names_the_size_not_the_network(self) -> None:
         errors = [("ollama", "qwen3.8-16gb:latest", "context_overflow", _LIVE_OLLAMA_400)]
