@@ -18,6 +18,7 @@ for in a reply (or what the user approved).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,8 @@ from jarvis.host_controller.state_package import (
     looks_like_status_request,
 )
 from jarvis.host_controller.workers import build_live_host_workers
+
+log = logging.getLogger(__name__)
 
 STATE_NAME = "host_active_project.json"
 _SKILL_PATH = Path(__file__).with_name("instant_skill.md")
@@ -71,7 +74,8 @@ def set_active_project(project: str, repo: str, *, data_dir: Path | None = None)
             raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 existing = raw
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            log.warning("host active-project state unreadable at %s: %s", path, exc)
             existing = {}
     state = {**existing, "project": project, "repo": repo}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,8 @@ def active_project(*, data_dir: Path | None = None) -> dict[str, Any] | None:
     path = _state_path(data_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        log.warning("host active-project state unreadable at %s: %s", path, exc)
         return None
     if not isinstance(raw, dict):
         return None
@@ -296,6 +301,7 @@ def route_reply(
     try:
         parsed = parse_intent(intent_text)
     except IntentParseError as exc:
+        log.warning("host chat bridge rejected intent: %s", exc)
         return f"Nicht ausgeführt: {exc}"  # i18n-allow
 
     if is_risky_intent(parsed):

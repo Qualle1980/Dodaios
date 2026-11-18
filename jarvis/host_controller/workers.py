@@ -291,7 +291,8 @@ def _ensure_worktree(repo_root: Path, work_root: Path, issue_number: int) -> Pat
 def _read_head_sha(worktree: Path) -> str | None:
     try:
         sha = _git(["rev-parse", "HEAD"], cwd=worktree)
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.warning("host worker: git rev-parse HEAD failed in %s: %s", worktree, exc)
         return None
     return sha or None
 
@@ -299,7 +300,8 @@ def _read_head_sha(worktree: Path) -> str | None:
 def _commit_if_dirty(worktree: Path, message: str) -> str | None:
     try:
         status = _git(["status", "--porcelain"], cwd=worktree)
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.warning("host worker: git status failed in %s: %s", worktree, exc)
         return _read_head_sha(worktree)
     if status.strip():
         try:
@@ -369,7 +371,7 @@ async def _drain_worker_events(agen: Any) -> list[Any]:
 def _run_async(coro: Any) -> Any:
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
+    except RuntimeError:  # no running loop — asyncio.get_running_loop contract
         loop = None
     if loop is not None and loop.is_running():
         # Host is sync; nest when already inside an event loop (rare in tests).
@@ -594,8 +596,8 @@ def _parse_review_text(text: str, *, fallback_sha: str) -> tuple[bool, list[str]
                 findings = [str(findings)]
             findings = [str(item) for item in findings]
             return verdict_raw == "PASS", findings
-        except ValueError:
-            pass
+        except ValueError as exc:
+            log.warning("host review JSON fragment unparseable; using text heuristics: %s", exc)
     low = text.lower()
     if "pass" in low and "fail" not in low:
         return True, []

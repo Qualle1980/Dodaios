@@ -110,6 +110,7 @@ class HostController:
         try:
             intent = parse_intent(text)
         except IntentParseError as exc:
+            log.warning("host rejected intent: %s", exc)
             self.audit.append(
                 intent_id=None,
                 action="intent_rejected",
@@ -357,6 +358,7 @@ class HostController:
         try:
             sha = require_commit_for_review(str(data.get("commit_sha") or ""))
         except ValueError as exc:
+            log.warning("host review refused missing commit: %s", exc)
             return HostResult(
                 ok=False,
                 kind="REQUEST_REVIEW",

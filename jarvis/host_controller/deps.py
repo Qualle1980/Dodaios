@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 def issue_depends_on(issue: Any) -> list[int]:
@@ -11,7 +14,8 @@ def issue_depends_on(issue: Any) -> list[int]:
     for item in raw:
         try:
             out.append(int(item))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            log.warning("host deps: skipping non-int depends_on entry %r: %s", item, exc)
             continue
     return out
 

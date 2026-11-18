@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,19 @@ def test_set_rejects_a_repo_without_owner(tmp_path: Path) -> None:
 def test_a_broken_state_file_means_project_mode_is_off(tmp_path: Path) -> None:
     (tmp_path / "host_active_project.json").write_text("{not json", encoding="utf-8")
     assert active_project(data_dir=tmp_path) is None
+
+
+def test_broken_state_file_is_logged(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (tmp_path / "host_active_project.json").write_text("{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="jarvis.host_controller.chat_bridge"):
+        assert active_project(data_dir=tmp_path) is None
+    assert any(
+        "active-project state unreadable" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_plain_text_takes_the_normal_path(tmp_path: Path) -> None:

@@ -92,6 +92,7 @@ def handle_instant_text(
     try:
         intent = parse_intent(text)
     except IntentParseError as exc:
+        log.warning("host Instant rejected intent: %s", exc)
         result = HostResult(ok=False, kind="parse_error", error=str(exc))
         _write_progress_safe(host, project, next_step=f"fix Instant JSON: {exc}")
         return result

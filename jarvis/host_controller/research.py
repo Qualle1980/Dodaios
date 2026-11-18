@@ -35,7 +35,8 @@ def _gh_json(args: list[str]) -> Any:
         return None
     try:
         return json.loads(text)
-    except ValueError:
+    except ValueError as exc:
+        log.warning("gh research returned non-JSON: %s", exc)
         return None
 
 
