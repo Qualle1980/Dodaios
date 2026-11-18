@@ -11650,6 +11650,13 @@ class BrainManager:
         keep = [entry for entry in deduped if entry[0] == self._switched_to == active]
         if tool_lead is not None:
             keep.append(tool_lead)
+        # Explicit escalation left an unrecognised turn on the active provider
+        # (capable-default). Keep that choice: without it, without_voice_key
+        # drops an active gemini that shares the gemini-live key and the
+        # configured deep_brain/fallback (claude-api) leads instead — undoing
+        # the skip at the deep_brain prepend above.
+        if explicit_only and weak_signal:
+            keep.extend(entry for entry in deduped if entry[0] == active)
         return self._keep_off_voice_key(
             deduped,
             keep=keep,
