@@ -3972,13 +3972,18 @@ class BrainManager:
         )
         if cards:
             system_prompt = f"{system_prompt}\n\n{cards}"
-        # Project mode: the host's intent format is part of the prompt while a
+        # Project mode: the host's intent format + bounded state package while a
         # project is active. Off by default, so ordinary chat is unchanged.
         try:
-            from jarvis.host_controller.chat_bridge import active_project, instant_directive
+            from jarvis.host_controller.chat_bridge import (
+                active_project,
+                project_prompt_addon,
+            )
 
             if active_project() is not None:
-                system_prompt = f"{system_prompt}\n\n{instant_directive()}"
+                addon = project_prompt_addon()
+                if addon:
+                    system_prompt = f"{system_prompt}\n\n{addon}"
         except Exception as exc:  # noqa: BLE001 - never break a turn over this
             log.warning("project mode: directive not added (%s)", exc)
         if delegated_voice:
@@ -12580,6 +12585,24 @@ class BrainManager:
         # instead of confabulating a refusal. Substantive turns only.
         if not is_smalltalk_turn and self._is_self_control_turn(user_text):
             self._self_control_directive = _SELF_CONTROL_DIRECTIVE
+
+        # Project mode: STATUS and ja/nein approval are answered by the host
+        # before Instant (or any other brain) sees the turn.
+        try:
+            from jarvis.host_controller.chat_bridge import handle_project_user_turn
+
+            hosted_user = await asyncio.to_thread(handle_project_user_turn, user_text)
+        except Exception as exc:  # noqa: BLE001 — never break a turn over this
+            log.warning("project mode: user-turn host failed (%s)", exc)
+            hosted_user = None
+        if hosted_user is not None:
+            await self._record_response_side_effects(
+                user_text=user_text,
+                response_text=hosted_user,
+                use_history=use_history,
+                trace_id=trace_uuid,
+            )
+            return hosted_user
 
         # A closed-set one-shot is answered here, with no model at all.
         # Measured live 2026-10-20: "danke" cost 7.8 s because it travelled

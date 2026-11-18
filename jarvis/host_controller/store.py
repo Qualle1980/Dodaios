@@ -51,6 +51,13 @@ class ProjectStore(Protocol):
 
     def snapshot(self) -> dict[str, Any]: ...
 
+    # Optional extensions used by chief-of-staff gaps (fakes implement them;
+    # live GhProjectStore adds them when present).
+    # def update_milestone_description(...)
+    # def set_depends_on(...)
+    # def set_files(...)
+    # def ready_issues(...)
+
 
 class LocalCache:
     """Optional local mirror. Always rebuilt from ``store.snapshot()`` on start."""

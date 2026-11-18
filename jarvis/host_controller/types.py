@@ -66,6 +66,7 @@ INTENT_KEYS: Final[dict[str, frozenset[str]]] = {
             "task",
             "allow_subagents",
             "subagent_kind",
+            "files",
         }
     ),
     "REQUEST_REVIEW": frozenset(
