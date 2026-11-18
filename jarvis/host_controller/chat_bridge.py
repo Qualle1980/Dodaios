@@ -30,7 +30,11 @@ from jarvis.host_controller.approval import (
     parse_approval_answer,
     store_pending,
 )
-from jarvis.host_controller.instant import handle_instant_text
+from jarvis.host_controller.instant import (
+    build_user_reply,
+    handle_instant_text,
+    scrub_finished_claim,
+)
 from jarvis.host_controller.intent import IntentParseError, parse_intent
 from jarvis.host_controller.state_package import (
     build_state_package,
@@ -155,34 +159,6 @@ def parse_host_intent(reply: str) -> str | None:
     return candidate
 
 
-def _summary(result: Any) -> str:
-    if not result.ok:
-        return (
-            f"Nicht ausgeführt: {result.error}"  # i18n-allow # noqa: E501
-        )
-    data = result.data or {}
-    if result.kind == "PLAN":
-        issues = data.get("issues", [])
-        research = data.get("research") or {}
-        base = f"Plan angelegt: {len(issues)} Aufgabe(n) im Projekt {data.get('project', '')}."  # i18n-allow # noqa: E501
-        hits = list(research.get("code") or []) + list(research.get("prs") or [])
-        summary = data.get("research_summary") or ""
-        if hits and summary:
-            return f"{base}\n{summary}"
-        return base
-    if result.kind == "REPORT_PROGRESS":
-        ready = data.get("ready") or []
-        ready_txt = f" Bereit: {ready}." if ready else ""  # i18n-allow
-        return (
-            f"Stand: {data.get('percent', 0)} % abgenommen "  # i18n-allow # noqa: E501
-            f"({data.get('accepted', 0)} von {data.get('planned', 0)} Aufgaben), "
-            f"{data.get('in_progress', 0)} in Arbeit.{ready_txt}"
-        )
-    if result.kind == "ACCEPT_TASK" and data.get("final_report"):
-        return f"Ausgeführt: {result.kind}. Abschlussbericht geschrieben; warte auf dich."  # i18n-allow # noqa: E501
-    return f"Ausgeführt: {result.kind}."  # i18n-allow # noqa: E501
-
-
 def _default_workers(*, data_dir: Path, repo_root: Path | None = None) -> Any:
     return build_live_host_workers(
         repo_root=repo_root or Path.cwd(),
@@ -222,7 +198,7 @@ def _run_intent_text(
         code_search=code_search,
         pr_search=pr_search,
     )
-    return _summary(result)
+    return build_user_reply(result, store=store, project=state["project"])
 
 
 def handle_project_user_turn(
@@ -298,12 +274,24 @@ def route_reply(
     state = active_project(data_dir=data_dir)
     if state is None:
         return None
-    intent_text = parse_host_intent(reply)
-    if intent_text is None:
-        return None
     base = data_dir or _default_data_dir()
     path = _state_path(data_dir)
     run_path = Path(run_dir) if run_dir is not None else base / "host" / state["project"]
+
+    intent_text = parse_host_intent(reply)
+    if intent_text is None:
+        # Instant prose must not claim done while the host still has open
+        # tasks. Host status decides; model wording does not. Ordinary prose
+        # without a finished claim stays on the normal chat path (no store).
+        from jarvis.host_controller.end_state import claims_finished
+
+        if not claims_finished(reply):
+            return None
+        if store is None:
+            from jarvis.host_controller.gh_store import GhProjectStore
+
+            store = GhProjectStore(repo=state["repo"])
+        return scrub_finished_claim(reply, store=store, project=state["project"])
 
     try:
         parsed = parse_intent(intent_text)

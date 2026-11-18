@@ -4,14 +4,24 @@ ChatGPT Instant is text-only. ``handle_instant_text`` parses the strict
 intent JSON (including Markdown ``\\_`` escapes), validates the project id
 against the caller's project, runs the host, and refreshes progress.md +
 audit.jsonl in the run folder.
+
+User-facing completion wording is built here from host status
+(:mod:`jarvis.host_controller.end_state`): "done" only when every task
+is accepted, otherwise an in-progress line.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from jarvis.host_controller.controller import HostController, HostResult
+from jarvis.host_controller.end_state import (
+    honest_completion_reply,
+    user_end_state_phrase,
+)
+from jarvis.host_controller.final_report import all_accepted
 from jarvis.host_controller.intent import IntentParseError, parse_intent
 from jarvis.host_controller.progress import (
     format_progress_markdown,
@@ -19,6 +29,8 @@ from jarvis.host_controller.progress import (
     write_progress_file,
 )
 from jarvis.host_controller.store import ProjectStore
+
+log = logging.getLogger(__name__)
 
 DEFAULT_RUN_DIR = Path(
     r"D:\Projects\jarvis-agent-outputs\grok-host-controller-full-2026-11-18"
@@ -128,6 +140,88 @@ def handle_instant_text(
     return result
 
 
+def build_user_reply(
+    result: HostResult,
+    *,
+    store: ProjectStore,
+    project: str,
+    language: str = "de",
+) -> str:
+    """Plain-text answer for the user from a host result + store truth.
+
+    Completion claims come from :func:`user_end_state_phrase` (host accepted
+    every task), never from Instant prose.
+    """
+    if not result.ok:
+        return (
+            f"Nicht ausgeführt: {result.error}"  # i18n-allow
+        )
+    data = result.data or {}
+    progress = store.progress(project)
+    issues = list(store.list_issues(project))
+    end_phrase = user_end_state_phrase(progress, issues, language=language)
+
+    if result.kind == "PLAN":
+        issues_created = data.get("issues", [])
+        research = data.get("research") or {}
+        base = (
+            f"Plan angelegt: {len(issues_created)} Aufgabe(n) "  # i18n-allow
+            f"im Projekt {data.get('project', '')}."  # i18n-allow
+        )
+        hits = list(research.get("code") or []) + list(research.get("prs") or [])
+        summary = data.get("research_summary") or ""
+        # PLAN is setup, not a completion claim — do not append end-state here.
+        if hits and summary:
+            return f"{base}\n{summary}"
+        return base
+
+    if result.kind == "REPORT_PROGRESS":
+        ready = data.get("ready") or []
+        ready_txt = f" Bereit: {ready}." if ready else ""  # i18n-allow
+        return (
+            f"{end_phrase}. "
+            f"Stand: {data.get('percent', 0)} % abgenommen "  # i18n-allow
+            f"({data.get('accepted', 0)} von {data.get('planned', 0)} Aufgaben), "  # i18n-allow
+            f"{data.get('in_progress', 0)} in Arbeit.{ready_txt}"  # i18n-allow
+        )
+
+    if result.kind == "ACCEPT_TASK" and data.get("final_report"):
+        return (
+            f"{end_phrase}. Abschlussbericht geschrieben; warte auf dich."  # i18n-allow
+        )
+
+    # ACCEPT of one task (or any other kind) while others remain open must not
+    # read as project completion.
+    if result.kind == "ACCEPT_TASK" and not all_accepted(progress, issues):
+        return f"Ausgeführt: {result.kind}. {end_phrase}."  # i18n-allow
+    return f"Ausgeführt: {result.kind}."  # i18n-allow
+
+
+def scrub_finished_claim(
+    text: str,
+    *,
+    store: ProjectStore,
+    project: str,
+    language: str = "de",
+) -> str | None:
+    """If Instant claimed finished while the host is open, return the rewrite.
+
+    Returns ``None`` when the text may stay as Instant wrote it (no finished
+    claim, or the host has accepted every task).
+    """
+    progress = store.progress(project)
+    issues = list(store.list_issues(project))
+    rewritten = honest_completion_reply(
+        text,
+        progress=progress,
+        issues=issues,
+        language=language,
+    )
+    if rewritten == text:
+        return None
+    return rewritten
+
+
 def _write_progress_safe(
     host: HostController,
     project: str,
@@ -150,5 +244,10 @@ def _write_progress_safe(
             next_step=next_step,
         )
         write_progress_file(Path(path), markdown)
-    except Exception:  # noqa: BLE001 — progress must not break the Instant turn
+    except Exception as exc:  # noqa: BLE001 — progress must not break the Instant turn
+        log.warning(
+            "host progress.md write failed for project %s: %s",
+            project,
+            exc,
+        )
         return

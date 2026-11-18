@@ -11019,7 +11019,8 @@ class BrainManager:
         """
         # Project mode: a reply that is one host intent is executed by the host.
         # Anything else falls through to the envelope handling below. A host
-        # fault is logged and never breaks the chat.
+        # fault is logged and never breaks the chat. Finished claims while the
+        # host still has open tasks are rewritten to "läuft noch, N %".
         from jarvis.host_controller.chat_bridge import route_reply as host_route_reply
 
         try:

@@ -42,18 +42,29 @@ def format_progress_markdown(
         if blockers:
             next_step = "resolve blockers or re-plan"
         elif in_progress:
+            # Never label an in-progress project "complete"; the user-facing
+            # line is built by end_state.running_user_phrase.
             next_step = "wait for worker commit, then REQUEST_REVIEW"
-        elif accepted < planned:
+        elif accepted < planned or planned <= 0:
             next_step = "ASSIGN_TASK for the next planned issue"
         else:
+            # Counts say every planned task is accepted (host gate).
             next_step = "project complete"
+
+    from jarvis.host_controller.end_state import running_user_phrase
+
+    # When work is still open, surface the same in-progress line the
+    # chat path uses so progress.md never reads as finished early.
+    end_line = ""
+    if planned > 0 and (accepted < planned or in_progress > 0):
+        end_line = f" End state: {running_user_phrase(percent)}."
 
     return (
         f"# Progress: {title}\n\n"
         f"{percent:.1f}% ({accepted}/{planned} accepted), "
         f"active: {active_text}. "
         f"Blockers: {blocker_text}. "
-        f"Next: {next_step}.\n"
+        f"Next: {next_step}.{end_line}\n"
     )
 
 

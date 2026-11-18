@@ -158,10 +158,13 @@ def build_state_package(
 
 def format_status_reply(*, project: str, store: Any) -> str:
     """Host-authored STATUS answer from GitHub/store truth."""
+    from jarvis.host_controller.end_state import user_end_state_phrase
+
     prog = store.progress(project) if hasattr(store, "progress") else {}
-    issues = store.list_issues(project) if hasattr(store, "list_issues") else []
+    issues = list(store.list_issues(project) if hasattr(store, "list_issues") else [])
+    end_phrase = user_end_state_phrase(prog, issues)
     lines = [
-        f"Status for {project}: "
+        f"Status for {project}: {end_phrase}. "
         f"{float(prog.get('percent') or 0):.1f}% "
         f"({prog.get('accepted', 0)}/{prog.get('planned', 0)} accepted, "
         f"{prog.get('in_progress', 0)} in progress).",
