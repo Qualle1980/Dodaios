@@ -13,6 +13,10 @@ class FakeResetRpc:
         self.calls: list[tuple[str, dict]] = []
         self.closed = False
         self.failure: str | None = None
+        #: Exception class raised when ``failure`` matches a method. Defaults to
+        #: ``ConnectionError`` so reset tests keep their leak-safety assertions;
+        #: usage tests set ``TimeoutError`` for the timeout fallback path.
+        self.failure_exc: type[BaseException] = ConnectionError
         self.options: tuple[Any, ...] = ()
 
     def factory(self, *options: Any) -> FakeResetRpc:
@@ -31,7 +35,7 @@ class FakeResetRpc:
     async def request(self, method: str, params: dict) -> dict:
         self.calls.append((method, params))
         if method == self.failure:
-            raise ConnectionError("private provider details must not escape")
+            raise self.failure_exc("private provider details must not escape")
         if method == "account/read":
             return {"account": self.account}
         if method == "account/rateLimits/read":

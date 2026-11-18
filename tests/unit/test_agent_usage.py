@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 import pytest
+from loguru import logger as loguru_logger
 
 from jarvis import agent_usage
 from jarvis.agent_accounts import AgentAccount
@@ -30,6 +31,7 @@ from jarvis.agent_accounts import AgentAccount
 #: replaces the module attribute, so a test that wants to exercise the REAL
 #: transport helper cannot read it back off the module — it would get the stub.
 _REAL_HTTP_GET_JSON = agent_usage._http_get_json
+_REAL_CODEX_LIVE_FROM_APP_SERVER = agent_usage._codex_live_from_app_server
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +48,9 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     the disk fallbacks are what get exercised.
     """
     monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    # Codex live usage spawns ``codex app-server`` via GoalRpc; keep that off
+    # unless a test installs FakeResetRpc (or another stub) on purpose.
+    monkeypatch.setattr(agent_usage, "_codex_live_from_app_server", lambda _account: None)
 
 
 def _account(platform: str, config_dir: Path, *, builtin: bool = False) -> AgentAccount:
@@ -285,6 +290,213 @@ def test_codex_signed_in_but_never_used_is_unavailable_not_zero(tmp_path: Path) 
     usage = agent_usage.read_usage(_account("codex", tmp_path))
     assert usage.status == "unavailable"
     assert usage.windows == ()
+
+
+_CODEX_LIVE_RATE_LIMITS = {
+    "rateLimits": {
+        "limitId": "codex",
+        "planType": "plus",
+        "primary": {
+            "usedPercent": 12.5,
+            "windowDurationMins": 300,
+            "resetsAt": 1786900000,
+        },
+        "secondary": {
+            "usedPercent": 41.0,
+            "windowDurationMins": 10080,
+            "resetsAt": 1786977114,
+        },
+    }
+}
+
+
+def _install_codex_live_rpc(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict,
+    *,
+    failure: str | None = None,
+    exc: type[BaseException] | None = None,
+):
+    """Wire FakeResetRpc into the live usage path (undoes the autouse stub)."""
+    from jarvis.agent_chat import native_control, runner_cli
+    from tests.fakes.fake_reset_rpc import FakeResetRpc
+
+    fake = FakeResetRpc(payload)
+    fake.failure = failure
+    if exc is not None:
+        fake.failure_exc = exc
+    monkeypatch.setattr(native_control, "GoalRpc", fake.factory)
+    monkeypatch.setattr(runner_cli, "codex_argv_prefix", lambda: ["fake-codex"])
+    monkeypatch.setattr(
+        agent_usage, "_codex_live_from_app_server", _REAL_CODEX_LIVE_FROM_APP_SERVER
+    )
+    return fake
+
+
+def test_codex_live_app_server_windows_are_source_live_and_named_by_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """account/rateLimits/read percentages win; 300→session, 10080→weekly."""
+    _codex_signed_in(tmp_path)
+    fake = _install_codex_live_rpc(monkeypatch, _CODEX_LIVE_RATE_LIMITS)
+
+    before = agent_usage.time.time()
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    after = agent_usage.time.time()
+
+    assert usage.status == "ok"
+    assert usage.source == "live"
+    assert usage.plan == "Plus"
+    assert before <= (usage.as_of or 0) <= after
+    assert [w.kind for w in usage.windows] == ["session", "weekly"]
+    assert [w.percent for w in usage.windows] == [12.5, 41.0]
+    assert [w.window_minutes for w in usage.windows] == [300, 10080]
+    assert [method for method, _ in fake.calls] == [
+        "initialize",
+        "initialized",
+        "account/rateLimits/read",
+    ]
+    assert ("account/rateLimits/read", {}) in fake.calls
+    assert not any(
+        method.startswith("thread/") or method.startswith("turn/")
+        for method, _ in fake.calls
+    )
+    assert fake.closed
+
+
+def _capture_loguru() -> tuple[list[str], int]:
+    """Attach a temporary sink; caller must ``logger.remove(sink_id)``."""
+    lines: list[str] = []
+    sink_id = loguru_logger.add(lines.append, format="{message}", level="INFO")
+    return lines, sink_id
+
+
+def test_codex_live_timeout_falls_back_to_transcript_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions" / "2026" / "08" / "13"
+    sessions.mkdir(parents=True)
+    (sessions / "rollout-2026-08-13T10-00-00-abc.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-13T10:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "rate_limits": {
+                        "plan_type": "plus",
+                        "primary": {"used_percent": 23.0, "window_minutes": 10080},
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _install_codex_live_rpc(
+        monkeypatch, _CODEX_LIVE_RATE_LIMITS, failure="account/rateLimits/read", exc=TimeoutError
+    )
+
+    lines, sink_id = _capture_loguru()
+    try:
+        usage = agent_usage.read_usage(_account("codex", tmp_path))
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert usage.status == "ok"
+    assert usage.source == "cached"
+    assert [w.percent for w in usage.windows] == [23.0]
+    assert any("TimeoutError" in line for line in lines)
+
+
+def test_codex_live_empty_payload_falls_back_to_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "rollout-cached.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-13T10:00:00.000Z",
+                "payload": {
+                    "rate_limits": {
+                        "primary": {"used_percent": 7.0, "window_minutes": 300},
+                        "secondary": {"used_percent": 19.0, "window_minutes": 10080},
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _install_codex_live_rpc(monkeypatch, {"rateLimits": {}})
+
+    lines, sink_id = _capture_loguru()
+    try:
+        usage = agent_usage.read_usage(_account("codex", tmp_path))
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert usage.source == "cached"
+    assert [w.kind for w in usage.windows] == ["session", "weekly"]
+    assert [w.percent for w in usage.windows] == [7.0, 19.0]
+    assert any(
+        "missing window fields" in line or "no usable payload" in line for line in lines
+    )
+
+
+def test_codex_live_missing_used_percent_falls_back_to_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window without usedPercent must not invent a 0% live reading."""
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "rollout-cached.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-13T10:00:00.000Z",
+                "payload": {
+                    "rate_limits": {
+                        "primary": {"used_percent": 55.0, "window_minutes": 300},
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _install_codex_live_rpc(
+        monkeypatch,
+        {
+            "rateLimits": {
+                "primary": {"windowDurationMins": 300, "resetsAt": 1786900000},
+                "secondary": {"windowDurationMins": 10080, "resetsAt": 1786977114},
+            }
+        },
+    )
+
+    lines, sink_id = _capture_loguru()
+    try:
+        usage = agent_usage.read_usage(_account("codex", tmp_path))
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert usage.source == "cached"
+    assert [w.percent for w in usage.windows] == [55.0]
+    assert any("missing window fields" in line for line in lines)
+
+
+def test_codex_normalize_app_server_maps_300_and_10080() -> None:
+    normalized = agent_usage._codex_normalize_app_server_limits(_CODEX_LIVE_RATE_LIMITS)
+    assert normalized is not None
+    windows = agent_usage._codex_rate_limit_windows(normalized)
+    assert [(w.kind, w.window_minutes, w.percent) for w in windows] == [
+        ("session", 300, 12.5),
+        ("weekly", 10080, 41.0),
+    ]
 
 
 # ---------------------------------------------------------------- generic

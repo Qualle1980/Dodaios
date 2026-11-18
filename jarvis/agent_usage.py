@@ -23,10 +23,14 @@ reading carries its ``source`` and its ``as_of``, and the UI states them.
 Presenting a stale number as a live one is the single worst outcome here,
 because it is the number the user is about to make a decision on.
 
-**Nothing is ever spawned and no token ever leaves.** Usage is one small HTTPS
-GET against the provider the account is already signed in to, plus a few file
-reads. The bearer is read from the account's own credential file, used for that
-one request, and never returned, never logged, never written anywhere.
+**No model turn is ever started and no token ever leaves this module.** Claude
+usage is one small HTTPS GET against the provider the account is already signed
+in to. Codex prefers a short ``codex app-server`` read of
+``account/rateLimits/read`` (the same transport
+:mod:`jarvis.agent_resets` already uses) and otherwise falls back to HTTPS or
+the seat's own transcripts. The bearer is read from the account's own
+credential file, used for that one request, and never returned, never logged,
+never written anywhere.
 
 Cross-platform by construction: ``pathlib`` throughout, no OS branch, and every
 failure path — no network, no login, an unknown CLI, a provider that changed its
@@ -36,6 +40,7 @@ confident wrong percentage.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -50,6 +55,11 @@ from loguru import logger
 
 from jarvis.agent_accounts import AgentAccount
 from jarvis.core.http_pool import SyncHttpClientPool
+
+#: How long the Codex app-server rate-limit read may take. Matches the
+#: non-consume timeout in :mod:`jarvis.agent_resets` so a stuck child cannot
+#: hold the usage panel longer than a reset inventory read already would.
+_CODEX_APP_SERVER_TIMEOUT_S: float = 8.0
 
 #: How long a reading is reused before the provider is asked again. The panel
 #: polls, several seats are read at once, and a plan percentage simply does not
@@ -687,8 +697,148 @@ def _codex_plan_name(rate_limits: Any) -> str | None:
     return None
 
 
+def _codex_normalize_app_server_limits(payload: Any) -> dict[str, Any] | None:
+    """Turn an ``account/rateLimits/read`` result into transcript-shaped limits.
+
+    The app-server speaks camelCase (``usedPercent``, ``windowDurationMins``,
+    ``resetsAt``); the transcript path and :func:`_codex_rate_limit_windows`
+    speak snake_case. Same mapping as :func:`jarvis.agent_resets._snapshot` so
+    one plan never labels its windows two different ways.
+    """
+    if not isinstance(payload, dict):
+        return None
+    buckets = payload.get("rateLimitsByLimitId")
+    limits = buckets.get("codex") if isinstance(buckets, dict) else None
+    if not isinstance(limits, dict):
+        limits = payload.get("rateLimits")
+    if not isinstance(limits, dict):
+        return None
+    normalized: dict[str, Any] = {"limit_id": limits.get("limitId")}
+    plan = limits.get("planType")
+    if isinstance(plan, str) and plan.strip():
+        normalized["plan_type"] = plan
+    for slot in ("primary", "secondary"):
+        window = limits.get(slot)
+        if isinstance(window, dict):
+            normalized[slot] = {
+                "used_percent": window.get("usedPercent"),
+                "window_minutes": window.get("windowDurationMins"),
+                "resets_at": window.get("resetsAt"),
+            }
+    return normalized
+
+
+async def _codex_fetch_live_rate_limits(account: AgentAccount) -> dict[str, Any]:
+    """Read ``account/rateLimits/read`` through the shared GoalRpc transport.
+
+    Mirrors the initialize / rate-limits path in :mod:`jarvis.agent_resets`.
+    Never opens a thread and never starts a turn — only the rate-limit method.
+    """
+    from jarvis.agent_chat.native_control import GoalRpc
+    from jarvis.agent_chat.runner_cli import codex_argv_prefix
+    from jarvis.codex_app_server import _subscription_env_allowed
+
+    env = {k: v for k, v in os.environ.items() if _subscription_env_allowed(k)}
+    env["CODEX_HOME"] = str(account.config_dir)
+    argv = [
+        *codex_argv_prefix(),
+        "app-server",
+        "-c",
+        'model_provider="openai"',
+        "-c",
+        'cli_auth_credentials_store="file"',
+    ]
+
+    async def deny(*_: Any) -> str:
+        return "deny"
+
+    async with GoalRpc(argv, env, str(account.config_dir), deny) as rpc:
+
+        async def request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            return await asyncio.wait_for(
+                rpc.request(method, params), timeout=_CODEX_APP_SERVER_TIMEOUT_S
+            )
+
+        await request(
+            "initialize",
+            {
+                "clientInfo": {"name": "jarvis-agent-usage", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        await rpc.send({"method": "initialized"})
+        return await request("account/rateLimits/read", {})
+
+
+def _await_codex_live(account: AgentAccount) -> dict[str, Any]:
+    """Run the live Codex rate-limit coroutine from a sync caller.
+
+    ``collect`` reads seats on a thread-pool worker with no event loop, so the
+    common path is ``asyncio.run``. When a caller already sits on a running
+    loop, offload to a worker thread so the nested run cannot deadlock.
+    """
+
+    def _run() -> dict[str, Any]:
+        return asyncio.run(_codex_fetch_live_rate_limits(account))
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:  # no running loop: asyncio.get_running_loop contract, run directly
+        return _run()
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="codex-usage-live"
+    ) as pool:
+        return pool.submit(_run).result(timeout=_CODEX_APP_SERVER_TIMEOUT_S + 2.0)
+
+
+def _codex_live_from_app_server(account: AgentAccount) -> AccountUsage | None:
+    """Live plan windows via app-server, or ``None`` after logging why not."""
+    try:
+        payload = _await_codex_live(account)
+    except (OSError, ValueError, RuntimeError, ConnectionError, TimeoutError) as exc:
+        logger.info(
+            "Agent usage: Codex live rate limits unavailable for {!r}: {}: {}",
+            account.label,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 - status read must degrade, never raise
+        logger.warning(
+            "Agent usage: Codex live rate limits failed for {!r}: {}: {}",
+            account.label,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+    normalized = _codex_normalize_app_server_limits(payload)
+    if normalized is None:
+        logger.info(
+            "Agent usage: Codex live rate limits returned no usable payload for {!r}",
+            account.label,
+        )
+        return None
+    windows = _codex_rate_limit_windows(normalized)
+    if not windows:
+        logger.info(
+            "Agent usage: Codex live rate limits missing window fields for {!r}",
+            account.label,
+        )
+        return None
+    return AccountUsage(
+        account_id=account.id,
+        platform=account.platform,
+        status="ok",
+        windows=windows,
+        source="live",
+        as_of=time.time(),
+        plan=_codex_plan_name(normalized),
+    )
+
+
 def _codex_usage(account: AgentAccount) -> AccountUsage:
-    """Usage for ONE Codex seat: the live endpoint, else its own transcripts."""
+    """Usage for ONE Codex seat: live app-server, else HTTPS, else transcripts."""
     from jarvis.codex_auth import codex_login_in
 
     connected, mode, _email = codex_login_in(account.config_dir)
@@ -709,6 +859,10 @@ def _codex_usage(account: AgentAccount) -> AccountUsage:
             status="unsupported",
             message="This seat bills per request through an API key — it has no plan limit.",
         )
+
+    live = _codex_live_from_app_server(account)
+    if live is not None:
+        return live
 
     auth = _read_json_file(account.config_dir / "auth.json")
     tokens = auth.get("tokens") if isinstance(auth, dict) else None
