@@ -1578,6 +1578,46 @@ def _may_be_tool_use_leak(text: str) -> bool:
     return s.startswith("[") or s.startswith("{")
 
 
+def _project_mode_stream_consumer(
+    text_consumer: Callable[[str], None] | None,
+) -> Callable[[str], None] | None:
+    """Keep a live consumer in project mode; hold only host-intent-shaped JSON.
+
+    Chat calls ``generate(..., text_consumer=delta_publisher.feed)`` directly
+    (``jarvis/ui/web/launcher.py``). A blanket ``text_consumer=None`` for every
+    project-mode turn (live-m10b 2026-11-18) stopped host JSON from leaking, but
+    it also forced the no-consumer aggregate path on ordinary prose/tool turns
+    (branch and line-count questions answered without tools). Hold only while
+    the growing buffer still looks like a structured host intent; prose is
+    forwarded live so dispatch stays on ``aggregate_with_consumer``. Held JSON
+    is never flushed — host routing rewrites the final reply after dispatch.
+    """
+    if text_consumer is None:
+        return None
+    held: list[str] = []
+    holding = True
+
+    def _wrapped(chunk: str, *, _consumer: Callable[[str], None] = text_consumer) -> None:
+        nonlocal holding
+        if not holding:
+            _consumer(chunk)
+            return
+        if chunk:
+            held.append(chunk)
+        accumulated = "".join(held)
+        if not accumulated.strip():
+            return
+        if _may_be_tool_use_leak(accumulated):
+            # Still looks like host JSON / a structured blob — keep holding.
+            return
+        holding = False
+        for part in held:
+            _consumer(part)
+        held.clear()
+
+    return _wrapped
+
+
 def _is_whole_structured_document(text: str) -> bool:
     """True when ``text`` is ONE structured document and nothing else.
 
@@ -13181,22 +13221,26 @@ class BrainManager:
             # (nothing was yielded → it yields holder["final"]); if it picks none,
             # the chosen talker streams the answer normally after the fall-through.
             #
-            # Project mode: also hold back streaming. Host intents are one JSON
-            # object that is executed after dispatch; streaming that JSON to the
-            # chat (live-m10 q3) shows the user a host instruction before the
-            # post-route rewrite can replace it. The final reply still lands via
-            # ResponseGenerated / chat_store after host routing.
+            # Project mode: hold only host-intent-shaped JSON from the live
+            # consumer. A blanket text_consumer=None (live-m10b 2026-11-18)
+            # stopped the JSON leak but also forced the no-consumer aggregate
+            # path on ordinary prose/tool turns. Prose stays live; held JSON
+            # is never flushed — host routing rewrites the final reply after
+            # dispatch (ResponseGenerated / chat_store).
             _is_router_lead = self._router_lead_key == (prov_name, model)
             try:
                 from jarvis.host_controller.chat_bridge import active_project as _proj_on
 
-                _hold_for_project = _proj_on() is not None
+                _project_consumer = (
+                    _project_mode_stream_consumer(text_consumer)
+                    if _proj_on() is not None
+                    else text_consumer
+                )
             except Exception:  # noqa: BLE001 — streaming hold must never break a turn
                 log.debug("project mode stream hold check failed", exc_info=True)
-                _hold_for_project = False
-            _attempt_consumer = (
-                None if (_is_router_lead or _hold_for_project) else text_consumer
-            )
+                _project_consumer = text_consumer
+            _attempt_consumer = None if _is_router_lead else _project_consumer
+
             attempt_streamed = False
             attempt_had_tool_calls = False
             if turn_override is not None and _attempt_consumer is not None:
