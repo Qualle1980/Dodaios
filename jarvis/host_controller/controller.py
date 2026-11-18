@@ -401,7 +401,10 @@ class HostController:
                 intent_id=intent.intent_id,
                 error="per-project run budget exhausted",
             )
-        review = self.workers.review(commit_sha=sha, issue_number=number)
+        acceptance = str(getattr(issue, "body", "") or "")
+        review = self.workers.review(
+            commit_sha=sha, issue_number=number, acceptance=acceptance
+        )
         pass_verdict = bool(getattr(review, "pass_verdict", False))
         findings = list(getattr(review, "findings", []) or [])
         reviewed_sha = str(getattr(review, "commit_sha", None) or sha).strip()

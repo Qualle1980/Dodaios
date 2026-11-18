@@ -158,7 +158,9 @@ class HostWorkerBundle:
         self.clear_live(issue_number)
         return _as_worker_result(result, fallback_kind=effective_kind)
 
-    def review(self, *, commit_sha: str, issue_number: int) -> ReviewResult:
+    def review(
+        self, *, commit_sha: str, issue_number: int, acceptance: str = ""
+    ) -> ReviewResult:
         driver = self._drivers.get("codex_review")
         if driver is None:
             raise RuntimeError("no codex_review driver registered")
@@ -167,6 +169,7 @@ class HostWorkerBundle:
             issue_number=issue_number,
             prompt=f"Review commit {commit_sha} read-only. Report PASS or FAIL with findings.",
             commit_sha=commit_sha,
+            acceptance=acceptance,
             allow_subagents=False,
             subagent_kind=None,
             work_root=self.work_root,
@@ -542,6 +545,7 @@ def _live_codex_review_driver(**kwargs: Any) -> ReviewResult:
 
     issue_number = int(kwargs["issue_number"])
     commit_sha = str(kwargs.get("commit_sha") or "").strip()
+    acceptance = str(kwargs.get("acceptance") or "")
     repo_root = Path(kwargs["repo_root"])
     work_root = Path(kwargs["work_root"])
     worktree = _ensure_worktree(repo_root, work_root, issue_number)
@@ -555,11 +559,13 @@ def _live_codex_review_driver(**kwargs: Any) -> ReviewResult:
     log_dir.mkdir(parents=True, exist_ok=True)
     prompt = (
         f"{_ROM}\n"
-        f"Review git commit {commit_sha} exactly. Do not modify any files. "
+        f"Review git commit {commit_sha} exactly. Do not modify any files.\n"
+        "Acceptance criteria of the issue:\n"
+        f"{acceptance.strip() or '(none recorded)'}\n"
         "Reply with a single JSON object: "
         '{"verdict":"PASS"|"FAIL","findings":["..."],"commit_sha":"'
         f'{commit_sha}"' + "}. "
-        "PASS only if the code at that SHA meets the issue acceptance criteria."
+        "PASS only if the code at that SHA meets the acceptance criteria above."
     )
     worker = CodexDirectWorker()
     env = dict(os.environ)

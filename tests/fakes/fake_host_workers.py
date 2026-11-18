@@ -122,7 +122,9 @@ class FakeHostWorkers:
             raise QuotaExhausted(result.message or "quota exhausted")
         return result
 
-    def review(self, *, commit_sha: str, issue_number: int) -> FakeReviewResult:
+    def review(
+        self, *, commit_sha: str, issue_number: int, acceptance: str = ""
+    ) -> FakeReviewResult:
         self.calls.append(
             FakeDispatchRecord(
                 worker="codex",
