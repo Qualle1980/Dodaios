@@ -326,6 +326,10 @@ def _commit_if_dirty(worktree: Path, message: str) -> str | None:
     return _read_head_sha(worktree)
 
 
+#: Tools the host grants a Claude worker, all scoped to its own worktree.
+CLAUDE_WORKER_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
+
+
 def _claude_extra_args(*, allow_subagents: bool, subagent_kind: str | None) -> tuple[str, ...]:
     if not allow_subagents:
         return ()
@@ -421,6 +425,9 @@ def _live_claude_driver(**kwargs: Any) -> WorkerResult:
             worker_id=f"host-claude-{issue_number}",
             log_dir=log_dir,
             extra_args=extra,
+            # The CLI is hardened (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB): without an
+            # explicit tool list it forces the default mode and denies writes.
+            allowed_tools=CLAUDE_WORKER_TOOLS,
             permission_mode="bypassPermissions",
         )
         return await _drain_worker_events(agen)
