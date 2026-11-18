@@ -3972,6 +3972,15 @@ class BrainManager:
         )
         if cards:
             system_prompt = f"{system_prompt}\n\n{cards}"
+        # Project mode: the host's intent format is part of the prompt while a
+        # project is active. Off by default, so ordinary chat is unchanged.
+        try:
+            from jarvis.host_controller.chat_bridge import active_project, instant_directive
+
+            if active_project() is not None:
+                system_prompt = f"{system_prompt}\n\n{instant_directive()}"
+        except Exception as exc:  # noqa: BLE001 - never break a turn over this
+            log.warning("project mode: directive not added (%s)", exc)
         if delegated_voice:
             system_prompt = f"{system_prompt}\n\n{_DELEGATE_VOICE_DIRECTIVE}"
         kwargs: dict[str, Any] = {}
@@ -11003,6 +11012,19 @@ class BrainManager:
         answer that must stay untouched (which is also every failure case: a
         badly parsed reply never delegates).
         """
+        # Project mode: a reply that is one host intent is executed by the host.
+        # Anything else falls through to the envelope handling below. A host
+        # fault is logged and never breaks the chat.
+        from jarvis.host_controller.chat_bridge import route_reply as host_route_reply
+
+        try:
+            hosted = await asyncio.to_thread(host_route_reply, reply)
+        except Exception as exc:  # noqa: BLE001 - a host fault must not break chat
+            log.warning("project mode: host action failed (%s)", exc)
+            hosted = None
+        if hosted is not None:
+            return hosted
+
         from jarvis.plugins.brain.chatgpt_web import parse_route_decision
 
         decision = parse_route_decision(reply)
