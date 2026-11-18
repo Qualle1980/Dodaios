@@ -13665,10 +13665,16 @@ class BrainManager:
         # side effect (it showed up as a provider being constructed where no
         # turn asked for it).
         stripped = response_text.strip()
+        # Project mode checks the reply whichever brain led the turn: the host's
+        # intent format is in the prompt for every brain, so a tool-capable
+        # lead must be able to hand an intent to the host too.
+        from jarvis.host_controller.chat_bridge import active_project
+
+        project_on = active_project() is not None
         if (
             stripped.startswith(("{", "```"))
             and stripped.endswith(("}", "```"))
-            and not self._active_can_call_tools()
+            and (project_on or not self._active_can_call_tools())
         ):
             routed = await self._route_text_only_delegation(
                 response_text,
