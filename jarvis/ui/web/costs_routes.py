@@ -381,6 +381,37 @@ class _IndexRefresher:
 _refresher = _IndexRefresher()
 
 
+def warm_index_after_boot(
+    data_dir: Path | None = None,
+    *,
+    delay_s: float = 45.0,
+    refresher: _IndexRefresher | None = None,
+) -> threading.Timer:
+    """Arm one background catch-up of the CLI usage index, a while after boot.
+
+    Without this the index only moves when a summary is requested, so a
+    machine whose cost page is not opened for days shows stale Codex and
+    Claude numbers. The timer runs on its own daemon thread and never blocks
+    boot (AP-26). ``refresher`` is injectable so tests can observe the arming
+    without touching transcripts.
+    """
+    target = refresher if refresher is not None else _refresher
+    root = data_dir if data_dir is not None else _default_index_dir()
+
+    timer = threading.Timer(max(0.0, delay_s), target.nudge, args=(root,))
+    timer.daemon = True
+    timer.name = "cli-usage-index-boot"
+    timer.start()
+    return timer
+
+
+def _default_index_dir() -> Path | None:
+    """The data directory the cost sources read, resolved the way the page does."""
+    from jarvis.costs.sources import default_sources
+
+    return default_sources().cli_index_dir
+
+
 class _IndexStatusCache:
     """``index_state`` walks the transcript folders (a few thousand ``stat``
     calls); the summary is polled every 30 s and re-requested on every filter
