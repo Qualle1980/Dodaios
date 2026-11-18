@@ -12854,8 +12854,6 @@ class BrainManager:
         if images:
             chain = self._lead_vision_chain(chain)
         screen_turn_t0 = time.perf_counter() if images else None
-        # M6: at most one connection/timeout cross per turn.
-        fallback_switches = 0
 
         for idx, (prov_name, model) in enumerate(chain):
             # Skip providers already marked dead in THIS turn.
@@ -12892,7 +12890,7 @@ class BrainManager:
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 msg = str(exc)
-                kind = _classify_turn_provider_error(exc, default="init_fail")
+                kind = _classify_provider_error(msg, default="init_fail")
                 # The status dots read what real turns did; the record keeps
                 # only the classification, never this message (AP-34). An
                 # overridden turn (an agent chat) runs on its own credential
@@ -12925,14 +12923,7 @@ class BrainManager:
                         "Brain %s(%s) konnte nicht instantiiert werden: %s",
                         prov_name, model, exc)
                 provider_errors.append((prov_name, model, kind, msg[:200]))
-                if (
-                    kind in _TURN_FALLBACK_KINDS
-                    and fallback_switches < 1
-                    and idx < len(chain) - 1
-                ):
-                    fallback_switches += 1
-                    continue
-                break
+                continue
 
             # Attached pixels are evidence, not decoration. A provider that
             # cannot inspect them must never answer as though it had; skip it
@@ -13261,19 +13252,17 @@ class BrainManager:
                 tool_calls_executed = bool(agg.tool_calls) and bool(_turn_tools)
                 suppressed = (agg.finish_reason == "suppress_response")
                 if response_empty and not tool_calls_executed and not suppressed:
-                    # M6: empty/safety output is a model-side failure — do not
-                    # cross providers for it (only connection/timeout may).
                     log.warning(
                         "Brain %s(%s) lieferte leeren Content — "
                         "vermutlich Safety-Block oder Empty-Response. "
-                        "Kein Anbieterwechsel (M6 allowlist).",
+                        "Versuche naechsten Provider in der Chain.",
                         prov_name, model,
                     )
                     provider_errors.append((
                         prov_name, model, "empty_response",
                         "Provider gab leere Antwort zurueck (Safety/Schema?)",
                     ))
-                    break
+                    continue
 
                 # INTELLIGENT ROUTER fall-through: this attempt is the tool-capable
                 # router LEAD that was prepended for a tool-incapable talker. It got
@@ -13478,7 +13467,7 @@ class BrainManager:
                 # chain every turn (live forensic 2026-06-28: a depleted Gemini
                 # router bricked the whole turn even though OpenRouter was funded
                 # — AP-22). Only a genuinely transient 429 takes the cooldown path.
-                kind = _classify_turn_provider_error(exc, default="call_fail")
+                kind = _classify_provider_error(msg, default="call_fail")
                 # A window too small for one request says nothing about whether
                 # the provider works; recording it would turn its status dot
                 # red for a setting, not a fault.
@@ -13528,18 +13517,24 @@ class BrainManager:
                     # change; cutting it at 200 chars would drop exactly that.
                     detail = msg if kind == "local_context" else msg[:200]
                     provider_errors.append((prov_name, model, kind, detail))
-                # M6 allowlist: only connection/timeout may cross, and only once
-                # per turn. Model errors, billing, rate limits and other kinds
-                # end the walk here. BUG-019 (stale Gemini cache id) still
-                # belongs inside the provider — see gemini.py "BUG-019 ROOT CAUSE".
-                if (
-                    kind in _TURN_FALLBACK_KINDS
-                    and fallback_switches < 1
-                    and idx < len(chain) - 1
-                ):
-                    fallback_switches += 1
-                    continue
-                break
+                # NOTE BUG-019 (2026-05-11): this generic ``continue`` does
+                # not touch the failing provider's *internal* state. For
+                # most providers that's correct (an HTTP error is purely
+                # transient). For Gemini specifically, however, a 403
+                # "CachedContent not found" means the locally-cached
+                # ``self._cached_content_name`` is stale — and because we
+                # don't clear it here, every subsequent voice turn re-uses
+                # the same dead cache id and re-fails, sending the whole
+                # fallback chain into the 40-second pipeline timeout and
+                # leaving the user with silent THINKING → LISTENING. The
+                # root-cause annotation lives at the actual failure site
+                # in ``jarvis/plugins/brain/gemini.py`` (search for
+                # "BUG-019 ROOT CAUSE"). The right place to fix this is
+                # *inside* the provider (catch the cache-not-found error,
+                # call its own ``invalidate_cache()``, retry without the
+                # cached_content field) — not by leaking Gemini-specific
+                # error matching into this cross-provider chain.
+                continue
 
         # When `used_provider` is set, AT LEAST ONE provider completed the turn
         # successfully — even if `response_text` is empty (e.g. suppress_response
@@ -14893,44 +14888,6 @@ _TASK_FALLBACK_KINDS: frozenset[str] = frozenset(
     {"missing_key", "account_blocked", "bad_key", "rate_limit"}
 )
 
-#: Live-turn fallback allowlist (M6 / S6): only a transport failure may cross
-#: to another provider, and ``generate`` permits at most one such cross per
-#: turn. Model/content errors (400, rejected prompt) stay on the primary.
-_TURN_FALLBACK_KINDS: frozenset[str] = frozenset({"timeout", "connection"})
-
-#: Message markers for a timed-out provider call (checked before connection).
-_TIMEOUT_MARKERS: tuple[str, ...] = (
-    "timed out",
-    "timeout",
-    "timeouterror",
-    "readtimeout",
-    "connecttimeout",
-)
-
-#: Message markers for a connection/DNS/transport failure (not a model 4xx).
-_CONNECTION_MARKERS: tuple[str, ...] = (
-    "connection refused",
-    "connection error",
-    "connection reset",
-    "econnrefused",
-    "could not resolve",
-    "getaddrinfo",
-    "network unreachable",
-    "network is unreachable",
-    "name or service not known",
-    "not reachable",
-    "nodename nor servname",
-    "failed to establish a new connection",
-)
-
-#: Message markers for a model-side refusal (content/schema), never a switch.
-_MODEL_ERROR_MARKERS: tuple[str, ...] = (
-    "invalid_request",
-    "prompt was rejected",
-    "rejected prompt",
-    "bad request",
-)
-
 #: Most providers one scheduled turn walks before it gives up (BUG-212).
 _TASK_MAX_ATTEMPTS: int = 4
 
@@ -15292,19 +15249,6 @@ def _is_context_overflow_exc(msg: str) -> bool:
     return any(marker in m for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
-def _classify_turn_provider_error(exc: BaseException, *, default: str) -> str:
-    """Classify a live-turn provider failure, preferring exception type.
-
-    ``TimeoutError`` / ``ConnectionError`` map straight to the M6 allowlist
-    kinds; everything else uses the message classifier.
-    """
-    if isinstance(exc, TimeoutError):
-        return "timeout"
-    if isinstance(exc, ConnectionError):
-        return "connection"
-    return _classify_provider_error(str(exc), default=default)
-
-
 def _classify_provider_error(msg: str, *, default: str) -> str:
     """Central classifier for provider error strings.
 
@@ -15322,14 +15266,11 @@ def _classify_provider_error(msg: str, *, default: str) -> str:
          (dead-list; catches a live invalid key / Payment-Required that carries the
          numeric code but no known wording).
       5. rate_limit (transient — handled by its own cooldown path).
-      5b. timeout / connection (M6 turn-fallback allowlist — transport only).
-      5c. model_error (400 / rejected prompt — must not switch providers).
       6. default (init_fail or call_fail — caller decides).
 
     bad_key / account_blocked / missing_key all dead-list (``_DEAD_LIST_KINDS``)
     so a terminal provider stops leading the chain; only rate_limit takes the
-    transient cooldown. Live-turn switching itself is gated by
-    ``_TURN_FALLBACK_KINDS`` (timeout/connection only, once per turn).
+    transient cooldown.
 
     missing_key is checked before rate_limit so an auth error that happens to
     contain "limit" (e.g. "exceeded the rate limit for this resource") is not
@@ -15369,16 +15310,6 @@ def _classify_provider_error(msg: str, *, default: str) -> str:
     if any(s in m for s in ("429", "rate_limit", "rate-limit",
                              "rate limit", "too many requests")):
         return "rate_limit"
-    # Transport failures that may cross providers once per turn (M6). Timeout
-    # before connection so "connection timed out" stays a timeout.
-    if any(s in m for s in _TIMEOUT_MARKERS):
-        return "timeout"
-    if any(s in m for s in _CONNECTION_MARKERS):
-        return "connection"
-    # Model refused the request (content/schema). A bare 400 is this class;
-    # context_overflow already returned above for size-shaped 400s.
-    if code == 400 or any(s in m for s in _MODEL_ERROR_MARKERS):
-        return "model_error"
     return default
 
 

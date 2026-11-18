@@ -52,7 +52,9 @@ def _default_search(query: str) -> list[dict[str, Any]]:
 
     try:
         payload = json.loads(result.stdout or "{}")
-    except ValueError:
+    except ValueError as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return []
         return []
     rows = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(rows, list):

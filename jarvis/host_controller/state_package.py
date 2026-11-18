@@ -5,9 +5,12 @@ Instant plans from this package, never from assumptions. Hard cap 8 KB.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 GitRunner = Callable[[list[str]], str]
 
@@ -131,7 +134,8 @@ def build_state_package(
                     (row for row in progress_line if row.strip() and not row.startswith("#")),
                     progress_line[0] if progress_line else "",
                 )
-            except OSError:
+            except OSError as exc:
+                log.debug("host controller: handled (%s)", exc)
                 progress_line = ""
     if not progress_line:
         progress_fn = getattr(store, "progress", None)

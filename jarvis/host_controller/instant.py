@@ -8,6 +8,7 @@ audit.jsonl in the run folder.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ from jarvis.host_controller.progress import (
     write_progress_file,
 )
 from jarvis.host_controller.store import ProjectStore
+
+log = logging.getLogger(__name__)
 
 DEFAULT_RUN_DIR = Path(
     r"D:\Projects\jarvis-agent-outputs\grok-host-controller-full-2026-11-18"
@@ -80,6 +83,7 @@ def handle_instant_text(
     try:
         intent = parse_intent(text)
     except IntentParseError as exc:
+        log.debug("host controller: handled (%s)", exc)
         result = HostResult(ok=False, kind="parse_error", error=str(exc))
         _write_progress_safe(host, project, next_step=f"fix Instant JSON: {exc}")
         return result
@@ -150,5 +154,7 @@ def _write_progress_safe(
             next_step=next_step,
         )
         write_progress_file(Path(path), markdown)
-    except Exception:  # noqa: BLE001 — progress must not break the Instant turn
+    except Exception as exc:  # noqa: BLE001 — progress must not break the Instant turn
+        log.debug("host controller: fallback taken (%s)", exc)
+        return
         return

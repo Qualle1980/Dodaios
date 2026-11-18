@@ -35,7 +35,9 @@ def _gh_json(args: list[str]) -> Any:
         return None
     try:
         return json.loads(text)
-    except ValueError:
+    except ValueError as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return None
         return None
 
 

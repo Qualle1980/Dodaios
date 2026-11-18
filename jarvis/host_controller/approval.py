@@ -8,11 +8,14 @@ ideas only; no third-party runtime.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from jarvis.host_controller.intent import ParsedIntent
+
+log = logging.getLogger(__name__)
 
 _RISKY_RE = re.compile(
     r"("
@@ -84,7 +87,9 @@ def parse_approval_answer(text: str) -> bool | None:
 def load_state(path: Path) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return {}
         return {}
     return raw if isinstance(raw, dict) else {}
 

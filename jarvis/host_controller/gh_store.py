@@ -92,6 +92,8 @@ def _default_gh_runner(args: list[str], **kwargs: Any) -> _Completed:
             creationflags=NO_WINDOW_CREATIONFLAGS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return _Completed(returncode=1, stdout="", stderr=str(exc))
         return _Completed(returncode=1, stdout="", stderr=str(exc))
     return _Completed(
         returncode=int(result.returncode),
@@ -147,7 +149,9 @@ def _parse_int_list(raw: str) -> list[int]:
             continue
         try:
             out.append(int(part))
-        except ValueError:
+        except ValueError as exc:
+            log.debug("host controller: fallback taken (%s)", exc)
+            continue
             continue
     return out
 
@@ -604,7 +608,8 @@ class GhProjectStore:
                     state = parsed
                     try:
                         state_comment_id = int(comment.get("id"))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError) as exc:
+                        log.debug("host controller: handled (%s)", exc)
                         state_comment_id = None
         # Body may also carry the initial state block (create path).
         body_text = str(payload.get("body") or "")
@@ -624,7 +629,8 @@ class GhProjectStore:
             review_pass_sha = None
         try:
             fix_rounds = int(state.get("fix_rounds") or 0)
-        except ValueError:
+        except ValueError as exc:
+            log.debug("host controller: handled (%s)", exc)
             fix_rounds = 0
         depends_on = _parse_int_list(state.get("depends_on") or "")
         files = _parse_str_list(state.get("files") or "")
@@ -695,6 +701,7 @@ class GhProjectStore:
         if isinstance(created, dict) and "id" in created:
             try:
                 issue.state_comment_id = int(created["id"])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
+                log.debug("host controller: handled (%s)", exc)
                 issue.state_comment_id = None
         issue.comments.append(body)

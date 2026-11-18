@@ -294,7 +294,9 @@ def _ensure_worktree(repo_root: Path, work_root: Path, issue_number: int) -> Pat
 def _read_head_sha(worktree: Path) -> str | None:
     try:
         sha = _git(["rev-parse", "HEAD"], cwd=worktree)
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return None
         return None
     return sha or None
 
@@ -302,7 +304,9 @@ def _read_head_sha(worktree: Path) -> str | None:
 def _commit_if_dirty(worktree: Path, message: str) -> str | None:
     try:
         status = _git(["status", "--porcelain"], cwd=worktree)
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.debug("host controller: fallback taken (%s)", exc)
+        return _read_head_sha(worktree)
         return _read_head_sha(worktree)
     if status.strip():
         try:
@@ -376,7 +380,8 @@ async def _drain_worker_events(agen: Any) -> list[Any]:
 def _run_async(coro: Any) -> Any:
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
+    except RuntimeError as exc:
+        log.debug("host controller: handled (%s)", exc)
         loop = None
     if loop is not None and loop.is_running():
         # Host is sync; nest when already inside an event loop (rare in tests).
@@ -607,7 +612,9 @@ def _parse_review_text(text: str, *, fallback_sha: str) -> tuple[bool, list[str]
                 findings = [str(findings)]
             findings = [str(item) for item in findings]
             return verdict_raw == "PASS", findings
-        except ValueError:
+        except ValueError as exc:
+            log.debug("host controller: fallback taken (%s)", exc)
+            pass
             pass
     low = text.lower()
     if "pass" in low and "fail" not in low:
