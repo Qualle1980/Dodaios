@@ -16,7 +16,6 @@ from jarvis.brain.iteration_budget import IterationBudget
 from jarvis.core.delegated_work import DelegatedWork, register_delegated_work
 from jarvis.core.protocols import ChatTurn, current_chat_turn
 
-
 ORDER = "Create hallo.txt with hallo, then independent review."
 
 
@@ -175,9 +174,10 @@ async def test_under_cap_runs_all_waves(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_dispatcher_reuses_override_budget() -> None:
     """BrainDispatcher must not allocate a fresh budget when the turn passed one."""
+    from collections.abc import AsyncIterator
+
     from jarvis.brain.dispatcher import BrainDispatcher
     from jarvis.core.protocols import BrainDelta, BrainRequest, ToolResult
-    from collections.abc import AsyncIterator
 
     class _Brain:
         async def complete(self, req: BrainRequest) -> AsyncIterator[BrainDelta]:

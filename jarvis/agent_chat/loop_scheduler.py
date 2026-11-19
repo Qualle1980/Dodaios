@@ -278,8 +278,8 @@ def release_terminal_slot(term: object) -> Acquired | None:
     if not handle:
         return None
     try:
-        setattr(term, "loop_slot_handle", "")
-    except Exception:  # noqa: BLE001 — clearing is best-effort; still release
+        term.loop_slot_handle = ""  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001,S110 — clearing is best-effort; still release
         pass
     return SCHEDULER.release(handle)
 

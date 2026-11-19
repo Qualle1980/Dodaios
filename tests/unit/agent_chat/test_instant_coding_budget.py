@@ -13,9 +13,8 @@ from jarvis.agent_chat.delegation_acceptance import Receipt
 from jarvis.agent_chat.review_routing import ReviewEvidence
 from jarvis.brain import IterationBudget
 from jarvis.brain.iteration_budget import IterationBudget as Budget
-from jarvis.brain.tool_use_loop import ToolUseLoop, _BUDGET_FINAL_DIRECTIVE
+from jarvis.brain.tool_use_loop import _BUDGET_FINAL_DIRECTIVE, ToolUseLoop
 from jarvis.core.protocols import BrainDelta, BrainRequest, ToolResult
-
 
 ROOT = "work/bubble"
 

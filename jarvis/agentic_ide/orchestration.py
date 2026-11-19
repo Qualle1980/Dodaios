@@ -800,9 +800,9 @@ class WorkspaceOrchestrator:
         loop_slot_handle = ""
         retained = False
         from jarvis.agent_chat.loop_scheduler import (
+            SCHEDULER,
             Acquired,
             Queued,
-            SCHEDULER,
             slot_for_cli,
         )
 
@@ -896,7 +896,7 @@ class WorkspaceOrchestrator:
                         model=top_model or None,
                         effort=top_effort or None,
                     )
-            except SessionError as exc:  # Return the refusal or partial creation receipt to the caller.
+            except SessionError as exc:  # Refusal or partial creation receipt for the caller.
                 if not created:
                     return {
                         "status": "not_accepted",
