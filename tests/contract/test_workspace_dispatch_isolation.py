@@ -290,10 +290,16 @@ async def test_partial_allocation_keeps_created_ids_without_repeating_first_grou
 ):
     original = rig[1].add_terminals
 
-    async def add(count, *, agent, workspace_id):
+    async def add(count, *, agent, workspace_id, model=None, effort=None, **_kwargs):
         if agent == "claude":
             raise SessionError("Later group could not start")
-        return await original(count, agent=agent, workspace_id=workspace_id)
+        return await original(
+            count,
+            agent=agent,
+            workspace_id=workspace_id,
+            model=model,
+            effort=effort,
+        )
 
     monkeypatch.setattr(rig[1], "add_terminals", add)
     tool = WorkspaceOrchestrationTool(rig[0])

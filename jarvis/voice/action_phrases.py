@@ -810,6 +810,26 @@ _PHRASES: dict[str, dict[str, str]] = {
         "es": "No hay un tipo de terminal {name}. Disponibles: {available}.",
         "pt": "Não existe nenhum tipo de terminal {name}. Disponíveis: {available}.",
     },
+    # Pure-open spawn named a model id this CLI's catalog does not hold. Refuse
+    # before any pane starts — never launch with an unvalidated id.
+    "ide_terminal_model_unknown": {
+        "de": (
+            "Modell {model} ist nicht im Katalog für {cli}. "  # i18n-allow
+            "Ich öffne kein Terminal damit."  # i18n-allow
+        ),
+        "en": (
+            "Model {model} is not in the catalog for {cli}. "
+            "I am not opening a terminal with it."
+        ),
+        "es": (
+            "El modelo {model} no está en el catálogo de {cli}. "
+            "No abro ninguna terminal con él."
+        ),
+        "pt": (
+            "O modelo {model} não está no catálogo de {cli}. "
+            "Não abro nenhum terminal com ele."
+        ),
+    },
     # No workspace was open, so one was opened in the most recent folder. The
     # folder is named on purpose: it is an assumption, and hearing it is how the
     # user catches a wrong one before an agent starts working in it.

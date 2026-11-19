@@ -476,8 +476,12 @@ async def run_brain_turn(
         # coding pane is addressed, what to cancel, where to navigate. A
         # continuation quotes the original order and the agents' reports, so
         # read as the person's words it would send that order to the pane
-        # again. It is this turn's briefing instead.
-        system_extra += "\n\n" + text
+        # again. Keep CONTINUE_TURN as the generate() user text (routes stay
+        # safe) and put the briefing on the handle as a history user message
+        # — not system_extra — so instructions+tools stay a stable prompt-cache
+        # prefix across waves (measured Instant coding: instructions 12078→11149
+        # when the briefing was folded into the system prompt).
+        handle.continuation_briefing = text
         text = CONTINUE_TURN
         from jarvis.core.protocols import current_chat_turn
 
@@ -546,6 +550,10 @@ async def run_brain_turn(
         kit_tools=kit_tools,
         system_extra=system_extra,
     )
+    shared_budget = getattr(handle, "iteration_budget", None)
+    if shared_budget is not None:
+        # Multi-wave Instant turns share one budget across generate() calls.
+        override = replace(override, budget=shared_budget)
     if ledger is not None:
         # Last in the chain, so it wraps the surface the model really gets:
         # the folder tools AND the workspace tools, with their own tiers and
@@ -635,22 +643,47 @@ async def run_brain_turn(
                 answer, ledger, language=handle.output_language or DEFAULT_LOCALE
             )
             if rewritten is not None:
+                from jarvis.agent_chat.codex_fallback import serialize_receipts
                 from jarvis.agent_chat.delegation_correction import correctable
+                from jarvis.agent_chat.review_routing import ReviewEvidence, choose_reviewer
 
                 missing = list(gate.gaps(ledger))
                 # A job that was handed back may be sent after the missing
                 # evidence once more; one that is blocked, crashed or
                 # superseded may not be re-dispatched on suspicion.
                 pending = correctable(gate) if handle.corrections_left > 0 else ()
+                # Instant's receipts travel with the notice so the wait can
+                # decide whether Codex should take the review when the
+                # Instant correction budget is spent.
+                review_evidence = ReviewEvidence(
+                    receipts=tuple(ledger.receipts),
+                    verdict_text=answer,
+                    tool_error=bool(ledger.observer_error),
+                )
+                codex_next = (
+                    not pending and choose_reviewer(review_evidence) == "codex"
+                )
+                if pending:
+                    notice_kind = "delegation_correction"
+                elif codex_next:
+                    # Codex takes the review; this is not an Instant correction
+                    # and must not spend corrections_left.
+                    notice_kind = "delegation_codex_handoff"
+                else:
+                    notice_kind = "delegation_unverified"
                 await emit(
                     "notice",
                     {
-                        "kind": "delegation_correction" if pending else "delegation_unverified",
+                        "kind": notice_kind,
                         "turn_id": turn_id,
                         "work": list(gate.work),
                         "missing": missing,
+                        "receipts": serialize_receipts(ledger.receipts),
+                        "verdict_text": answer,
+                        "tool_error": bool(ledger.observer_error),
                         **({"correcting": list(pending),
                             "left": handle.corrections_left} if pending else {}),
+                        **({"codex_fallback": True} if codex_next else {}),
                     },
                 )
                 # The rejection is written down either way, and the conductor's
@@ -659,12 +692,13 @@ async def run_brain_turn(
                 from jarvis.agent_chat.delegation_lessons import document_rejection
 
                 await document_rejection(gate, ledger, person_request)
-                if pending:
+                if pending or codex_next:
                     # The honest line is NOT spoken yet: a correction follows,
                     # and the gate's own rule is that a rewritten verdict must
                     # not arrive after the person has already read a claim.
                     # Saying "unverified" now and "all good" two waves later is
-                    # exactly that, in the other direction.
+                    # exactly that, in the other direction. The same hold applies
+                    # when Codex takes the review after Instant's budget is spent.
                     answer = ""
                 else:
                     answer = rewritten
@@ -703,7 +737,11 @@ async def _generate(
     from jarvis.core.config import get_jarvis_agent_secret, override_provider_secrets
 
     session = handle.session
-    history = brain_history_from_events(handle.history)
+    history = list(brain_history_from_events(handle.history))
+    briefing = str(getattr(handle, "continuation_briefing", "") or "").strip()
+    if briefing:
+        # Evidence for this wave only; not part of the cached system prefix.
+        history.append(BrainMessage(role="user", content=briefing))
     output_language = getattr(handle, "output_language", "")
     if session.surface == "society" and not handle.continuation:
         from jarvis.society.reply_preference import resolve_agent_reply_language

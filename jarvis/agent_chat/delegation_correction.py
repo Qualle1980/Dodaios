@@ -17,16 +17,18 @@ the person honestly and never re-ordered on suspicion. That is an existing,
 tested contract, not a preference.
 
 **Why the bound is small and explicit.** Every correction wave is a real turn
-and may drive a real coding agent, which costs the owner money per round. Two
-attempts, counted per turn, and the counter lives next to the wave budget
+and may drive a real coding agent, which costs the owner money per round. One
+attempt, counted per turn, and the counter lives next to the wave budget
 rather than inside a prompt -- a model cannot be asked to limit itself
-(AP-19 counts per unit of work).
+(AP-19 counts per unit of work). A second rejection ends the request with the
+honest answer naming the open gap.
 
-**What a correction is not.** It carries the gaps and whatever rule the
-conductor's seat learned from the first failure, so the next attempt knows what
-was wrong before it starts. It grants nothing: the gate judges the corrected
-answer exactly as it judged the first, and an attempt that still cannot show
-evidence ends in the same honest answer as before.
+**What a correction is not.** It carries the gaps, a one-line status per job,
+and whatever rule the conductor's seat learned from the first failure, so the
+next attempt knows what was wrong before it starts. It does not replay earlier
+in-turn tool dumps. It grants nothing: the gate judges the corrected answer
+exactly as it judged the first, and an attempt that still cannot show evidence
+ends in the same honest answer as before.
 """
 
 from __future__ import annotations
@@ -59,22 +61,31 @@ def correction_prompt(
     original: str,
     rules: str,
     attempt: int,
+    statuses: Sequence[tuple[str, str]] = (),
 ) -> str:
     """The next attempt's briefing: what is missing, and what was learned.
 
     Opens with ``_CONTINUATION_LEAD`` so ``is_continuation_prompt`` keeps
     recognising it as composed text. A prompt that quotes the order must never
     be read as the person's own words, or it routes as a fresh instruction to
-    the pane it names.
+    the pane it names. Carries a one-line status per job; earlier in-turn tool
+    dumps stay out of this briefing (the wait path clears history on correction).
     """
     missing = "\n".join(f"- {gap}" for gap in gaps) or "- no evidence was recorded at all"
     learned = f"\nWhat earlier failures taught about this kind of work:\n{rules}\n" if rules else ""
+    if statuses:
+        status_block = "Job status:\n" + "\n".join(
+            f"- {task_id}: {status}" for task_id, status in statuses
+        ) + "\n"
+    else:
+        status_block = f"Jobs: {list(work)}\n"
     return (
         _CONTINUATION_LEAD
         + "The previous answer claimed this delegated coding work was good, and it was "
         "rejected: the evidence for it is missing. This is attempt "
         f"{attempt} of {MAX_CORRECTIONS} to close that gap.\n"
-        f"Jobs: {list(work)}\nMissing evidence:\n{missing}\n"
+        + status_block
+        + f"Missing evidence:\n{missing}\n"
         + learned
         + "Get the missing evidence yourself: read the change in that job's own "
         "checkout and run its tests there, or send the agent back for exactly what "

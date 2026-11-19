@@ -37,8 +37,9 @@ def test_a_dead_api_tier_crosses_to_the_tool_model(monkeypatch: pytest.MonkeyPat
 
 def test_the_rung_that_died_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     """Re-probing the same tier spends the same dead credential twice — and the
-    rescue crosses in the ``auto`` order, so a dead Tool Model is followed by
-    the API tier (no cold start), the coding CLI last."""
+    rescue crosses in the ``auto`` order. Since 2026-11-17 the chat seat (ChatGPT
+    Instant) is the first rung, so a dead Tool Model is followed by the
+    subscription, then the API tier."""
     monkeypatch.setattr(writer, "_load_config", lambda: _cfg())
     monkeypatch.setattr(writer, "_tool_model", lambda cfg: "tool-brain")
     monkeypatch.setattr(writer, "_subscription", lambda cfg, timeout: "sub-brain")
@@ -46,8 +47,8 @@ def test_the_rung_that_died_is_never_retried(monkeypatch: pytest.MonkeyPatch) ->
 
     brain, source = writer.resolve_rescue_writer(exclude=("tool_model:grok",))
 
-    assert brain == "api-brain"
-    assert source == "api"
+    assert brain == "sub-brain"
+    assert source.startswith("subscription")
 
 
 def test_rescue_can_skip_the_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,7 +87,7 @@ def test_rescue_and_first_choice_share_one_order() -> None:
     the other."""
     import inspect
 
-    assert writer._AUTO_ORDER == ("tool_model", "api", "subscription")  # noqa: SLF001
+    assert writer._AUTO_ORDER == ("subscription", "tool_model", "api")  # noqa: SLF001
     for function in (writer._fastest_writer, writer.resolve_rescue_writer):  # noqa: SLF001
         assert "_AUTO_ORDER" in inspect.getsource(function)
 

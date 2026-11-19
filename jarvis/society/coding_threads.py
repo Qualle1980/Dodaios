@@ -110,7 +110,33 @@ def match_provider(words: str) -> Any | None:
     return None
 
 
+def _live_cli_for_row(row: Any) -> str | None:
+    """Map a coding-agent catalog row to a ``model_lists`` CLI key."""
+    agent = str(getattr(row, "agent", "") or "").strip().lower()
+    if agent in {"claude", "claude-cli", "claude-code"}:
+        return "claude"
+    if agent in {"codex", "codex-cli"}:
+        return "codex"
+    if agent in {"grok-build", "grok", "grok-cli"}:
+        return "grok"
+    return None
+
+
 def _models(row: Any) -> list[dict[str, str]]:
+    """Models Instant / coding-session may offer: live list when known, else curated."""
+    live_cli = _live_cli_for_row(row)
+    if live_cli is not None:
+        try:
+            from jarvis.agentic_ide.model_lists import format_for_instant, shared_store
+
+            result = shared_store().ensure(live_cli)
+            if result.models:
+                return [
+                    {"id": row_m["id"], "label": row_m["label"]}
+                    for row_m in format_for_instant(live_cli, result)
+                ][:24]
+        except Exception:  # noqa: BLE001 — curated list stands when live read fails
+            log.debug("coding-session: live model list unavailable for %s", live_cli, exc_info=True)
     if row.agent == "claude":
         from jarvis.agent_chat.catalog import claude_code_models
 
@@ -123,8 +149,8 @@ def _models(row: Any) -> list[dict[str, str]]:
 def match_model(row: Any, words: str) -> str:
     """The model id for what the agent wrote ("Opus 5.5" -> ``claude-opus-5-5``).
 
-    An id the list does not know passes through unchanged: CLIs take their
-    own aliases and newer models than any list here.
+    An id that is not on the live list for this CLI is refused (empty string).
+    Labels still fuzzy-match against the live list.
     """
     text = (words or "").strip()
     if not text:
@@ -137,6 +163,14 @@ def match_model(row: Any, words: str) -> str:
     for model in models:
         if want in model["label"].lower() or want in model["id"].lower().replace("-", " "):
             return model["id"]
+    live_cli = _live_cli_for_row(row)
+    if live_cli is not None:
+        from jarvis.agentic_ide.model_lists import validate_model_id
+
+        checked = validate_model_id(live_cli, text)
+        if isinstance(checked, str) and checked:
+            return checked
+        return ""
     return text
 
 
@@ -316,13 +350,14 @@ class CodingThreadTool:
     name = TOOL_NAME
     is_action_tool = True
     risk_tier = "monitor"
-    description = (
+    _BASE_DESCRIPTION = (
         "Hand coding work to a coding agent (Claude Code, Codex, OpenCode, …) as a thread "
         "in the Agentic IDE, and steer it. The person can watch every thread. Actions: "
         "agents (the coding agents on this computer, their models), projects (known project "
         "folders), open (start a thread: agent, folder = absolute project path or project "
         "name, prompt = a complete, self-contained brief you write, optional model, effort, "
-        "title; the thread runs with full access), send (a follow-up into your thread), "
+        "title; the thread runs with full access; model must be a live id for that CLI), "
+        "send (a follow-up into your thread), "
         "read (the "
         "thread's transcript; pass after=<cursor> for news only), answer (the thread's open "
         "question card: answers = one string per question, an option label or your own "
@@ -336,6 +371,17 @@ class CodingThreadTool:
         "Approvals of the coding "
         "agent's own commands stay with the person."
     )
+
+    @property
+    def description(self) -> str:
+        try:
+            from jarvis.agentic_ide.model_lists import live_models_blurb
+
+            return f"{self._BASE_DESCRIPTION}\n{live_models_blurb()}"
+        except Exception:  # noqa: BLE001 — tool must still declare without a catalog
+            log.debug("coding-session: live model blurb unavailable", exc_info=True)
+            return self._BASE_DESCRIPTION
+
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -376,6 +422,8 @@ class CodingThreadTool:
         self.runtime = runtime
         self.agent_id = agent_id
         self.session_id = session_id
+        #: Last agents payload for this tool instance (cuts Instant re-list churn).
+        self._agents_memo: tuple[float, dict[str, Any]] | None = None
 
     # ----------------------------------------------------------- gating
 
@@ -438,11 +486,24 @@ class CodingThreadTool:
         return session, owner
 
     async def _do_agents(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
+        # Instant often re-lists agents after every refusal; a short memo keeps
+        # the same catalog from being re-paid in the next model call (research:
+        # hallo3 re-sent ~2000-char agents results four times in one turn).
+        now = time.time()
+        # ``__new__`` without ``__init__`` (unit tests) has no memo attribute.
+        memo = getattr(self, "_agents_memo", None)
+        if memo is not None and now - memo[0] < 60.0:
+            cached = dict(memo[1])
+            cached["cached"] = True
+            cached["note"] = "Same coding-agent list as within the last minute."
+            return cached
         installed = await _installed_clis()
         provider_rows = _provider_rows()
         signed_in = await _signed_in([row.runner for row in provider_rows])
         rows = []
         for row in provider_rows:
+            # Id + label only in the models ladder — efforts live in live_models_blurb.
+            models = [{"id": m["id"], "label": m["label"]} for m in _models(row)]
             rows.append(
                 {
                     "agent": row.id,
@@ -452,14 +513,16 @@ class CodingThreadTool:
                     # not signed in; None: this app cannot read that CLI's login.
                     "signed_in": signed_in.get(row.runner),
                     "default_model": row.default_model or "(its own default)",
-                    "models": _models(row),
+                    "models": models,
                 }
             )
-        return {
+        payload = {
             "coding_agents": rows,
             "access": "Threads you open run with full access: no approval prompts.",
             "routing": _SEAT_ROUTING_NOTE,
         }
+        self._agents_memo = (now, payload)
+        return payload
 
     async def _do_projects(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
         return {"projects": await asyncio.to_thread(_projects)}
@@ -489,7 +552,13 @@ class CodingThreadTool:
             raise ValueError(f"Unknown coding agent. Choose one of: {names}.")
         if not (await _installed_clis()).get(row.agent, True):
             raise ValueError(f"{row.label} is not installed on this computer.")
+        # Validate the folder before taking a coder slot so a bad path cannot
+        # leak capacity (CI: eight queued opens after folder failures).
         folder = await asyncio.to_thread(resolve_folder, str(args.get("folder") or ""))
+        # Same brief within DUPLICATE_OPEN_S reuses the live thread. Check
+        # before acquire: the first open still holds the coder slot, so a
+        # retry would otherwise raise Queued and never reach the fingerprint
+        # match inside _open_after_slot.
         fingerprint = hashlib.sha256(
             f"{row.id}\n{folder}\n{prompt}".encode()
         ).hexdigest()[:24]
@@ -502,11 +571,152 @@ class CodingThreadTool:
                 session = service.store.get_session(owner["session_id"])
                 if session is not None:
                     return {**_thread_card(service, session), "note": "Already open."}
+        # Same one-task-per-coder rule as workspace-orchestrate create.
+        from jarvis.agent_chat.loop_scheduler import (
+            Acquired,
+            Queued,
+            SCHEDULER,
+            slot_for_cli,
+        )
+
+        preferred = str(args.get("agent_pref") or "").strip().casefold()
+        slot = slot_for_cli(row.agent)
+        if preferred == "either":
+            acquire_agent: str | None = "either"
+        elif preferred in {"claude", "grok-build"}:
+            acquire_agent = preferred
+        elif slot in {"claude", "grok-build"}:
+            acquire_agent = slot
+        else:
+            acquire_agent = None
+        loop_slot_handle = ""
+        if acquire_agent is not None:
+            outcome = SCHEDULER.try_acquire(acquire_agent, "code")
+            if isinstance(outcome, Queued):
+                # Raise so ToolResult.success is False (queued is not started).
+                raise ValueError(outcome.message)
+            if isinstance(outcome, Acquired):
+                loop_slot_handle = outcome.handle
+        # Mutable so a raise after set_thread_owner still keeps the slot.
+        retained = [False]
+        try:
+            return await self._open_after_slot(
+                service,
+                agent,
+                args,
+                row=row,
+                folder=folder,
+                prompt=prompt,
+                loop_slot_handle=loop_slot_handle,
+                resolve_runner=resolve_runner,
+                retained=retained,
+            )
+        finally:
+            if loop_slot_handle and not retained[0]:
+                SCHEDULER.release(loop_slot_handle)
+
+    async def _open_after_slot(
+        self,
+        service: Any,
+        agent: Any,
+        args: dict[str, Any],
+        *,
+        row: Any,
+        folder: str,
+        prompt: str,
+        loop_slot_handle: str,
+        resolve_runner: Any,
+        retained: list[bool],
+    ) -> dict[str, Any]:
+        """Open after a coder slot is held. Sets ``retained[0]`` once the handle
+        is owned by the thread (or already released for a duplicate)."""
+        from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
+        fingerprint = hashlib.sha256(
+            f"{row.id}\n{folder}\n{prompt}".encode()
+        ).hexdigest()[:24]
+        for owner in service.store.thread_owners(self._owner_session):
+            state = owner["state"]
+            if (
+                state.get("fingerprint") == fingerprint
+                and time.time() - owner["created_ms"] / 1000 < DUPLICATE_OPEN_S
+            ):
+                session = service.store.get_session(owner["session_id"])
+                if session is not None:
+                    if loop_slot_handle:
+                        SCHEDULER.release(loop_slot_handle)
+                    # Slot released here; caller must not release again.
+                    retained[0] = True
+                    return {**_thread_card(service, session), "note": "Already open."}
         await asyncio.to_thread(_ensure_project, folder)
         runner = resolve_runner(row.id, surface=THREAD_SURFACE)
+        wanted_model = str(args.get("model") or "").strip()
+        resolved_model = match_model(row, wanted_model)
+        if wanted_model and not resolved_model:
+            from jarvis.agentic_ide.model_lists import validate_model_id
+
+            live_cli = _live_cli_for_row(row) or str(row.agent or "")
+            checked = validate_model_id(live_cli, wanted_model) if live_cli in {
+                "claude", "codex", "grok",
+            } else {
+                "status": "not_accepted",
+                "reason": (
+                    f"Model {wanted_model!r} is not in the live list for {row.agent}."
+                ),
+            }
+            reason = (
+                checked.get("reason")
+                if isinstance(checked, dict)
+                else f"Model {wanted_model!r} is not in the live list for {row.agent}."
+            )
+            from jarvis.agentic_ide.hand_off_retry import review_key, shared_gate
+
+            shared_gate().note_refusal(
+                review_key(
+                    owner_session=self._owner_session,
+                    fingerprint=fingerprint,
+                    title=str(args.get("title") or ""),
+                ),
+                wanted_model,
+                reason=reason,
+            )
+            raise ValueError(reason)
+        live_cli = _live_cli_for_row(row)
+        if live_cli in {"claude", "codex", "grok"}:
+            from jarvis.agentic_ide.hand_off_retry import review_key, shared_gate
+            from jarvis.agentic_ide.model_lists import shared_store, validate_model_id
+
+            pick = resolved_model or wanted_model
+            gate_key = review_key(
+                owner_session=self._owner_session,
+                fingerprint=fingerprint,
+                title=str(args.get("title") or ""),
+            )
+            # Codex: refuse before any thread opens when the account list is down,
+            # including opens that omit an explicit model id.
+            if live_cli == "codex":
+                listing = shared_store().ensure("codex")
+                if not listing.confirmed:
+                    reason = (
+                        listing.error
+                        or "Codex account listing did not confirm any models"
+                    )
+                    message = f"review not run: {reason}"
+                    shared_gate().note_refusal(gate_key, pick or "(default)", reason=message)
+                    raise ValueError(message)
+                if pick:
+                    checked = validate_model_id(live_cli, pick)
+                    if isinstance(checked, dict):
+                        reason = str(checked.get("reason") or "model not confirmed")
+                        shared_gate().note_refusal(gate_key, pick, reason=reason)
+                        raise ValueError(reason)
+            blocked = shared_gate().allow_open(gate_key, pick or "(default)")
+            if blocked:
+                raise ValueError(blocked)
+            shared_gate().note_open(gate_key, pick or "(default)")
         session = service.create_session(
             provider=row.id,
-            model=match_model(row, str(args.get("model") or "")),
+            model=resolved_model,
             effort=(str(args["effort"]).strip() or None) if args.get("effort") else None,
             cwd=folder,
             # The maintainer's choice: an agent's coding threads never stop for
@@ -520,13 +730,22 @@ class CodingThreadTool:
             owner_session=self._owner_session,
             owner_agent=self.agent_id,
             owner_name=display_name(agent),
-            state={"origin": "agent", "wakes": 0, "fingerprint": fingerprint},
+            state={
+                "origin": "agent",
+                "wakes": 0,
+                "fingerprint": fingerprint,
+                **({"loop_slot_handle": loop_slot_handle} if loop_slot_handle else {}),
+            },
         )
+        # Slot now belongs to the thread; do not release on later send failures.
+        retained[0] = True
         coordinator = self.runtime.coding_threads
         coordinator.track(session.session_id, self._owner_session)
         turn_id = await service.send(session.session_id, prompt, author=_author(agent))
         _track_delegated_thread(service, session, name=row.label, turn_id=str(turn_id or ""))
         card = _thread_card(service, service.store.get_session(session.session_id) or session)
+        if loop_slot_handle:
+            card = {**card, "loop_slot_handle": loop_slot_handle}
         await coordinator.announce(self._owner_session, card)
         return {
             **card,
@@ -617,6 +836,7 @@ class CodingThreadTool:
         stopped = await service.cancel(session.session_id)
         if not stopped:
             stopped = await service.seal_stopped_turn(session.session_id)
+        _release_thread_slot(service, session.session_id)
         return {"stopped": bool(stopped), "thread_id": session.session_id}
 
     async def _do_read(self, service: Any, agent: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -748,6 +968,24 @@ def _thread_card(service: Any, session: Any) -> dict[str, Any]:
     }
 
 
+def _release_thread_slot(service: Any, thread_id: str) -> None:
+    """Free the coder loop slot held by a finished or stopped thread."""
+    if service is None:
+        return
+    row = service.store.thread_owner(thread_id)
+    if row is None:
+        return
+    handle = str((row.get("state") or {}).get("loop_slot_handle") or "").strip()
+    if not handle:
+        return
+    from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
+    SCHEDULER.release(handle)
+    state = {**(row.get("state") or {})}
+    state.pop("loop_slot_handle", None)
+    service.store.update_thread_owner_state(thread_id, state)
+
+
 #: Live 2026-11-15: asked to give Grok a task, the General tried the brain
 #: switch for the xAI API row, hit "API key missing" and did the work itself,
 #: while the Grok Build subscription seat was signed in the whole time.
@@ -811,6 +1049,29 @@ def _track_delegated_thread(
                     error = str(payload.get("error") or error)
                 if status == "error":
                     report = _clip(error, 800) or _clip(text, _TEXT_LIMIT) or "The turn failed."
+                    err_l = (error or "").lower()
+                    if "could not be confirmed" in err_l or "not in the confirmed" in err_l:
+                        try:
+                            from jarvis.agentic_ide.hand_off_retry import (
+                                review_key,
+                                shared_gate,
+                            )
+
+                            owner = service.store.thread_owner(thread_id) or {}
+                            state = owner.get("state") if isinstance(owner.get("state"), dict) else {}
+                            shared_gate().note_refusal(
+                                review_key(
+                                    owner_session=str(owner.get("owner_session") or ""),
+                                    fingerprint=str(state.get("fingerprint") or ""),
+                                ),
+                                str(getattr(session, "model", "") or ""),
+                                reason=error,
+                            )
+                        except Exception:  # noqa: BLE001 — refusal bookkeeping must not hide the report
+                            log.debug(
+                                "coding threads: could not record model refusal",
+                                exc_info=True,
+                            )
                 elif status == "cancelled":
                     report = "The turn was stopped before it finished."
                 else:
@@ -1053,6 +1314,8 @@ class CodingThreads:
                     # answer to the thread's own card continues the agent's turn.)
                     self._queue_state(session_id, origin="person")
             elif kind in WAKE_KINDS:
+                if kind == "turn_finished":
+                    _release_thread_slot(self._service or self._attach(), session_id)
                 self._dirty.add(session_id)
                 self._kick()
         elif session_id in self._owners and kind == "user_message":

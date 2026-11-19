@@ -16,7 +16,7 @@ from jarvis.brain.routing_policy import TurnFacts, decide_lead
 from jarvis.core.bus import EventBus
 from jarvis.core.config import JarvisConfig
 
-_LEAD = ("ollama", "qwen3.5:4b")
+_LEAD = ("local-openai", "qwen3.5:4b")
 
 
 def _facts(**over: object) -> TurnFacts:
@@ -110,11 +110,11 @@ def _manager(mode: str) -> BrainManager:
     mgr = BrainManager(config=config, bus=EventBus(), tools={})
     mgr._active_name = "chatgpt-web"  # type: ignore[attr-defined]
     mgr._active_can_call_tools = lambda: False  # type: ignore[assignment]
-    mgr._fast_model = lambda name: "qwen3.5:4b" if name == "ollama" else None  # type: ignore[method-assign]
-    mgr._deep_model = lambda name: "qwen3.5:4b" if name == "ollama" else None  # type: ignore[method-assign]
+    mgr._fast_model = lambda name: "qwen3.5:4b" if name == "local-openai" else None  # type: ignore[method-assign]
+    mgr._deep_model = lambda name: "qwen3.5:4b" if name == "local-openai" else None  # type: ignore[method-assign]
     mgr._registry._loaded = True
-    mgr._registry._classes = {"chatgpt-web": object, "ollama": object}  # type: ignore[attr-defined]
-    mgr._brain_cache[("ollama", "qwen3.5:4b")] = _ToolCapableBrain()
+    mgr._registry._classes = {"chatgpt-web": object, "local-openai": object}  # type: ignore[attr-defined]
+    mgr._brain_cache[("local-openai", "qwen3.5:4b")] = _ToolCapableBrain()
     mgr._turn_substantive = True  # type: ignore[attr-defined]
     return mgr
 
@@ -125,7 +125,7 @@ def test_shadow_mode_changes_nothing_and_reports_no_divergence(caplog) -> None:
         chain = mgr._build_fallback_chain("fast")
 
     assert mgr._router_lead_key == _LEAD
-    assert [name for name, _ in chain][:2] == ["ollama", "chatgpt-web"]
+    assert [name for name, _ in chain][:2] == ["local-openai", "chatgpt-web"]
     assert not [r for r in caplog.records if "SHADOW divergence" in r.getMessage()], (
         "the central policy must reproduce today's routing exactly"
     )
@@ -137,7 +137,7 @@ def test_the_policy_steers_the_turn_when_switched_on() -> None:
     chain = mgr._build_fallback_chain("fast")
 
     assert mgr._router_lead_key == _LEAD
-    assert [name for name, _ in chain][:2] == ["ollama", "chatgpt-web"]
+    assert [name for name, _ in chain][:2] == ["local-openai", "chatgpt-web"]
 
 
 def test_switched_off_the_policy_is_not_evaluated() -> None:
@@ -241,7 +241,7 @@ def test_on_with_no_lead_does_not_fall_back_to_the_legacy_branches() -> None:
     chain = mgr._build_fallback_chain("fast")
 
     assert mgr._router_lead_key is None
-    assert all(name != "ollama" for name, _ in chain), chain
+    assert all(name != "local-openai" for name, _ in chain), chain
     assert chain[0][0] == "chatgpt-web"
 
 
@@ -252,7 +252,7 @@ def test_on_with_a_lead_installs_exactly_that_lead() -> None:
 
     assert mgr._router_lead_key == _LEAD
     assert chain[0] == _LEAD
-    assert [name for name, _ in chain].count("ollama") == 1, "no double lead"
+    assert [name for name, _ in chain].count("local-openai") == 1, "no double lead"
 
 
 def test_an_action_turn_with_the_router_off_does_not_fall_through() -> None:
@@ -275,13 +275,13 @@ def test_on_keeps_the_plan_seat_off_every_paid_provider() -> None:
     mgr = _manager("on")
     mgr._registry._classes["gemini"] = object  # type: ignore[attr-defined]
     mgr._fast_model = (  # type: ignore[method-assign]
-        lambda name: "qwen3.5:4b" if name == "ollama" else "paid-model"
+        lambda name: "qwen3.5:4b" if name == "local-openai" else "paid-model"
     )
     mgr._brain_cache[("gemini", "paid-model")] = _ToolCapableBrain()
 
     chain = mgr._build_fallback_chain("fast")
 
-    assert [name for name, _ in chain] == ["ollama", "chatgpt-web"]
+    assert [name for name, _ in chain] == ["local-openai", "chatgpt-web"]
 
 
 # --------------------------------------------------------------------------
@@ -298,7 +298,7 @@ def test_a_drifted_model_on_the_same_provider_is_a_divergence(caplog) -> None:
     from jarvis.brain.routing_policy import LeadDecision
 
     mgr = _manager("shadow")
-    decision = LeadDecision(("ollama", "some-other-model"), True, "drifted")
+    decision = LeadDecision(("local-openai", "some-other-model"), True, "drifted")
 
     with caplog.at_level(logging.WARNING, logger="jarvis.brain.manager"):
         mgr._audit_central_lead("shadow", decision, _LEAD, True)
@@ -358,5 +358,5 @@ def test_the_divergence_warning_carries_only_routing_shape(caplog) -> None:
         )
 
     message = _divergence(caplog)[0]
-    assert "gemini" in message and "ollama" in message
+    assert "gemini" in message and "local-openai" in message
     assert "qwen3.5:4b" in message

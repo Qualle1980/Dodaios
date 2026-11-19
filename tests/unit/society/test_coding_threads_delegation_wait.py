@@ -79,8 +79,11 @@ class Society:
 
 @pytest.fixture
 async def society(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
     monkeypatch.setattr(coding_threads, "SETTLE_S", 0.01)
     monkeypatch.setattr(coding_threads, "RETRY_S", 0.02)
+    SCHEDULER.reset()
 
     async def installed() -> dict[str, bool]:
         return {}
@@ -97,6 +100,7 @@ async def society(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     rt.owner = owner.session_id
     yield rt
     await rt.coding_threads.close()
+    SCHEDULER.reset()
 
 
 def tool(rt: Society) -> CodingThreadTool:

@@ -350,9 +350,18 @@ def test_registry_contains_all_known_adapter_classes() -> None:
 
 
 def test_supported_provider_names_match_registry() -> None:
-    """Config documentation and runtime registration must not drift again."""
+    """Automatic fallback names must stay registered; REGISTRY may hold more.
 
-    assert set(SUPPORTED_PROVIDERS) - {"follow_brain"} == set(REGISTRY)
+    Ollama (and any future explicit-only adapter) stays in REGISTRY so an
+    ``[ack_brain].provider = "ollama"`` pin still constructs, but it is
+    deliberately absent from SUPPORTED_PROVIDERS so follow_brain / automatic
+    failover never pick it (Ahmad 2026-11-17).
+    """
+
+    supported = set(SUPPORTED_PROVIDERS) - {"follow_brain"}
+    registered = set(REGISTRY)
+    assert supported <= registered
+    assert registered - supported == {"ollama"}
 
 
 # ---------------------------------------------------------------------------

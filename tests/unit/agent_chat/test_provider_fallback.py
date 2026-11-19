@@ -27,7 +27,8 @@ PICK = "openai"
 PICK_MODEL = "picked-model"
 KEYED = "openrouter"
 KEYED_MODEL = "keyed-model"
-LOCAL = "ollama"
+# Ollama is never an automatic successor (Ahmad 2026-11-17); local-openai stays.
+LOCAL = "local-openai"
 LOCAL_MODEL = "local-model"
 SEAT = "claude-cli"
 SEAT_MODEL = "claude-sonnet"
@@ -118,10 +119,17 @@ async def _typed_turn(
     from jarvis.brain import background_policy
 
     background_policy.reset_for_tests()
+    # Machine-independent sign-in: only the seat under test is connected.
+    # Never read the real CLI login state on this PC (order 2026-11-17).
     login_map = {SEAT: True} if seat_connected else {}
     background_policy._probe_override = lambda provider: login_map.get(provider, False)
     monkeypatch.setattr(background_policy, "_read_markers", lambda: {})
     monkeypatch.setattr(background_policy, "_write_markers", lambda _markers: None)
+    monkeypatch.setattr(
+        background_policy,
+        "_registry_probe",
+        lambda provider: login_map.get(provider, False),
+    )
 
     bus = EventBus()
     manager, picked, keyed, local = _manager(bus)

@@ -75,7 +75,8 @@ def test_resolver_chain_keeps_only_the_seat_and_local_runtimes() -> None:
 
     assert providers[0] == seat
     assert all(p == seat or background_policy.keyless_local(p) for p in providers)
-    assert "ollama" in providers
+    assert "local-openai" in providers
+    assert "ollama" not in providers
     assert providers.count(seat) == 1
 
 
@@ -109,11 +110,12 @@ def test_background_work_never_moves_off_the_seat(monkeypatch) -> None:
         s.id for s in PROVIDERS
         if s.tier == "brain" and provider_billing(s) == "subscription_or_api"
     ]
-    candidates = [seat, *subscription_or_api, *KEYED, "ollama"]
+    candidates = [seat, *subscription_or_api, *KEYED, "ollama", "local-openai"]
 
     decision = background_policy.background_providers(candidates, primary=seat)
 
-    assert decision.allowed == (seat, "ollama")
+    assert decision.allowed == (seat, "local-openai")
+    assert "ollama" not in decision.allowed
     # Without a seat primary a signed-in subscription CLI stays allowed.
     open_decision = background_policy.background_providers(candidates)
     assert set(subscription_or_api) <= set(open_decision.allowed)

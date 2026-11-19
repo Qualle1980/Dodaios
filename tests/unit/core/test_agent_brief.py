@@ -28,7 +28,10 @@ def test_workspace_prompt_field_carries_the_rule():
     prompt = WorkspaceOrchestrationTool.schema["properties"]["prompt"]
     assert prompt["type"] == "string"
     assert AGENT_BRIEF_RULE in prompt["description"]
-    assert "read-only" in WorkspaceOrchestrationTool.description
+    # ``description`` is an instance property that prepends live model ids to
+    # ``_BASE_DESCRIPTION``; the work-order rule lives on the base text.
+    assert "read-only" in WorkspaceOrchestrationTool._BASE_DESCRIPTION
+    assert isinstance(WorkspaceOrchestrationTool.description, property)
 
 
 def test_society_task_field_carries_the_rule():

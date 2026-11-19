@@ -276,7 +276,8 @@ async def test_a_deferred_tool_is_not_shown_until_it_was_found() -> None:
     executor = _RunningExecutor()
     loop = ToolUseLoop(brain, tools, executor, deferred_tools=deferred)  # type: ignore[arg-type]
     result = await loop.run([], user_utterance="send anna the notes by email")
-    assert brain.shown(0) == ["search_web", FIND_TOOLS_NAME]
+    # Tool schemas are sorted by name for a stable prompt-cache prefix.
+    assert brain.shown(0) == [FIND_TOOLS_NAME, "search_web"]
     # Found in round one, so its schema rides every round after that.
     assert "mail_send" in brain.shown(1)
     assert executor.ran == [FIND_TOOLS_NAME, "mail_send"]
@@ -330,7 +331,8 @@ async def test_without_deferred_tools_the_loop_is_unchanged() -> None:
     brain = _ScriptedBrain([])
     loop = ToolUseLoop(brain, tools, _RunningExecutor())  # type: ignore[arg-type]
     await loop.run([], user_utterance="hello")
-    assert brain.shown(0) == ["search_web", "mail_send"]
+    # Insertion order is not preserved: schemas are sorted by name.
+    assert brain.shown(0) == ["mail_send", "search_web"]
 
 
 # ── The manager's decision ───────────────────────────────────────────────

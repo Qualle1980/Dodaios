@@ -21,21 +21,21 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Providers accepted in the [ack_brain].provider field. Adding a new
-# provider means: add an entry here, add an entry_point in pyproject.toml,
-# add a config sub-model below, add an adapter under providers/.
+# Providers accepted as automatic Flash targets. Adding a new provider
+# means: add an entry here, add an entry_point in pyproject.toml, add a
+# config sub-model below, add an adapter under providers/.
 #
 # "follow_brain" is a meta-value: build_ack_brain() resolves it at
 # startup against cfg.brain.primary. If brain.primary maps to one of
-# the four concrete adapters, use that; otherwise fall back to
-# "gemini" with a warning. Letting users pin a separate flash provider
-# stays possible by setting one of the four concrete names.
+# the concrete adapters, use that; otherwise the flash tier returns
+# None and consumers speak their canned lines. Ollama is deliberately
+# absent: it is never an automatic fallback (Ahmad 2026-11-17). An
+# explicit ``[ack_brain].provider = "ollama"`` still works via REGISTRY.
 SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "follow_brain",
     "gemini",
     "grok",
     "openai",
-    "ollama",
 )
 
 

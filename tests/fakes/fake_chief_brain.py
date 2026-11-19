@@ -58,8 +58,25 @@ class Executed:
     tool: str
     args: dict[str, Any]
     result: ToolResult
-    #: The turn's briefing at the time of the call (the continuation payload).
+    #: The turn's briefing at the time of the call (continuation / correction).
     system_extra: str = ""
+
+
+def _turn_briefing(kwargs: dict[str, Any]) -> str:
+    """The continuation payload for this wave.
+
+    Token-build turns keep instructions+tools cache-stable by putting the
+    briefing on ``history_override`` as a user message, not on
+    ``turn_override.system_extra``. Prefer that message when present.
+    """
+    from jarvis.agent_chat.delegation_wait import is_continuation_prompt
+
+    for message in reversed(list(kwargs.get("history_override") or ())):
+        content = str(getattr(message, "content", "") or "")
+        if getattr(message, "role", None) == "user" and is_continuation_prompt(content):
+            return content
+    override = kwargs.get("turn_override")
+    return str(getattr(override, "system_extra", "") or "")
 
 
 class ScriptedChief:
@@ -114,7 +131,9 @@ class ScriptedChief:
         narrow = getattr(override, "tool_filter", None)
         if callable(narrow):
             surface = narrow(dict(surface))
-        briefing = str(getattr(override, "system_extra", "") or "")
+        # Continuation / correction briefings travel as a history user message
+        # (stable prompt-cache prefix); fall back to system_extra for older paths.
+        briefing = _turn_briefing(kwargs)
         script = self._waves[self.wave] if self.wave < len(self._waves) else Wave(reply="")
         self.wave += 1
         for call in script.calls:
