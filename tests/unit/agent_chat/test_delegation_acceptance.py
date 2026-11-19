@@ -554,3 +554,132 @@ def test_a_receipt_is_stamped_when_it_happened() -> None:
     ledger = EvidenceLedger()
     ledger.note("RunCommand", {"command": "git diff"}, success=True, output="x", cwd=ROOT)
     assert ledger.receipts[0].at >= before
+
+
+# ------------------------------------------- the General's own test runner
+#
+# The General holds no shell. ``workspace-test`` runs the suite the user
+# configured in a named workspace and reports a structured verdict; the gate
+# reads that verdict, never prose.
+
+
+def _state(**over) -> Receipt:
+    args = {"op": "state", "workspace_id": "w1", **over.pop("args", {})}
+    return Receipt("workspace-git", args, True, "{'status': 'ok'}", "", over.pop("at", 2000.0))
+
+
+def _suite(
+    *,
+    passed: bool = True,
+    ok: bool = True,
+    named: str = "w1",
+    ran_in: str = "w1",
+    commit: str = HEAD,
+    at: float = 2000.0,
+    status: str = "ok",
+) -> Receipt:
+    data = {
+        "status": status,
+        "workspace_id": ran_in,
+        "passed": passed,
+        "exit_code": 0 if passed else 1,
+        "commit": commit,
+        "summary": "2 passed" if passed else "1 failed",
+    }
+    args = {"workspace_id": named} if named else {}
+    return Receipt("workspace-test", args, ok, str(data), "", at, data)
+
+
+def test_workspace_test_is_a_test_run_whatever_its_arguments() -> None:
+    assert runs_tests("workspace-test", {"workspace_id": "w1"})
+    assert runs_tests("workspace-test", {})
+    assert not reads_change("workspace-test", {"workspace_id": "w1"})
+
+
+def test_a_passing_workspace_test_with_a_workspace_git_state_lets_the_answer_stand() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    assert gate.verdict("PASS, verified.", _ledger(_state(), _suite())) is None
+
+
+def test_a_failing_workspace_test_never_counts_as_a_pass() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    ledger = _ledger(_state(), _suite(passed=False))
+    assert gate.verdict("PASS, all tests pass.", ledger) is not None
+    assert gate.gaps(ledger) == (TEST_MISSING,)
+
+
+def test_a_passing_suite_without_a_change_read_is_half_the_evidence() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    assert gate.gaps(_ledger(_suite())) == (DIFF_MISSING,)
+
+
+def test_a_workspace_test_refusal_is_not_a_pass() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    refused = _suite(ok=False, status="not_accepted")
+    assert gate.gaps(_ledger(_state(), refused)) == (TEST_MISSING,)
+
+
+def test_the_verdict_comes_from_the_result_not_from_its_words() -> None:
+    """A summary saying "passed" next to ``passed: False`` is a fail."""
+    data = {"status": "ok", "workspace_id": "w1", "passed": False, "commit": HEAD,
+            "summary": "3 passed, 1 failed"}
+    receipt = Receipt("workspace-test", {"workspace_id": "w1"}, True, "3 passed", "", 2000.0,
+                      data)
+    assert AcceptanceGate(jobs=(_job(),)).gaps(_ledger(_state(), receipt)) == (TEST_MISSING,)
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        _suite(named="w2", ran_in="w2"),
+        _suite(named="", ran_in="w1"),
+        _suite(named="w1", ran_in="w2"),
+    ],
+    ids=["other-workspace", "unnamed", "resolved-elsewhere"],
+)
+def test_a_workspace_test_must_be_this_job_s_workspace(receipt) -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    ledger = _ledger(_state(), receipt)
+    assert gate.verdict("PASS", ledger) is not None
+    assert gate.gaps(ledger) == (TEST_MISSING, WRONG_WORKSPACE)
+
+
+def test_a_workspace_test_on_another_commit_does_not_verify() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    ledger = _ledger(_state(), _suite(commit="9999999aaaabbbbccccdddd"))
+    assert gate.gaps(ledger) == (TEST_MISSING, WRONG_WORKSPACE)
+
+
+def test_a_workspace_test_that_cannot_name_its_commit_does_not_verify() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    assert TEST_MISSING in gate.gaps(_ledger(_state(), _suite(commit="")))
+
+
+def test_a_workspace_test_without_a_job_revision_is_bound_by_workspace_alone() -> None:
+    gate = AcceptanceGate(jobs=(_job(head_sha=""),))
+    assert gate.gaps(_ledger(_state(), _suite(commit=""))) == ()
+
+
+def test_a_workspace_test_from_before_the_handback_is_stale() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    ledger = _ledger(_state(), _suite(at=5.0))
+    assert gate.gaps(ledger) == (TEST_MISSING, STALE_EVIDENCE)
+
+
+def test_the_shell_path_still_counts_beside_the_new_tool() -> None:
+    gate = AcceptanceGate(jobs=(_job(),))
+    assert gate.gaps(_ledger(_state(), _tests())) == ()
+
+
+async def test_the_recorder_keeps_a_structured_result_for_the_gate() -> None:
+    from jarvis.core.protocols import ToolResult
+
+    class _Suite:
+        name = "workspace-test"
+
+        async def execute(self, args, ctx):
+            return ToolResult(success=True, output={"passed": True, "workspace_id": "w1"})
+
+    ledger = EvidenceLedger()
+    await RecordingTool(_Suite(), ledger).execute({"workspace_id": "w1"}, None)
+    assert ledger.receipts[0].data == {"passed": True, "workspace_id": "w1"}
