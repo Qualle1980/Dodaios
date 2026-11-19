@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from .capabilities import WorkerCapabilityInventory
+from .codex_budget import CodexRunBudget
 from .process_utils import create_worker_subprocess, resolve_node_executable
 from .stream_consumer import (
     ClaudeAssistantMessage,
@@ -734,8 +735,17 @@ class CodexDirectWorker:
         # Drain stderr concurrently: codex writes progress/errors there, and a
         # full stderr pipe would deadlock the child once the buffer fills.
         stderr_task = asyncio.create_task(proc.stderr.read())
+        # Per-run cap on tokens and shell calls (codex_budget.py). A run that
+        # crosses it is killed and reported; it is never retried.
+        budget = CodexRunBudget()
+        budget_stop: str | None = None
 
         while True:
+            budget_stop = budget.stop_reason()
+            if budget_stop is not None:
+                terminal_kind = "error"
+                terminal_message = budget_stop
+                break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
@@ -794,6 +804,8 @@ class CodexDirectWorker:
             except json.JSONDecodeError:
                 continue
             t = obj.get("type")
+            if t == "item.completed":
+                budget.observe_tool_item(obj.get("item"))
             if t == "thread.started":
                 tid = obj.get("thread_id")
                 if isinstance(tid, str):
@@ -861,6 +873,7 @@ class CodexDirectWorker:
                 clear_codex_needs_reauth()
                 clear_codex_quota_cooldown()
                 usage = obj.get("usage", {}) or {}
+                budget.observe_turn_usage(usage if isinstance(usage, dict) else None)
                 if isinstance(usage, dict):
                     in_tok = usage.get("input_tokens") or 0
                     out_tok = usage.get("output_tokens") or 0
@@ -871,7 +884,12 @@ class CodexDirectWorker:
                 terminal_message = _coerce_codex_error_text(obj)
                 continue
 
-        if timed_out:
+        if budget_stop is None and budget.stop_reason() is not None:
+            # The last line crossed the cap after the loop's own check.
+            budget_stop = budget.stop_reason()
+            terminal_kind = "error"
+            terminal_message = budget_stop
+        if timed_out or budget_stop is not None:
             with suppress(ProcessLookupError):
                 proc.kill()
         with suppress(Exception):

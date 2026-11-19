@@ -974,19 +974,7 @@ def _runtime_identity_valid(
     probe = Path(raw_probe)
     probe.unlink(missing_ok=True)
     try:
-        result = subprocess.run(
-            macos_launch_services_command(
-                bundle,
-                wait_for_exit=True,
-                new_instance=True,
-                arguments=("--jarvis-identity-probe", str(probe)),
-            ),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            creationflags=NO_WINDOW_CREATIONFLAGS,
-        )
+        result = _run_identity_probe(bundle, probe, diagnostics=diagnostics)
         if diagnostics is not None:
             stderr_tail = (result.stderr or "").strip()[-500:]
             diagnostics.append(
@@ -1077,6 +1065,54 @@ def _running_managed_bundle(
         if diagnostics is not None:
             diagnostics.append(f"current process: probe failed: {type(exc).__name__}: {exc}")
         return None
+
+
+#: launch-services error seen on a runner session when `open` returns before the
+#: app can be waited on. A transient launch error, not an identity mismatch.
+_TRANSIENT_OPEN_STDERR = "kevent() failed"
+_PROBE_OPEN_ATTEMPTS = 2
+_PROBE_RETRY_PAUSE_S = 5.0
+
+
+def _run_identity_probe(
+    bundle: Path,
+    probe: Path,
+    *,
+    diagnostics: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Open the bundle with the identity probe; retry once on a transient open error.
+
+    Only the known transient launch-services failure is retried. Any other
+    failure returns at once, so a real identity problem is never hidden.
+    """
+    import time
+
+    result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(1, _PROBE_OPEN_ATTEMPTS + 1):
+        probe.unlink(missing_ok=True)
+        result = subprocess.run(
+            macos_launch_services_command(
+                bundle,
+                wait_for_exit=True,
+                new_instance=True,
+                arguments=("--jarvis-identity-probe", str(probe)),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            creationflags=NO_WINDOW_CREATIONFLAGS,
+        )
+        transient = result.returncode != 0 and _TRANSIENT_OPEN_STDERR in (result.stderr or "")
+        if not transient or attempt == _PROBE_OPEN_ATTEMPTS:
+            return result
+        if diagnostics is not None:
+            diagnostics.append(f"open attempt {attempt} hit a transient launch error; retrying")
+        log.warning("macOS identity probe: transient launch error, retrying once")
+        time.sleep(_PROBE_RETRY_PAUSE_S)
+    assert result is not None  # noqa: S101 - the loop always runs at least once
+    return result
+
 
 
 def _install_native_bundle(

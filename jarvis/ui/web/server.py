@@ -2928,6 +2928,15 @@ class WebServer:
             )
         _boot_mark("mission_stack")
 
+        # Keep the CLI usage index current without waiting for the cost page.
+        # Armed on a timer, so nothing here runs on the boot path (AP-26).
+        try:
+            from jarvis.ui.web.costs_routes import warm_index_after_boot
+
+            warm_index_after_boot()
+        except Exception as exc:  # noqa: BLE001 - an index warm-up never blocks boot
+            logger.opt(exception=exc).warning("cli usage index warm-up not armed")
+
         # Screenshot retention: auto-delete old Vision / Flight-Recorder blobs
         # (data/flight_recorder/blobs/) after the configured window. Runs a
         # one-shot boot sweep plus a periodic background task.
