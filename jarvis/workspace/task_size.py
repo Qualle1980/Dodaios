@@ -104,9 +104,11 @@ def pick_for_size(
 ) -> SizePick:
     """Live catalog model and effort for ``agent`` at ``size``, or empty picks.
 
-    ``size`` is one of :data:`TASK_SIZES`. Unknown agent or size, or an empty
-    live list, returns an empty :class:`SizePick` — callers must not invent a
-    fallback id.
+    ``size`` is one of :data:`TASK_SIZES`. Unknown agent or size, an empty
+    live list, or a list the account did not confirm, returns an empty
+    :class:`SizePick` — callers must not invent a fallback id. An unconfirmed
+    (cached) id may be stale; the CLI then refuses it, so the CLI default is
+    used instead.
     """
     cli = _AGENT_TO_CLI.get((agent or "").strip())
     size_key = (size or "").strip().lower()
@@ -114,7 +116,7 @@ def pick_for_size(
         return SizePick()
     lists = store or shared_store()
     result = lists.ensure(cli)
-    if not result.models:
+    if not result.models or not result.confirmed:
         return SizePick()
     scorers = {"simple": _score_simple, "normal": _score_normal, "hard": _score_hard}
     chosen = min(result.models, key=scorers[size_key])

@@ -8753,13 +8753,19 @@ class BrainManager:
                     agent = _spawn_agent_for_picks(group.agent, fallback_agent)
                     picks = _resolve_spawn_launch_picks(agent, user_text)
                     if isinstance(picks, dict):
+                        # One group that cannot take this model is that group's
+                        # refusal; the other groups still open and the refusal
+                        # is named with the result (not a reason to drop them all).
                         bad = picks.get("model") or picks.get("effort") or ""
-                        return action_phrase(
-                            "ide_terminal_model_unknown",
-                            out_lang,
-                            model=bad,
-                            cli=agent,
+                        refused.append(
+                            action_phrase(
+                                "ide_terminal_model_unknown",
+                                out_lang,
+                                model=bad,
+                                cli=agent,
+                            )
                         )
+                        continue
                     model, effort = picks
                     planned.append((group.agent, group.count, model, effort))
                 created = []
