@@ -42,8 +42,8 @@ def test_cumulative_input_backstop_trips_only_on_runaway_loops():
     # input backstop bounds that tail without touching legitimate flows —
     # and unlike the 2026-06-01 trap, a single large-context turn stays
     # far below it.
-    # The shipped default is far higher (maintainer mandate 2026-08-24: no
-    # cost backstop); the guard itself still works when an operator sets one.
+    # Explicit ceiling here: the shipped default is 80k (2026-11-17); this
+    # pins the cumulative-input trip itself at a larger operator-set bound.
     b = IterationBudget(
         max_turns=100, max_tokens_total=50_000, max_input_tokens_total=400_000
     )

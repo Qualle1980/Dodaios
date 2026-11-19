@@ -41,26 +41,26 @@ def _manager(active: str, available: dict[str, object]) -> BrainManager:
 
 
 def test_plan_seat_talker_is_led_by_a_keyless_local_runtime() -> None:
-    """ollama leads, not the API provider the chain's seat filter would drop."""
-    mgr = _manager("chatgpt-web", {"gemini": object, "ollama": object})
+    """local-openai leads, not the API provider the chain's seat filter would drop."""
+    mgr = _manager("chatgpt-web", {"gemini": object, "local-openai": object})
     mgr._brain_cache[("gemini", "gemini-fast")] = _ToolCapableBrain()
-    mgr._brain_cache[("ollama", "ollama-fast")] = _ToolCapableBrain()
+    mgr._brain_cache[("local-openai", "local-openai-fast")] = _ToolCapableBrain()
 
-    assert mgr._first_tool_capable_provider("fast") == ("ollama", "ollama-fast")
+    assert mgr._first_tool_capable_provider("fast") == ("local-openai", "local-openai-fast")
 
 
 def test_a_plan_seat_lead_survives_the_chain_seat_filter() -> None:
     """The whole point: the lead must still be there after the chain is built."""
-    mgr = _manager("chatgpt-web", {"gemini": object, "ollama": object})
+    mgr = _manager("chatgpt-web", {"gemini": object, "local-openai": object})
     mgr._brain_cache[("gemini", "gemini-fast")] = _ToolCapableBrain()
-    mgr._brain_cache[("ollama", "ollama-fast")] = _ToolCapableBrain()
+    mgr._brain_cache[("local-openai", "local-openai-fast")] = _ToolCapableBrain()
     mgr._active_can_call_tools = lambda: False  # type: ignore[assignment]
     mgr._turn_substantive = True
 
     chain = mgr._build_fallback_chain("fast")
 
-    assert mgr._router_lead_key == ("ollama", "ollama-fast")
-    assert ("ollama", "ollama-fast") in chain
+    assert mgr._router_lead_key == ("local-openai", "local-openai-fast")
+    assert ("local-openai", "local-openai-fast") in chain
     assert all(name != "gemini" for name, _ in chain), (
         "a stored API key must never stand in for the user's plan seat"
     )
@@ -77,24 +77,24 @@ def test_no_key_billed_lead_for_a_plan_seat_talker() -> None:
 
 def test_keyless_install_finds_a_local_lead() -> None:
     """Not seat-bound, but key-billed providers were the only candidates before."""
-    mgr = _manager("codex", {"ollama": object})
-    mgr._brain_cache[("ollama", "ollama-fast")] = _ToolCapableBrain()
+    mgr = _manager("codex", {"local-openai": object})
+    mgr._brain_cache[("local-openai", "local-openai-fast")] = _ToolCapableBrain()
 
-    assert mgr._first_tool_capable_provider("fast") == ("ollama", "ollama-fast")
+    assert mgr._first_tool_capable_provider("fast") == ("local-openai", "local-openai-fast")
 
 
 def test_an_unconfigured_local_runtime_does_not_win_the_lead() -> None:
-    """Two local runtimes registered, one configured: the configured one leads.
+    """Configured local-openai leads a plan seat; ollama never does automatically.
 
-    Both are keyless and tool-capable, so the seat policy permits either. The
-    install's second local runtime has no model configured, and a lead with no
-    model can never answer — plain alphabetical order handed it the turn.
+    Ollama may still be registered and configured, but it is blocklisted from
+    keyless seat successors (Ahmad 2026-11-17). The seat policy therefore
+    permits only local-openai, which must be the configured lead.
     """
     mgr = _manager("chatgpt-web", {"local-openai": object, "ollama": object})
-    models = {"ollama": "qwen3.5:4b", "local-openai": ""}
+    models = {"ollama": "qwen3.5:4b", "local-openai": "qwen2.5-7b"}
     mgr._fast_model = lambda name: models.get(name, "")  # type: ignore[method-assign]
     mgr._deep_model = lambda name: models.get(name, "")  # type: ignore[method-assign]
     mgr._brain_cache[("ollama", "qwen3.5:4b")] = _ToolCapableBrain()
-    mgr._brain_cache[("local-openai", "")] = _ToolCapableBrain()
+    mgr._brain_cache[("local-openai", "qwen2.5-7b")] = _ToolCapableBrain()
 
-    assert mgr._first_tool_capable_provider("fast") == ("ollama", "qwen3.5:4b")
+    assert mgr._first_tool_capable_provider("fast") == ("local-openai", "qwen2.5-7b")

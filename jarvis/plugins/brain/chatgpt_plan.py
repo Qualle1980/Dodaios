@@ -123,6 +123,19 @@ def _log_weight(body: dict[str, Any]) -> None:
     )
 
 
+def _sorted_tools(tools: Any) -> list[Any]:
+    """Name-sorted tool list so the rendered prefix is insertion-order stable.
+
+    OpenAI prompt caching matches the full rendered prefix, including tool
+    order (docs 2026-11). A dict-built catalogue that shuffled between calls
+    produced a new ``prompt_cache_key`` and a different prefix for the same
+    schemas — measured Instant coding turns often showed ``cached_tokens=0``
+    even when instruction weight was unchanged.
+    """
+    rows = list(tools or [])
+    return sorted(rows, key=lambda t: str((t or {}).get("name") or ""))
+
+
 def _cache_key(model: str, instructions: str, tools: Any) -> str:
     """A routing key for the part of the request that never changes.
 
@@ -135,13 +148,16 @@ def _cache_key(model: str, instructions: str, tools: Any) -> str:
     one cache hit in twenty-four).
 
     The model is part of the key because a cache entry never crosses models.
+    Tools are name-sorted before hashing so insertion order cannot move the key.
     """
     digest = hashlib.sha256()
     digest.update(model.encode("utf-8"))
     digest.update(b"\x00")
     digest.update(instructions.encode("utf-8"))
     digest.update(b"\x00")
-    digest.update(json.dumps(tools or [], sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    digest.update(
+        json.dumps(_sorted_tools(tools), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     return f"jarvis-{digest.hexdigest()[:32]}"
 
 
@@ -153,7 +169,8 @@ def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
     instructions keep this route's own order: the request's system prompt,
     then system messages.
     """
-    names = tool_name_map(req)
+    ordered = tuple(_sorted_tools(tuple(req.tools or ())))
+    names = _openai_tool_name_map(ordered) if ordered else {}
     chat = _to_openai_messages(
         tuple(req.messages), None, supports_vision=True, tool_name_map=names,
     )
@@ -163,8 +180,8 @@ def build_body(req: BrainRequest, model: str) -> dict[str, Any]:
     instructions = "\n\n".join(p for p in (req.system or "", *extra_system) if p)
     if instructions:
         body["instructions"] = instructions
-    if req.tools:
-        body["tools"] = _tools_responses_format(_tools_openai_format(tuple(req.tools), names))
+    if ordered:
+        body["tools"] = _tools_responses_format(_tools_openai_format(ordered, names))
     body["prompt_cache_key"] = _cache_key(model, body.get("instructions", ""), body.get("tools"))
     _log_weight(body)
     return body
@@ -221,11 +238,20 @@ class ChatGPTPlanBrain:
     #: time and reads this instead (its own comment names the incident).
     last_model: str = ""
 
-    def __init__(self, model: str | None = None, structured_prompts: bool = True) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        structured_prompts: bool = True,
+        cli_timeout_s: float | None = None,
+    ) -> None:
         # ``structured_prompts`` is accepted for resolve_subscription_brain: an
         # API brain has no conversational wrapper, so every request already
         # carries the caller's contract and full history verbatim.
-        del structured_prompts
+        # ``cli_timeout_s`` is accepted for the same resolver: the CLI brains take
+        # it, and without it this seat was skipped ("cannot forward a system
+        # contract") and the composer fell to claude-cli. This route is HTTP, so
+        # the value is not used here.
+        del structured_prompts, cli_timeout_s
         model = (model or "").strip()
         self._model = model.removeprefix("chatgpt-plan/")
 

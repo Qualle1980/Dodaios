@@ -10,8 +10,10 @@ Adding a new provider:
 2. Implement ``XxxFlashAck`` here in its own module, conforming to
    the AbstractAckProvider Protocol from base.py.
 3. Add the entry to REGISTRY below.
-4. Add ``"xxx"`` to ``SUPPORTED_PROVIDERS`` in config.py so the
-   field validator accepts it.
+4. Add ``"xxx"`` to ``SUPPORTED_PROVIDERS`` in config.py when the
+   adapter may be chosen automatically (follow_brain / failover).
+   Leave it out of SUPPORTED_PROVIDERS for an explicit-only pin
+   (``[ack_brain].provider = "xxx"`` still constructs via REGISTRY).
 """
 from __future__ import annotations
 

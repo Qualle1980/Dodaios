@@ -138,6 +138,73 @@ def _coding_cli(spoken: str) -> str | None:
     return None
 
 
+def _validated_launch_picks(
+    agent: str | None,
+    model: Any,
+    effort: Any,
+) -> tuple[str, str] | dict[str, Any]:
+    """Normalize Instant create model/effort, or return an honest refusal.
+
+    An explicit id that is not on the CLI's **live** model list is refused
+    (``jarvis.agentic_ide.model_lists``). CLIs without a live list still go
+    through ``launch_picks.normalize_*``.
+    """
+    from jarvis.workspace import launch_picks
+
+    if not agent:
+        wanted_model = str(model or "").strip()
+        wanted_effort = str(effort or "").strip()
+        if wanted_model or wanted_effort:
+            return {
+                "status": "not_accepted",
+                "reason": (
+                    "A model or effort was requested but no coding CLI was chosen. "
+                    "Name the CLI first."
+                ),
+            }
+        return "", ""
+    wanted_model = str(model or "").strip()
+    wanted_effort = str(effort or "").strip()
+    got_model = ""
+    got_effort = ""
+    if wanted_model:
+        from jarvis.agentic_ide.model_lists import KNOWN_CLIS, validate_model_id
+
+        live_cli = agent.strip().lower()
+        if live_cli in {"grok-build", "grok-cli"}:
+            live_cli = "grok"
+        if live_cli in {"claude-cli", "claude-code"}:
+            live_cli = "claude"
+        if live_cli in {"codex-cli", "openai-codex"}:
+            live_cli = "codex"
+        if live_cli in KNOWN_CLIS:
+            checked = validate_model_id(live_cli, wanted_model)
+            if isinstance(checked, dict):
+                return checked
+            got_model = checked
+        else:
+            got_model = launch_picks.normalize_model(agent, wanted_model)
+            if got_model != wanted_model:
+                return {
+                    "status": "not_accepted",
+                    "reason": (
+                        f"Model {wanted_model!r} is not in the catalog for {agent}. "
+                        "Use a catalog id for that CLI; never invent one."
+                    ),
+                }
+    if wanted_effort:
+        got_effort = launch_picks.normalize_effort(agent, wanted_effort)
+        if got_effort != wanted_effort:
+            return {
+                "status": "not_accepted",
+                "reason": (
+                    f"Effort {wanted_effort!r} is not supported for {agent}. "
+                    "Use a level from that CLI's effort ladder."
+                ),
+            }
+    return got_model, got_effort
+
+
 def _default_cli() -> str | None:
     """The first installed coding CLI, for a request that names none."""
     from jarvis.workspace import agents as workspace_agents
@@ -725,6 +792,43 @@ class WorkspaceOrchestrator:
                     a.name for a in workspace_agents.coding_agents() if accepts_prompts(a.name)
                 ],
             }
+        # A new coding task takes a loop slot first, then always create()s a
+        # fresh pane. Never send into a busy existing pane for new work.
+        prompt_early = str(args.get("prompt") or "").strip()
+        loop_slot_handle = ""
+        if prompt_early:
+            from jarvis.agent_chat.loop_scheduler import (
+                Acquired,
+                Queued,
+                SCHEDULER,
+                slot_for_cli,
+            )
+
+            preferred = str(args.get("agent_pref") or "").strip().casefold()
+            slot = slot_for_cli(cli)
+            if preferred == "either":
+                acquire_agent: str | None = "either"
+            elif preferred in {"claude", "grok-build"}:
+                acquire_agent = preferred
+            elif slot in {"claude", "grok-build"}:
+                acquire_agent = slot
+            else:
+                acquire_agent = None
+            if acquire_agent is not None:
+                outcome = SCHEDULER.try_acquire(acquire_agent, "code")
+                if isinstance(outcome, Queued):
+                    return {
+                        "status": "queued",
+                        "success": False,
+                        "reason": outcome.message,
+                        "slot": outcome.agent,
+                        "queue_position": outcome.position,
+                        "loop_slot_handle": outcome.handle,
+                        "project_id": project["id"],
+                        "workspace_id": workspace["id"],
+                    }
+                if isinstance(outcome, Acquired):
+                    loop_slot_handle = outcome.handle
         try:
             count = int(args.get("count") or 1)
         except (TypeError, ValueError):  # a malformed count falls back to one terminal
@@ -740,29 +844,54 @@ class WorkspaceOrchestrator:
             groups = self._groups(args)
             if isinstance(groups, dict):
                 return groups
-            count = sum(n for _, n in groups)
+            count = sum(n for _, n, _m, _e in groups)
+        else:
+            picks = _validated_launch_picks(
+                cli or _default_cli(),
+                args.get("model"),
+                args.get("effort"),
+            )
+            if isinstance(picks, dict):
+                return picks
+            top_model, top_effort = picks
         try:
             if isinstance(mixed, list) and mixed:
                 created, capped = [], False
-                for group_cli, group_count in groups:
+                for group_cli, group_count, group_model, group_effort in groups:
                     made, cut = await self.registry.add_terminals(
-                        group_count, agent=group_cli, workspace_id=workspace["id"]
+                        group_count,
+                        agent=group_cli,
+                        workspace_id=workspace["id"],
+                        model=group_model or None,
+                        effort=group_effort or None,
                     )
                     created.extend(made)
                     capped = capped or cut
             elif count == 1 and name:
                 created = [
                     await self.registry.add_terminal(
-                        workspace_id=workspace["id"], agent=cli, name=name
+                        workspace_id=workspace["id"],
+                        agent=cli,
+                        name=name,
+                        model=top_model or None,
+                        effort=top_effort or None,
                     )
                 ]
                 capped = False
             else:
                 created, capped = await self.registry.add_terminals(
-                    count, agent=cli, workspace_id=workspace["id"]
+                    count,
+                    agent=cli,
+                    workspace_id=workspace["id"],
+                    model=top_model or None,
+                    effort=top_effort or None,
                 )
         except SessionError as exc:  # Return the refusal or partial creation receipt to the caller.
             if not created:
+                if loop_slot_handle:
+                    from jarvis.agent_chat.loop_scheduler import SCHEDULER
+
+                    SCHEDULER.release(loop_slot_handle)
                 return {
                     "status": "not_accepted",
                     "reason": str(exc),
@@ -795,6 +924,7 @@ class WorkspaceOrchestrator:
             "requested": count,
             "capped": capped,
             **({"creation_error": creation_error, "success": False} if creation_error else {}),
+            **({"loop_slot_handle": loop_slot_handle} if loop_slot_handle else {}),
         }
         # Persist identity before slow CLI startup. Cancellation or a late result
         # must never turn "pane allocated" into permission to allocate another.
@@ -1149,7 +1279,15 @@ class WorkspaceOrchestrator:
         groups = self._groups(args)
         if isinstance(groups, dict):
             return groups
-        requested = [{"agent": cli} for cli, count in groups for _ in range(count)]
+        requested = [
+            {
+                "agent": cli,
+                **({"model": model} if model else {}),
+                **({"effort": effort} if effort else {}),
+            }
+            for cli, count, model, effort in groups
+            for _ in range(count)
+        ]
         if len(requested) > MAX_PANES_PER_REQUEST:
             return {
                 "status": "not_accepted",
@@ -1215,15 +1353,19 @@ class WorkspaceOrchestrator:
         return result
 
     @staticmethod
-    def _groups(args: dict[str, Any]) -> list[tuple[str | None, int]] | dict[str, Any]:
-        """``agents: [{cli, count}]`` (or one ``cli``/``count``) as (CLI, count) pairs.
+    def _groups(
+        args: dict[str, Any],
+    ) -> list[tuple[str | None, int, str, str]] | dict[str, Any]:
+        """``agents: [{cli, count, model?, effort?}]`` as (CLI, count, model, effort).
 
         "Five Claude Code and three Codex" is one request; each group keeps the
-        CLI as spoken until ``_coding_cli`` names the pane's real CLI.
+        CLI as spoken until ``_coding_cli`` names the pane's real CLI. An
+        explicit model/effort that is not in that CLI's catalog is refused
+        with an honest error — never guessed.
         """
         raw = args.get("agents")
         entries = raw if isinstance(raw, list) and raw else [args]
-        groups: list[tuple[str | None, int]] = []
+        groups: list[tuple[str | None, int, str, str]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -1244,8 +1386,12 @@ class WorkspaceOrchestrator:
                 count = int(entry.get("count") or 1)
             except (TypeError, ValueError):  # a malformed count falls back to one terminal
                 count = 1
-            groups.append((cli, max(1, min(count, MAX_PANES_PER_REQUEST))))
-        return groups or [(_default_cli(), 1)]
+            picks = _validated_launch_picks(cli, entry.get("model"), entry.get("effort"))
+            if isinstance(picks, dict):
+                return picks
+            model, effort = picks
+            groups.append((cli, max(1, min(count, MAX_PANES_PER_REQUEST)), model, effort))
+        return groups or [(_default_cli(), 1, "", "")]
 
     async def _brief(
         self, targets: list[dict[str, str]], prompt: str, trace_id: str,
@@ -1691,8 +1837,10 @@ class WorkspaceOrchestrator:
                        if can_steer else "")
                     + "while_busy='interrupt' (stops the turn, keeps the session, then "
                     "delivers). while_busy='queue' delivers it when the turn ends. A new or "
-                    "unrelated task waits, goes to another agent, or is the user's call."
+                    "unrelated task: use create after the slot is free "
+                    "(never send a new task into this busy pane)."
                 ),
+                "hint": "use create after the slot is free",
             }
         except SessionError as exc:
             # The coding-session adapter documents SessionError as a

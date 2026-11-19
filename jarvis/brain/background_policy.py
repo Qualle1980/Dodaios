@@ -138,6 +138,9 @@ def subscription_capable(provider: str) -> bool:
 
 
 def keyless_local(provider: str) -> bool:
+    # Ollama is never an automatic successor of a plan seat (Ahmad 2026-11-17).
+    if provider == "ollama":
+        return False
     return _billing(provider) == "local"
 
 

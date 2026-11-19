@@ -979,13 +979,17 @@ def read_codex_models(*, required_model: str = "") -> list[dict[str, Any]] | Non
 
     Config-isolation flags belong to ``codex exec`` and are not accepted by
     ``codex app-server``. Discovery only reads model/list; it starts no turn.
+    Uses the 15 s listing budget (research 2026-11-17: the prior 8 s default
+    timed out on this PC and refused every model via a cached ``None``).
     """
+    from jarvis.agentic_ide.model_lists import CODEX_LIST_TIMEOUT_S
+
     env = _account_env("codex")
     argv = codex_argv_prefix()
     cwd = _catalog_cwd()
     rows = _CODEX_CATALOG.read(
         catalog_key(argv, env, cwd),
-        lambda: discover_codex_models(argv, env, cwd),
+        lambda: discover_codex_models(argv, env, cwd, timeout_s=CODEX_LIST_TIMEOUT_S),
         required_model=required_model,
     )
     _remember_models("codex-cli", rows)

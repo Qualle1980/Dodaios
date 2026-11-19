@@ -1488,6 +1488,106 @@ def _terminals_spawned_line(
     )
 
 
+#: Work handed to a terminal rather than a request to open more panes.
+#: "Gib dem Claude-Code-Terminal einen Auftrag …" uses give/gib as a handoff
+#: verb; without this, ``detect_spawn`` treats it as "open one pane" because
+#: ``gib`` is also an open-verb stem ("gib mir zwei Terminals").
+_HANDOFF_TO_TERMINAL_RE = re.compile(
+    r"\b(?:gib|geb\w*|give|assign)\b"
+    r"\s+(?:dem|der|den|the)\s+"
+    r".{0,48}?\b(?:terminal|pane)s?\b",
+    re.IGNORECASE,
+)
+
+#: Nouns that mark a coding task on the utterance (DE/EN at least).
+_TASK_NOUN_RE = re.compile(
+    r"\b(?:auftrag\w*|aufgabe\w*|task|assignment|job)\b",
+    re.IGNORECASE,
+)
+
+#: Explicit model pick on a pure-open utterance ("with model X" / "mit Modell X").
+_EXPLICIT_SPAWN_MODEL_RE = re.compile(
+    r"\b(?:with\s+|mit\s+)?(?:model|modell)\s*[:=]?\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,119})",
+    re.IGNORECASE,
+)
+
+#: Explicit effort pick ("with effort medium" / "mit Aufwand high").
+_EXPLICIT_SPAWN_EFFORT_RE = re.compile(
+    r"\b(?:with\s+|mit\s+)?(?:effort|aufwand)\s*[:=]?\s*"
+    r"([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+
+
+def is_pure_open_request(text: str) -> bool:
+    """True only for a pure "open N panes" request with no task text.
+
+    The spawn fast-path may open panes only when this returns True. Anything
+    that also carries work (a file to create, a build, a review, "Gib dem
+    …-Terminal einen Auftrag …") returns False so Instant chooses model and
+    effort and briefs. Deterministic; German and English; no LLM.
+    """
+    from jarvis.agentic_ide import intent as ide_intent
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if ide_intent.detect_spawn(cleaned) is None:
+        return False
+    if ide_intent.spawn_includes_task(cleaned):
+        return False
+    if _HANDOFF_TO_TERMINAL_RE.search(cleaned) and _TASK_NOUN_RE.search(cleaned):
+        return False
+    if _TASK_NOUN_RE.search(cleaned):
+        return False
+    return True
+
+
+def _explicit_spawn_model(text: str) -> str:
+    match = _EXPLICIT_SPAWN_MODEL_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _explicit_spawn_effort(text: str) -> str:
+    match = _EXPLICIT_SPAWN_EFFORT_RE.search(text or "")
+    return match.group(1).strip().lower() if match else ""
+
+
+def _resolve_spawn_launch_picks(
+    agent: str, user_text: str
+) -> tuple[str, str] | dict[str, str]:
+    """Catalog model/effort for a pure-open group, or a refusal payload.
+
+    Same rules as ``workspace-orchestrate`` create: an omitted model uses the
+    cheap ``simple`` default for that CLI; an explicit id is checked with
+    ``launch_picks.normalize_model`` / ``normalize_effort`` against the
+    catalogs. Never invent an id.
+    """
+    from jarvis.workspace import launch_picks, task_size
+
+    wanted_model = _explicit_spawn_model(user_text)
+    wanted_effort = _explicit_spawn_effort(user_text)
+    if wanted_model:
+        got_model = launch_picks.normalize_model(agent, wanted_model)
+        if got_model != wanted_model:
+            return {"status": "not_accepted", "model": wanted_model, "cli": agent}
+        model = got_model
+    else:
+        model = task_size.pick_for_size(agent, "simple").model
+
+    if wanted_effort:
+        got_effort = launch_picks.normalize_effort(agent, wanted_effort)
+        if got_effort != wanted_effort:
+            return {"status": "not_accepted", "effort": wanted_effort, "cli": agent}
+        effort = got_effort
+    elif not wanted_model:
+        effort = task_size.pick_for_size(agent, "simple").effort
+    else:
+        effort = ""
+    return model, effort
+
+
 # Conversational coaching: "help me [get better at a soft / cognitive /
 # conversational skill]" — asking, thinking, phrasing, deciding, understanding,
 # expressing, communicating. This is CONVERSATION (Jarvis answers inline and
@@ -2477,12 +2577,9 @@ _TOOL_ROUTING_RULES = (
 # old wording sat under a list that did not contain the tools it named, so it
 # read as an order to refuse work the surface actually covered (PR-05).
 _TOOL_LIST_RULE = (
-    "STRENGE REGEL: Rufe ausschließlich Werkzeuge aus dieser Liste auf und "
-    "erfinde niemals einen Werkzeugnamen. Passt für die gewünschte Aktion "
-    "wirklich keines, sag ehrlich: "
-    "'Das kann ich noch nicht — mir fehlt das passende Werkzeug.' "
-    "Und behaupte NIEMALS, etwas getan zu haben, das du nicht in diesem Turn "
-    "wirklich aufgerufen hast und dessen Ergebnis du gesehen hast.\n"
+    # English once: the bilingual duplicate cost ~75 tokens every call and
+    # the model already follows the English half. The German user-facing
+    # refusal still appears in spoken/written replies via other rules.
     "Call ONLY tools from the list above and never invent a tool name. If "
     "nothing fits, say honestly: \"I can't do that yet — I don't have a "
     "registered tool for it.\" And NEVER claim to have done something you did "
@@ -3910,6 +4007,7 @@ class BrainManager:
         loop_control: Any = None,
         own_tools: Iterable[str] = (),
         direct_tools: frozenset[str] | None = None,
+        budget: Any = None,
     ) -> BrainDispatcher:
         """Builds the dispatcher with an optional tool override.
 
@@ -3977,6 +4075,8 @@ class BrainManager:
         kwargs: dict[str, Any] = {}
         if max_turns is not None:
             kwargs["max_turns"] = max_turns
+        if budget is not None:
+            kwargs["budget"] = budget
         return BrainDispatcher(
             brain,
             tools=tools,
@@ -4019,6 +4119,8 @@ class BrainManager:
             kwargs["own_tools"] = tuple(override.tools_extra)
         if override.tools_direct is not None:
             kwargs["direct_tools"] = override.tools_direct
+        if override.budget is not None:
+            kwargs["budget"] = override.budget
         return kwargs
 
     async def render_surface_prompt(
@@ -4535,12 +4637,13 @@ class BrainManager:
                 pass
 
         # Mandate phase 2 (reactivated 2026-04-28): persona block from
-        # JARVIS_PERSONA.md incl. ECHO-PARAPHRASE section and hangup contract.
-        # The "effective" loader returns the user's custom system prompt when one
-        # is set in Settings (data/custom_system_prompt.md), else the packaged
-        # default. Read fresh each turn, so an edit/reset applies on the next turn
-        # without a restart. Empty string when nothing is available — no crash.
-        persona_block = load_effective_persona_prompt()
+        # JARVIS_PERSONA.md. Written (typed) turns use the compact persona:
+        # Instant coding was re-sending the full ~3300-token voice handbook
+        # every call, then overriding it with WRITTEN_CHAT_STYLE. Compact keeps
+        # character, language and honesty; voice-only sections (hangup, long
+        # echo examples, spoken-digit rules) stay in the full persona for
+        # speech. Custom override still wins (loader contract).
+        persona_block = load_effective_persona_prompt(compact=_is_written_turn())
         if persona_block:
             parts.append(persona_block)
 
@@ -4748,24 +4851,23 @@ class BrainManager:
 
         # Structural-only base block (2026-06-29 consolidation): the editable
         # persona above now OWNS voice / tone / length / anti-filler /
-        # screen-context rules. They used to be duplicated AND contradicted here
-        # (this block said "KEINE Ein-Satz-Pflicht" while the old persona said
-        # "one or two sentences, never paragraphs" — the mixed signal that made
-        # replies choppy). This block keeps ONLY the non-editable structural
-        # truths: the runtime name stitch + the action/tool routing pointer.
-        # Platform-neutral (no "Windows 11" — cloud-first doctrine).
-        base = (
-            f"Du bist {name}, der persoenliche Meta-Orchestrator dieses Users. "
-            "Deine Stimme, dein Ton und deine Antwortlaenge richten sich nach der "
-            "Persona-Beschreibung weiter oben in diesem Prompt; halte dich an sie "
-            "und erfinde keine eigenen Stil- oder Laengen-Regeln. "
-            "Bei Aktionen: passende Tools sofort aufrufen, mehrere im selben Turn "
-            "wenn noetig. Aufgaben fuer einen deiner Agenten (Karte 'Your agent "
-            "society'): delegate_to_agent. Bei echten Brocken ohne passenden Agenten "
-            "(Code bauen/refactoren, langer Bericht, Multi-Step-Aufgabe): spawn_worker "
-            "mit der User-Utterance. Bildschirm/Apps bedienen: computer_use."
-        )
-        parts.append(base)
+        # screen-context rules. Written turns already carry the compact persona,
+        # TOOL_ROUTING_RULES and WRITTEN_CHAT_STYLE — repeating this German
+        # meta-orchestrator block duplicated ~150 tokens every Instant call.
+        # Voice turns keep it: spoken prompts have no WRITTEN_CHAT_STYLE.
+        if not _is_written_turn():
+            base = (
+                f"Du bist {name}, der persoenliche Meta-Orchestrator dieses Users. "
+                "Deine Stimme, dein Ton und deine Antwortlaenge richten sich nach der "
+                "Persona-Beschreibung weiter oben in diesem Prompt; halte dich an sie "
+                "und erfinde keine eigenen Stil- oder Laengen-Regeln. "
+                "Bei Aktionen: passende Tools sofort aufrufen, mehrere im selben Turn "
+                "wenn noetig. Aufgaben fuer einen deiner Agenten (Karte 'Your agent "
+                "society'): delegate_to_agent. Bei echten Brocken ohne passenden Agenten "
+                "(Code bauen/refactoren, langer Bericht, Multi-Step-Aufgabe): spawn_worker "
+                "mit der User-Utterance. Bildschirm/Apps bedienen: computer_use."
+            )
+            parts.append(base)
 
         # Always-on self-control truth (see _SELF_CONTROL_STANDING rationale):
         # keyword-free self-control phrasings must still find the tool path,
@@ -8536,6 +8638,11 @@ class BrainManager:
             return None
         if request is None:
             return None
+        # A pending CLI answer is still a pure open of the held fleet. Every
+        # other turn that carries task text stands down so Instant (typed chat)
+        # or the normal brain path chooses model/effort and briefs.
+        if answered is None and not is_pure_open_request(user_text):
+            return None
 
         out_lang = resolve_output_language(
             self._reply_language,
@@ -8599,6 +8706,9 @@ class BrainManager:
             # a substitute pane would grant a request that was just refused.
             return " ".join(refused) if refused else None
 
+        def _spawn_agent_for_picks(group_agent: str | None, fallback: str) -> str:
+            return group_agent or fallback
+
         try:
             if registry.session is None:
                 # No workspace open: take the most recent one. Reading the
@@ -8611,21 +8721,49 @@ class BrainManager:
                     return action_phrase("ide_terminals_nowhere", out_lang)
                 recent = entries[0]
                 fallback_agent = request.agent or _recent_agent(recent)
-                # One spec per pane, group by group: "5 Codex and 3 Claude Code
-                # terminals" is a mixed fleet, and collapsing it to one agent
-                # opened five of the first kind and silently dropped the rest
-                # (maintainer report 2026-07-26).
-                specs = [
-                    {"agent": group.agent or fallback_agent}
-                    for group in request.groups
-                    for _ in range(group.count)
-                ]
+                # Validate every group's model/effort BEFORE start — an unknown
+                # id must not open any pane of the fleet.
+                specs: list[dict[str, str]] = []
+                for group in request.groups:
+                    agent = _spawn_agent_for_picks(group.agent, fallback_agent)
+                    picks = _resolve_spawn_launch_picks(agent, user_text)
+                    if isinstance(picks, dict):
+                        bad = picks.get("model") or picks.get("effort") or ""
+                        return action_phrase(
+                            "ide_terminal_model_unknown",
+                            out_lang,
+                            model=bad,
+                            cli=agent,
+                        )
+                    model, effort = picks
+                    for _ in range(group.count):
+                        specs.append(
+                            {"agent": agent, "model": model, "effort": effort}
+                        )
                 session = await registry.start(recent.path, specs)
                 created = list(session.terminals)
                 folder_label = recent.name
             else:
-                created = []
+                from jarvis.agentic_ide.session import _prevailing_agent
+
+                fallback_agent = _prevailing_agent(registry.session) or "claude"
+                # Same validate-before-open rule as the start path above.
+                planned: list[tuple[str | None, int, str, str]] = []
                 for group in request.groups:
+                    agent = _spawn_agent_for_picks(group.agent, fallback_agent)
+                    picks = _resolve_spawn_launch_picks(agent, user_text)
+                    if isinstance(picks, dict):
+                        bad = picks.get("model") or picks.get("effort") or ""
+                        return action_phrase(
+                            "ide_terminal_model_unknown",
+                            out_lang,
+                            model=bad,
+                            cli=agent,
+                        )
+                    model, effort = picks
+                    planned.append((group.agent, group.count, model, effort))
+                created = []
+                for group_agent, count, model, effort in planned:
                     # One group's failure is that GROUP's failure.
                     #
                     # A CLI that is not installed, or one whose binary vanished,
@@ -8638,12 +8776,15 @@ class BrainManager:
                     # instead of all at once.
                     try:
                         opened, _capped = await registry.add_terminals(
-                            group.count, agent=group.agent
+                            count,
+                            agent=group_agent,
+                            model=model,
+                            effort=effort,
                         )
                     except SessionError as exc:
                         log.info(
                             "Agentic IDE spawn: %s group refused: %s",
-                            group.agent or "inherited",
+                            group_agent or "inherited",
                             exc,
                         )
                         refused.append(str(exc))
@@ -11338,7 +11479,6 @@ class BrainManager:
         """
         from jarvis.brain.background_policy import (
             chat_fallback_providers,
-            keyless_local,
             login_state,
         )
         from jarvis.brain.resolver import _resolve_chain
@@ -11387,8 +11527,16 @@ class BrainManager:
             primary=override.provider,
         )
         stand_ins = [entry for entry in resolved if policy.permits(entry[0])]
-        cloud = [entry for entry in stand_ins if not keyless_local(entry[0])]
-        local = [entry for entry in stand_ins if keyless_local(entry[0])]
+        # Sort by card billing, not keyless_local: ollama stays "local" on the
+        # card even when it is blocklisted as an automatic seat successor, and
+        # a connected subscription seat must still answer before any local.
+        billing = {spec.id: provider_billing(spec) for spec in PROVIDERS}
+        cloud = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") != "local"
+        ]
+        local = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") == "local"
+        ]
         chain.extend(cloud)
         chain.extend(local)
         return list(dict.fromkeys(chain))

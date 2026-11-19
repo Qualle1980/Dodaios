@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from jarvis.core.protocols import ReasoningEffort, Tool
 
+from .iteration_budget import IterationBudget
 from .loop_control import LoopControl
 
 GuardFailureReason = Literal["mandated_tool_unfulfilled", "unbacked_action_claim"]
@@ -131,6 +132,10 @@ class TurnOverride:
         Steering, phase reports and the verification pass for this turn
         (``jarvis/brain/loop_control.py``). ``None`` leaves the tool-use loop
         exactly as it was, which is what voice, tasks and missions get.
+    ``budget``
+        Shared ``IterationBudget`` for a multi-wave chat turn (Instant coding
+        via ``run_with_delegates``). ``None`` lets the dispatcher allocate a
+        fresh budget for this generate call only.
     """
 
     provider: str
@@ -145,6 +150,7 @@ class TurnOverride:
     allow_force_spawn: bool = False
     system_extra: str = ""
     loop_control: LoopControl | None = None
+    budget: IterationBudget | None = None
     receipt: TurnReceipt = field(default_factory=TurnReceipt)
 
 

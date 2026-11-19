@@ -132,13 +132,15 @@ def test_signed_out_subscription_falls_back_to_a_local_model(
 ) -> None:
     policy.note_connected("claude-cli")  # seen connected earlier, signed out now
     registry = _world(
-        monkeypatch, available=["openai", "gemini", "claude-cli", "ollama"],
+        monkeypatch,
+        available=["openai", "gemini", "claude-cli", "ollama", "local-openai"],
     )
     _frontier_must_not_run(monkeypatch)
 
     brain = bio_brain.resolve_bio_brain(JarvisConfig())
 
-    assert brain.name == "ollama"
+    # Ollama is never an automatic keyless local successor; local-openai is.
+    assert brain.name == "local-openai"
     assert _keyed(registry.names()) == []
 
 

@@ -656,11 +656,13 @@ def _resolve_chain(config: JarvisConfig) -> list[tuple[str, str | None]]:
     )
 
     # Stage 6 — keyless local tail (local-first mandate 2026-07-25): the
-    # registered local brains (spec-declared auth_mode "none": ollama,
+    # registered local brains (spec-declared auth_mode "none", currently
     # local-openai) close the chain, so a ZERO-key install still lands every
     # background resolve on its own hardware. Deliberately AFTER the keyed
     # families — a cloud family the user set up stays preferred, and a dead
-    # local server just fast-fails on its 2 s connect timeout.
+    # local server just fast-fails on its 2 s connect timeout. Ollama is
+    # never an automatic fallback (Ahmad 2026-11-17); an explicit primary or
+    # local_fallback pin still reaches it through earlier stages.
     chain_providers = {provider for provider, _ in chain}
     chain.extend(_local_tail(config, exclude=frozenset(chain_providers)))
 
@@ -802,6 +804,12 @@ def _reachable_keyed_families(
     return tail
 
 
+#: Local brain ids that must never join the automatic fallback tail. The
+#: provider class may still exist for an explicit user pin; only the
+#: unattended successor path is closed (Ahmad 2026-11-17).
+_LOCAL_TAIL_BLOCKLIST = frozenset({"ollama"})
+
+
 def _local_tail(
     config: JarvisConfig, *, exclude: frozenset[str] = frozenset(),
 ) -> list[tuple[str, str | None]]:
@@ -809,10 +817,11 @@ def _local_tail(
 
     Membership is SPEC-driven — every registered brain provider whose card
     declares ``auth_mode == "none"`` in ``jarvis.ui.web.provider_spec`` —
-    never a hardcoded name list (AP-21/22). Card order is preserved.
+    never a hardcoded allow-list (AP-21/22). Card order is preserved.
     OAuth-subscription brains (codex/antigravity) declare their own auth
     modes, and keyless ``account_login`` cards (the ChatGPT plan and bridge)
-    run on a cloud account, so neither can leak in here.
+    run on a cloud account, so neither can leak in here. ``ollama`` is
+    blocklisted: it is never an automatic fallback.
     """
     from jarvis.ui.web.provider_spec import PROVIDERS
 
@@ -821,7 +830,9 @@ def _local_tail(
     for spec in PROVIDERS:
         if spec.tier != "brain" or spec.auth_mode != "none" or spec.account_login:
             continue
-        if spec.id in exclude or spec.id not in available:
+        if spec.id in exclude or spec.id in _LOCAL_TAIL_BLOCKLIST:
+            continue
+        if spec.id not in available:
             continue
         tail.append((spec.id, _deep_model_for(config, spec.id)))
     return tail

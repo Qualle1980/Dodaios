@@ -18,6 +18,12 @@ from .session import (
     sanitize_prompt,
 )
 
+#: Instant observe / context page budget (bytes of JSON events).
+OBSERVE_PAGE_BYTES = 8_000
+#: Screen excerpt for Instant review: newest lines only, short each.
+SCREEN_EXCERPT_LINES = 8
+SCREEN_EXCERPT_CHARS = 120
+
 
 class CodingSessionControl:
     """Implements core.protocols.CodingSessionGateway without a browser viewer."""
@@ -134,7 +140,10 @@ class CodingSessionControl:
             return self._state(owner, term)
         input_state = {
             "input_token": self.registry.input_token(term),
-            "screen_excerpt": term.transcript.tail(20),
+            "screen_excerpt": [
+                line[:SCREEN_EXCERPT_CHARS]
+                for line in term.transcript.tail(SCREEN_EXCERPT_LINES)
+            ],
             "response_mode": "dialog" if term.reading().activity == "asking" else "text",
             "screen_scope": "Visible input context only; not a conversation transcript.",
         }
@@ -242,18 +251,26 @@ class CodingSessionControl:
             raise SessionError("Recorded context changed; request context without a cursor.")
         page: list[dict[str, Any]] = []
         size = 0
+        truncated = False
         selected = events[offset : offset + limit]
         if action == "observe":
             # Preserve the newest question under the output cap.
             selected = list(reversed(selected))
+        excerpt_budget = max(1, OBSERVE_PAGE_BYTES - 200)
         for event in selected:
             encoded = json.dumps(event, ensure_ascii=False)
-            if size + len(encoded) > 24000 and page:
+            if size + len(encoded) > OBSERVE_PAGE_BYTES and page:
+                truncated = True
                 break
-            if len(encoded) > 24000:
-                event = {"truncated": True, "recorded_event_excerpt": encoded[:23000]}
+            if len(encoded) > OBSERVE_PAGE_BYTES:
+                event = {
+                    "truncated": True,
+                    "recorded_event_excerpt": encoded[:excerpt_budget],
+                }
+                truncated = True
+                encoded = json.dumps(event, ensure_ascii=False)
             page.append(event)
-            size += min(len(encoded), 24000)
+            size += min(len(encoded), OBSERVE_PAGE_BYTES)
         if action == "observe":
             page.reverse()
             offset = len(events) - len(page)
@@ -264,12 +281,13 @@ class CodingSessionControl:
             "readable": readable,
             "available": result is not None,
             "events": page,
+            **({"truncated": True} if truncated else {}),
             "cursor": {
                 "source": source,
                 "offset": offset + len(page),
                 "prefix": fingerprint(offset + len(page)),
             },
-            "has_more": offset + len(page) < len(events),
+            "has_more": offset + len(page) < len(events) or truncated,
             "context_scope": (
                 "Recorded messages, tools, results and provider-exposed notes only. "
                 "No unrecorded reasoning."

@@ -51,6 +51,7 @@ class BrainDispatcher:
         tool_context: dict[str, Any] | None = None,
         loop_control: LoopControl | None = None,
         deferred_tools: Iterable[str] = (),
+        budget: IterationBudget | None = None,
     ) -> None:
         self._brain = brain
         self._tools = tools or {}
@@ -80,6 +81,9 @@ class BrainDispatcher:
         self._reasoning_effort = reasoning_effort
         # Steering / phases / verification for this turn's loop, or None.
         self._loop_control = loop_control
+        # Shared turn budget (multi-wave Instant coding) or None → allocate
+        # a fresh IterationBudget for this dispatch only.
+        self._budget = budget
 
     @property
     def brain(self) -> Brain:
@@ -98,6 +102,7 @@ class BrainDispatcher:
             deadline_s=self._deadline_s,
             reasoning_effort=self._reasoning_effort,
             tool_context=self._tool_context,
+            budget=self._budget,
             loop_control=self._loop_control,
             deferred_tools=self._deferred_tools,
         )
@@ -172,15 +177,23 @@ class BrainDispatcher:
         messages.append(BrainMessage(role="user", content=user_content, images=images))
 
         if self._tools and self._executor is not None:
+            if self._budget is not None:
+                # Multi-wave Instant turns share one object so input accumulates.
+                # Keep this dispatch's round ceiling on the shared budget.
+                self._budget.max_turns = self._max_turns
+                self._budget.max_tokens_total = self._max_tokens_total
+                budget = self._budget
+            else:
+                budget = IterationBudget(
+                    max_turns=self._max_turns,
+                    max_tokens_total=self._max_tokens_total,
+                )
             loop = ToolUseLoop(
                 self._brain,
                 self._tools,
                 self._executor,
                 system_prompt=self._system_prompt,
-                budget=IterationBudget(
-                    max_turns=self._max_turns,
-                    max_tokens_total=self._max_tokens_total,
-                ),
+                budget=budget,
                 max_tokens=self._max_tokens,
                 deadline_s=self._deadline_s,
                 reasoning_effort=self._reasoning_effort,

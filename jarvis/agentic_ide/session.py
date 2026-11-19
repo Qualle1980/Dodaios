@@ -554,18 +554,22 @@ def _input_line_holds(tail: list[str], needle: str) -> bool:
     > contains the text" reports every successful submit as a failure — measured,
     it did exactly that. The live input line is always the bottom-most one, and
     after a submit it is empty.
+
+    Box-drawing borders around the composer (Grok ``│ > … │``, Claude ``─``
+    rules) are stripped before the marker is matched; a no-break space after
+    ``❯`` is part of Claude Code's live marker.
     """
     if not needle:
         return False
+    from .fleet_actions import match_input_marker
+
     current: str | None = None
     for line in tail:
-        stripped = line.strip()
-        if not stripped:
+        if not line.strip():
             continue
-        for marker in _INPUT_MARKERS:
-            if stripped.startswith(marker):
-                current = stripped[len(marker) :].strip()
-                break
+        matched = match_input_marker(line, _INPUT_MARKERS)
+        if matched is not None:
+            current = matched
     if not current:
         return False
     if _PASTE_PLACEHOLDER_RE.search(current):
@@ -6418,6 +6422,9 @@ class Registry:
         agent: str | None = None,
         account: str | None = None,
         workspace_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        permission_mode: str | None = None,
     ) -> tuple[list[Terminal], bool]:
         """Open a batch in one pinned workspace, rejecting oversized requests.
 
@@ -6431,6 +6438,8 @@ class Registry:
         already decided there, and a batch that placed panes its own way would
         drift from what the split buttons do. No anchor is named, so without an
         explicit ``account`` every pane opens on the workspace's active one.
+        ``model`` / ``effort`` / ``permission_mode`` forward to each pane the
+        same way a single ``add_terminal`` would (Instant create uses them).
 
         A failure before creating any pane is raised to the caller.
         """
@@ -6450,6 +6459,9 @@ class Registry:
                         agent=agent,
                         account=account,
                         workspace_id=selected.id,
+                        model=model,
+                        effort=effort,
+                        permission_mode=permission_mode,
                     )
                 )
             except SessionError as exc:

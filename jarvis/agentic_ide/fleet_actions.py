@@ -27,7 +27,77 @@ STARTUP_QUIET_S = 1.5
 #: prompt back, so a CLI that keeps asking cannot block typing for good.
 STARTUP_WINDOW_S = 15.0
 _INPUT_MARKERS = ("›", "❯", ">")
+#: Box-drawing characters a TUI may put around its composer row. Grok draws
+#: ``│ >   │``; Claude Code puts ``─`` rules above and below ``❯``. Matching
+#: only at column 0 never sees those rows.
+_BOX_BORDER_CHARS = frozenset("│┃║╎╭╮╰╯─")
+#: Claude Code's live input row uses a no-break space after ``❯``; past prompts
+#: in the transcript use a plain space, so the NBSP is part of the marker.
+_INPUT_NBSP = "\u00a0"
 log = logging.getLogger(__name__)
+
+
+def unwrap_box_line(line: str) -> str:
+    """Strip leading/trailing box-drawing borders so the marker is visible."""
+    text = line.strip()
+    while text and text[0] in _BOX_BORDER_CHARS:
+        text = text[1:].lstrip()
+    while text and text[-1] in _BOX_BORDER_CHARS:
+        text = text[:-1].rstrip()
+    return text
+
+
+def _is_pure_border_line(line: str) -> bool:
+    text = line.strip()
+    return bool(text) and all(ch in _BOX_BORDER_CHARS or ch.isspace() for ch in text)
+
+
+def match_input_marker(line: str, markers: tuple[str, ...] | None = None) -> str | None:
+    """Return the text after a prompt marker, or ``None`` when the row is not one.
+
+    Sees through box borders and treats a no-break space after ``❯`` as part of
+    the marker (Claude Code's live composer).
+    """
+    text = unwrap_box_line(line)
+    if not text:
+        return None
+    for marker in markers or _INPUT_MARKERS:
+        if not text.startswith(marker):
+            continue
+        rest = text[len(marker) :]
+        if marker == "❯" and rest.startswith(_INPUT_NBSP):
+            rest = rest[len(_INPUT_NBSP) :]
+        return rest.lstrip()
+    return None
+
+
+def bottom_input_content(
+    lines: Sequence[str], markers: tuple[str, ...] | None = None
+) -> str | None:
+    """Content after the marker on the bottom-most live input row, or ``None``.
+
+    Walks from the bottom and skips empty and pure-border rows. A marked row
+    counts when it sits inside a box (``│ > … │``), which is how Grok draws its
+    composer; a status line may follow it. An unboxed marked row counts only when
+    it is the bottom content row, so a past ``> prompt`` above a plain status
+    row does not count as ready.
+    """
+    content = [
+        line for line in reversed(tuple(lines)) if line.strip() and not _is_pure_border_line(line)
+    ]
+    for index, line in enumerate(content[:4]):
+        found = match_input_marker(line, markers)
+        if found is None:
+            continue
+        if index == 0 or _is_boxed(line):
+            return found
+        return None
+    return None
+
+
+def _is_boxed(line: str) -> bool:
+    text = line.strip()
+    return len(text) >= 2 and text[0] in _BOX_BORDER_CHARS and text[-1] in _BOX_BORDER_CHARS
 
 
 def ready_for_prompt(term: Any) -> bool:
@@ -162,13 +232,20 @@ def input_line_visible(term: Any, spec: Any | None = None) -> bool:
             line = row_text(row)
         except Exception:  # noqa: BLE001 - malformed extensions fail closed
             return False
-        stripped = line.lstrip()
+        if match_input_marker(line, markers) is None:
+            return False
+        # Column check still uses the raw row: borders shift the marker right,
+        # and the cursor must sit after that on-screen glyph.
+        unwrapped = unwrap_box_line(line)
+        leading = line.find(unwrapped) if unwrapped else 0
+        if leading < 0:
+            leading = 0
         for marker in markers:
-            if stripped.startswith(marker):
-                marker_column = len(line) - len(stripped)
+            if unwrapped.startswith(marker):
+                marker_column = leading
                 return column > marker_column
         return False
-    return any(line.strip().startswith(markers) for line in lines)
+    return bottom_input_content(lines, markers) is not None
 
 
 def _ready_for_prompt(term: Any) -> bool:
@@ -260,6 +337,9 @@ __all__ = [
     "READY_TIMEOUT_S",
     "close_agent_terminals",
     "input_line_visible",
+    "unwrap_box_line",
+    "match_input_marker",
+    "bottom_input_content",
     "ready_for_prompt",
     "terminals_closed_event",
     "wait_for_input_line",

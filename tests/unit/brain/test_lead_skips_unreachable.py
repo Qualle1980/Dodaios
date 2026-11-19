@@ -25,12 +25,8 @@ from jarvis.core.config import BrainTierConfig, JarvisConfig
 from jarvis.core.protocols import ToolResult
 
 
-@pytest.fixture(autouse=True)
-def _ollama_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These turns assume an installed local runtime (Ollama gates its tool
-    capability on the binary since 2026-10-23)."""
-    monkeypatch.setattr("jarvis.brain.ollama_runtime.find_binary", lambda: "/usr/bin/ollama")
-
+class _ToolCapableBrain:
+    supports_tools = True
 
 
 class _Tool:
@@ -75,6 +71,19 @@ def _manager(primary: str = "chatgpt-web") -> BrainManager:
         tool_executor=_Executor(),  # type: ignore[arg-type]
     )
     mgr._active_name = primary  # type: ignore[attr-defined]
+    # Seat talkers may only be led by a keyless local; ollama is blocklisted,
+    # so seed a configured local-openai brain the seat filter permits.
+    _ = mgr._registry.available()
+    orig_fast = mgr._fast_model
+    orig_deep = mgr._deep_model
+    mgr._fast_model = (  # type: ignore[method-assign]
+        lambda name: "qwen2.5-7b" if name == "local-openai" else orig_fast(name)
+    )
+    mgr._deep_model = (  # type: ignore[method-assign]
+        lambda name: "qwen2.5-7b" if name == "local-openai" else orig_deep(name)
+    )
+    mgr._registry._classes["local-openai"] = object  # type: ignore[attr-defined]
+    mgr._brain_cache[("local-openai", "qwen2.5-7b")] = _ToolCapableBrain()
     return mgr
 
 
