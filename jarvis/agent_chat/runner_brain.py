@@ -524,7 +524,9 @@ async def run_brain_turn(
                 kit = kit_for(session.surface)
                 if kit.session_tools is not None:
                     try:
-                        extra = dict(kit.session_tools(getattr(brain, "_config", None), brain, session))
+                        extra = dict(
+                            kit.session_tools(getattr(brain, "_config", None), brain, session)
+                        )
                     except Exception:  # noqa: BLE001 — empty beats mutating
                         log.warning(
                             "surface %s: kit tools for tool_choices failed",

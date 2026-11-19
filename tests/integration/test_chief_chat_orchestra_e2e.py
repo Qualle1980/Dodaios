@@ -350,12 +350,11 @@ async def test_a_hard_step_is_delegated_as_a_bounded_brief_not_the_original_orde
                 ),
                 reply="I read calc.py and asked T1 for subtract().",
             ),
+            # The General holds read hands only (no shell), so its follow-up
+            # look is a folder read, not ``git status`` through RunCommand.
             Wave(
-                calls=(
-                    Call("RunCommand", {"command": "git status --porcelain"}),
-                    Call("RunCommand", {"command": "git diff"}),
-                ),
-                reply="Checked: nothing changed on disk, so this is unverified.",
+                calls=(Call("Read", {"file_path": "calc.py"}),),
+                reply="Read calc.py: no subtract() on disk yet, so this is unverified.",
             ),
         ],
         tools={delegate.name: delegate},
@@ -597,8 +596,10 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
                 ),
                 reply="Sent to T1 with model=sonnet.",
             ),
+            # Read hands only on the General: the file itself is the evidence
+            # that nothing changed, not a ``git status`` shell call.
             Wave(
-                calls=(Call("RunCommand", {"command": "git status --porcelain"}),),
+                calls=(Call("Read", {"file_path": "calc.py"}),),
                 reply="T1 stopped at a permission prompt and nothing changed. UNVERIFIED.",
             ),
         ],
@@ -609,9 +610,11 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
     events = await _run(rig, CONTINUE_REQUEST)
 
     chief: ScriptedChief = rig["chief"]
-    # The checkout is genuinely untouched: the status read came back empty.
-    status = [e for e in chief.executed if e.tool == "RunCommand"][-1]
-    assert "calc.py" not in str(status.result.output), status.result.output
+    # The checkout is genuinely untouched: the file still holds only add().
+    look = [e for e in chief.executed if e.tool == "Read"][-1]
+    assert look.result.success, look.result
+    assert "def add" in str(look.result.output), look.result.output
+    assert "subtract" not in str(look.result.output), look.result.output
     assert "PASS" not in _said(events).upper()
     assert len(delegate.briefs) == 1
 

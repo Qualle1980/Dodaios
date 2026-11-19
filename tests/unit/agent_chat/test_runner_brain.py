@@ -148,15 +148,9 @@ async def test_a_jarvis_turn_runs_on_the_brain_with_the_sessions_pick(
     assert kw["allow_voice_confirm"] is False and kw["emit_tool_ack"] is False
     assert kw["source_layer"] == runner_brain.SOURCE_LAYER
     assert kw["conversation_id"] == session.session_id
-    assert set(override.tools_extra) == {
-        "Read",
-        "Write",
-        "Edit",
-        "Ls",
-        "Glob",
-        "Grep",
-        "RunCommand",
-    }
+    # The General's folder hands are read-only: no Write, Edit or RunCommand
+    # (owner decision 2026-11-19, no general shell on the jarvis surface).
+    assert set(override.tools_extra) == {"Read", "Ls", "Glob", "Grep"}
     assert override.tool_context["approval_surface"] == "interactive"
     assert override.tool_context["approval_ref"] == f"agent-chat:{session.session_id}"
     assert override.tool_context["cwd"] == str(tmp_path)
