@@ -849,11 +849,14 @@ async def test_a_claim_that_stays_unproven_ends_honestly_after_one_correction(ch
 
     notices = [
         e["payload"] for e in events if e["kind"] == "notice"
-        and e["payload"].get("kind") in {"delegation_correction", "delegation_unverified"}
+        and e["payload"].get("kind") in {
+            "delegation_correction", "delegation_unverified", "delegation_codex_handoff",
+        }
     ]
     kinds = [n["kind"] for n in notices]
     # Instant correction once, then Codex takes the review (no Instant loop).
-    assert kinds == ["delegation_correction", "delegation_correction"], notices
+    # The hand-off is its own notice kind: it is not an Instant correction.
+    assert kinds == ["delegation_correction", "delegation_codex_handoff"], notices
     assert notices[0].get("left") == 1 and notices[0].get("correcting")
     assert notices[1].get("codex_fallback") is True
     # Delegate wave + rejected claim + one Instant correction. Nothing more.

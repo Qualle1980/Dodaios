@@ -1198,6 +1198,9 @@ class Terminal:
     # Runtime-only ownership of a result requested through Jarvis, never a UI field.
     delegation_result: Any = None
     delegation_probe_at: float = 0.0
+    # Instant coding-loop slot held by this pane (workspace-orchestrate create).
+    # Runtime-only; released when the pane finishes, fails, or is closed.
+    loop_slot_handle: str = ""
     # The current process's records are kept as a fallback if the local history
     # file cannot be written. The full durable history is loaded only when its
     # UI is opened, never in the workspace-state hot path.
@@ -6948,6 +6951,12 @@ class Registry:
                     # Nobody is watching it, but its agent may still be working
                     # in tmux on the computer: closing the pane ends it there too.
                     pool.end_session(term.history_id)
+                # Free the Instant coding-loop slot before the pane disappears
+                # (same moment coding_threads releases on stop).
+                if getattr(term, "loop_slot_handle", ""):
+                    from jarvis.agent_chat.loop_scheduler import release_terminal_slot
+
+                    release_terminal_slot(term)
                 term.pty_id = None
                 term.status = "exited"
                 term.viewer_output = None

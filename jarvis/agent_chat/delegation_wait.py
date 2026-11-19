@@ -70,12 +70,17 @@ async def _maybe_codex_fallback(
     collect its report. Busy / missing / skipped outcomes leave an honest
     message on the gate and return False.
     """
-    # Budget still available means Instant can still correct — leave that path alone.
-    if corrections > 0:
-        return False
     # Only after a real Instant rejection about handed-back work.
     payload = gate.review_evidence_payload or gate.correction
     if not payload and not gate.owed_honesty:
+        return False
+    payload = payload or {}
+    # A pure Codex hand-off (codex_fallback, nothing Instant can correct) must
+    # proceed even while corrections_left remains — otherwise the only Instant
+    # correction is burned before Codex ever runs.
+    codex_handoff = bool(payload.get("codex_fallback")) and not payload.get("correcting")
+    if corrections > 0 and not codex_handoff:
+        # Budget still available and Instant asked to correct — leave that path alone.
         return False
     from jarvis.agent_chat.codex_fallback import (
         attempt_codex_fallback,
@@ -83,7 +88,6 @@ async def _maybe_codex_fallback(
         review_prompt_for_codex,
     )
 
-    payload = payload or {}
     evidence = evidence_from_payload(payload)
     gaps = tuple(payload.get("missing") or gate.owed_honesty or ())
     work = tuple(
@@ -201,7 +205,11 @@ class DelegationWait:
             if event.get("kind") == "notice":
                 payload = event.get("payload") or {}
                 kind = payload.get("kind")
-                if kind in {"delegation_correction", "delegation_unverified"}:
+                if kind in {
+                    "delegation_correction",
+                    "delegation_unverified",
+                    "delegation_codex_handoff",
+                }:
                     # Instant's receipts travel here so the wait can choose
                     # Codex after the Instant correction budget is spent.
                     self.review_evidence_payload = dict(payload)
@@ -210,6 +218,11 @@ class DelegationWait:
                     # for it, and asked for one more attempt. The loop below
                     # reads this; nothing else changes about the event.
                     self.correction = dict(payload)
+                    self.owed_honesty = tuple(payload.get("missing") or ())
+                elif kind == "delegation_codex_handoff":
+                    # Codex takes the review; hold the honest line if that
+                    # hand-off fails, but never treat this as an Instant
+                    # correction (corrections_left stays intact).
                     self.owed_honesty = tuple(payload.get("missing") or ())
             elif event.get("kind") == "assistant_text" and str(
                 (event.get("payload") or {}).get("text") or ""
@@ -264,7 +277,10 @@ class DelegationWait:
             return
         from jarvis.agent_chat.pipeline_progress import progress_notice_payload
 
-        language = str(getattr(self.handle, "output_language", None) or "de")
+        # The turn's language decided once in turn_language; the closing line
+        # uses the same fallback ("en"), so the progress notice and the close
+        # never disagree when the language is unknown.
+        language = str(getattr(self.handle, "output_language", None) or "en")
         payload = progress_notice_payload(
             phase, turn_id=self.handle.turn_id, language=language
         )
@@ -408,18 +424,15 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
     active = replace(handle, emit=gate.emit)
     # One IterationBudget for the whole chat turn so input_tokens_seen
     # accumulates across waves. Without this, each wave's generate() built a
-    # fresh budget and the 80k Instant coding cap never saw the turn total
-    # (measured 2026-11-17: 79k+62k+15k = 156k with no trip). Round counters
-    # reset per wave so CODING_DISPATCH_MAX_TURNS stays a per-wave envelope.
-    from jarvis.agent_chat.runner_brain import CODING_DISPATCH_MAX_TURNS
+    # fresh budget and a turn-wide input backstop never saw the turn total.
+    # Round counters reset per wave; the input ceiling stays the IterationBudget
+    # default (hard cost backstop only — mandate 2026-08-24 / 7c985c1ba).
+    from jarvis.agent_chat.runner_brain import MAX_TURNS
     from jarvis.brain.iteration_budget import IterationBudget
 
     turn_budget = getattr(handle, "iteration_budget", None)
     if turn_budget is None:
-        turn_budget = IterationBudget(
-            max_turns=CODING_DISPATCH_MAX_TURNS,
-            max_input_tokens_total=80_000,
-        )
+        turn_budget = IterationBudget(max_turns=MAX_TURNS)
     active = replace(active, iteration_budget=turn_budget)
     # A chat that takes the next message while this one waits (the service
     # decides which chats do); elsewhere the turn holds its seat as before.
@@ -432,6 +445,13 @@ async def run_with_delegates(service: Any, handle: Any, prompt: str, run_attempt
                 wave > 0
                 and turn_budget.input_tokens_seen >= turn_budget.max_input_tokens_total
             ):
+                if gate.correction:
+                    # A correction was prepared but cannot run. Its gap is still
+                    # owed to the person: an answer in the same wave cleared the
+                    # held line, so restore it from the correction notice.
+                    gate.owed_honesty = tuple(
+                        gate.correction.get("missing") or gate.owed_honesty or ()
+                    )
                 log.info(
                     "agent chat %s: turn %s input budget exhausted (%d >= %d); "
                     "no further wave",

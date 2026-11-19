@@ -659,6 +659,14 @@ class ActivityWatcher:
         pending = getattr(term, "delegation_result", None)
         if pending is not None:
             self._results.append((kind, term, pending))
+        # A finished / dead / failed / stopped pane frees its coding-loop slot
+        # the same way coding_threads releases on turn_finished.
+        if kind in {"completed", "exited", "failed", "stopped"} and getattr(
+            term, "loop_slot_handle", ""
+        ):
+            from jarvis.agent_chat.loop_scheduler import release_terminal_slot
+
+            release_terminal_slot(term)
         if not emit:
             return None
         return self.center.add(

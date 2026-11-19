@@ -255,6 +255,7 @@ __all__ = [
     "slot_for_cli",
     "try_acquire",
     "release",
+    "release_terminal_slot",
     "status",
 ]
 
@@ -264,6 +265,22 @@ def try_acquire(agent: str, kind: str) -> AcquireResult:
 
 
 def release(handle: str) -> Acquired | None:
+    return SCHEDULER.release(handle)
+
+
+def release_terminal_slot(term: object) -> Acquired | None:
+    """Free the coder slot held by an IDE pane, if any.
+
+    Clears ``term.loop_slot_handle`` first so a second call is a no-op. Used
+    when the pane finishes, is closed, or its create path fails after acquire.
+    """
+    handle = str(getattr(term, "loop_slot_handle", "") or "").strip()
+    if not handle:
+        return None
+    try:
+        term.loop_slot_handle = ""  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001,S110 — clearing is best-effort; still release
+        pass
     return SCHEDULER.release(handle)
 
 

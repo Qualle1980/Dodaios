@@ -794,177 +794,190 @@ class WorkspaceOrchestrator:
             }
         # A new coding task takes a loop slot first, then always create()s a
         # fresh pane. Never send into a busy existing pane for new work.
+        # Slot ownership matches coding_threads: release on start failure; once
+        # panes exist the handle lives on the Terminal until finish/close.
         prompt_early = str(args.get("prompt") or "").strip()
         loop_slot_handle = ""
-        if prompt_early:
-            from jarvis.agent_chat.loop_scheduler import (
-                Acquired,
-                Queued,
-                SCHEDULER,
-                slot_for_cli,
-            )
+        retained = False
+        from jarvis.agent_chat.loop_scheduler import (
+            SCHEDULER,
+            Acquired,
+            Queued,
+            slot_for_cli,
+        )
 
-            preferred = str(args.get("agent_pref") or "").strip().casefold()
-            slot = slot_for_cli(cli)
-            if preferred == "either":
-                acquire_agent: str | None = "either"
-            elif preferred in {"claude", "grok-build"}:
-                acquire_agent = preferred
-            elif slot in {"claude", "grok-build"}:
-                acquire_agent = slot
-            else:
-                acquire_agent = None
-            if acquire_agent is not None:
-                outcome = SCHEDULER.try_acquire(acquire_agent, "code")
-                if isinstance(outcome, Queued):
-                    return {
-                        "status": "queued",
-                        "success": False,
-                        "reason": outcome.message,
-                        "slot": outcome.agent,
-                        "queue_position": outcome.position,
-                        "loop_slot_handle": outcome.handle,
-                        "project_id": project["id"],
-                        "workspace_id": workspace["id"],
-                    }
-                if isinstance(outcome, Acquired):
-                    loop_slot_handle = outcome.handle
         try:
-            count = int(args.get("count") or 1)
-        except (TypeError, ValueError):  # a malformed count falls back to one terminal
-            count = 1
-        count = max(1, min(count, MAX_PANES_PER_REQUEST))
-        name = str(args.get("name") or "").strip()
-        created = []
-        capped = False
-        creation_error = ""
-        mixed = args.get("agents")
-        if isinstance(mixed, list) and mixed:
-            # "Five Claude Code and three Codex" in one call.
-            groups = self._groups(args)
-            if isinstance(groups, dict):
-                return groups
-            count = sum(n for _, n, _m, _e in groups)
-        else:
-            picks = _validated_launch_picks(
-                cli or _default_cli(),
-                args.get("model"),
-                args.get("effort"),
-            )
-            if isinstance(picks, dict):
-                return picks
-            top_model, top_effort = picks
-        try:
+            if prompt_early:
+                preferred = str(args.get("agent_pref") or "").strip().casefold()
+                slot = slot_for_cli(cli)
+                if preferred == "either":
+                    acquire_agent: str | None = "either"
+                elif preferred in {"claude", "grok-build"}:
+                    acquire_agent = preferred
+                elif slot in {"claude", "grok-build"}:
+                    acquire_agent = slot
+                else:
+                    acquire_agent = None
+                if acquire_agent is not None:
+                    outcome = SCHEDULER.try_acquire(acquire_agent, "code")
+                    if isinstance(outcome, Queued):
+                        # Instant reports busy and does not wait on the FIFO, so
+                        # drop the queue ticket instead of leaving a ghost hold.
+                        SCHEDULER.release(outcome.handle)
+                        return {
+                            "status": "queued",
+                            "success": False,
+                            "reason": outcome.message,
+                            "slot": outcome.agent,
+                            "queue_position": outcome.position,
+                            "project_id": project["id"],
+                            "workspace_id": workspace["id"],
+                        }
+                    if isinstance(outcome, Acquired):
+                        loop_slot_handle = outcome.handle
+            try:
+                count = int(args.get("count") or 1)
+            except (TypeError, ValueError):  # a malformed count falls back to one terminal
+                count = 1
+            count = max(1, min(count, MAX_PANES_PER_REQUEST))
+            name = str(args.get("name") or "").strip()
+            created = []
+            capped = False
+            creation_error = ""
+            mixed = args.get("agents")
+            top_model = ""
+            top_effort = ""
+            groups: list[tuple[str, int, str, str]] = []
             if isinstance(mixed, list) and mixed:
-                created, capped = [], False
-                for group_cli, group_count, group_model, group_effort in groups:
-                    made, cut = await self.registry.add_terminals(
-                        group_count,
-                        agent=group_cli,
-                        workspace_id=workspace["id"],
-                        model=group_model or None,
-                        effort=group_effort or None,
-                    )
-                    created.extend(made)
-                    capped = capped or cut
-            elif count == 1 and name:
-                created = [
-                    await self.registry.add_terminal(
-                        workspace_id=workspace["id"],
+                # "Five Claude Code and three Codex" in one call.
+                grouped = self._groups(args)
+                if isinstance(grouped, dict):
+                    return grouped
+                groups = grouped
+                count = sum(n for _, n, _m, _e in groups)
+            else:
+                picks = _validated_launch_picks(
+                    cli or _default_cli(),
+                    args.get("model"),
+                    args.get("effort"),
+                )
+                if isinstance(picks, dict):
+                    return picks
+                top_model, top_effort = picks
+            try:
+                if isinstance(mixed, list) and mixed:
+                    created, capped = [], False
+                    for group_cli, group_count, group_model, group_effort in groups:
+                        made, cut = await self.registry.add_terminals(
+                            group_count,
+                            agent=group_cli,
+                            workspace_id=workspace["id"],
+                            model=group_model or None,
+                            effort=group_effort or None,
+                        )
+                        created.extend(made)
+                        capped = capped or cut
+                elif count == 1 and name:
+                    created = [
+                        await self.registry.add_terminal(
+                            workspace_id=workspace["id"],
+                            agent=cli,
+                            name=name,
+                            model=top_model or None,
+                            effort=top_effort or None,
+                        )
+                    ]
+                    capped = False
+                else:
+                    created, capped = await self.registry.add_terminals(
+                        count,
                         agent=cli,
-                        name=name,
+                        workspace_id=workspace["id"],
                         model=top_model or None,
                         effort=top_effort or None,
                     )
-                ]
-                capped = False
-            else:
-                created, capped = await self.registry.add_terminals(
-                    count,
-                    agent=cli,
-                    workspace_id=workspace["id"],
-                    model=top_model or None,
-                    effort=top_effort or None,
-                )
-        except SessionError as exc:  # Return the refusal or partial creation receipt to the caller.
-            if not created:
-                if loop_slot_handle:
-                    from jarvis.agent_chat.loop_scheduler import SCHEDULER
-
-                    SCHEDULER.release(loop_slot_handle)
-                return {
-                    "status": "not_accepted",
-                    "reason": str(exc),
+            except SessionError as exc:  # Refusal or partial creation receipt for the caller.
+                if not created:
+                    return {
+                        "status": "not_accepted",
+                        "reason": str(exc),
+                        "project_id": project["id"],
+                        "workspace_id": workspace["id"],
+                    }
+                # Earlier groups already exist. Keep their IDs and never recreate
+                # the successful groups merely because a later group failed.
+                creation_error = str(exc)
+            if loop_slot_handle and created:
+                for term in created:
+                    term.loop_slot_handle = loop_slot_handle
+                retained = True
+            targets = [
+                {
                     "project_id": project["id"],
                     "workspace_id": workspace["id"],
+                    "terminal_id": "pane:" + term.history_id,
                 }
-            # Earlier groups already exist. Keep their IDs and never recreate
-            # the successful groups merely because a later group failed.
-            creation_error = str(exc)
-        targets = [
-            {
+                for term in created
+            ]
+            delivery_ids = [self._issue(target) for target in targets]
+            result: dict[str, Any] = {
+                "status": "created",
+                "project": project["name"],
+                "workspace": workspace["name"],
                 "project_id": project["id"],
                 "workspace_id": workspace["id"],
-                "terminal_id": "pane:" + term.history_id,
+                "agents": [
+                    {"terminal_id": target["terminal_id"], "name": term.name, "cli": term.agent,
+                     "request_id": request_id}
+                    for target, term, request_id in zip(targets, created, delivery_ids, strict=True)
+                ],
+                "requested": count,
+                "capped": capped,
+                **({"creation_error": creation_error, "success": False} if creation_error else {}),
+                **({"loop_slot_handle": loop_slot_handle} if loop_slot_handle else {}),
             }
-            for term in created
-        ]
-        delivery_ids = [self._issue(target) for target in targets]
-        result: dict[str, Any] = {
-            "status": "created",
-            "project": project["name"],
-            "workspace": workspace["name"],
-            "project_id": project["id"],
-            "workspace_id": workspace["id"],
-            "agents": [
-                {"terminal_id": target["terminal_id"], "name": term.name, "cli": term.agent,
-                 "request_id": request_id}
-                for target, term, request_id in zip(targets, created, delivery_ids, strict=True)
-            ],
-            "requested": count,
-            "capped": capped,
-            **({"creation_error": creation_error, "success": False} if creation_error else {}),
-            **({"loop_slot_handle": loop_slot_handle} if loop_slot_handle else {}),
-        }
-        # Persist identity before slow CLI startup. Cancellation or a late result
-        # must never turn "pane allocated" into permission to allocate another.
-        await asyncio.to_thread(
-            self.ledger.finish, "workspace-create", creation_id,
-            {**result, "status": "uncertain", "success": False, "request_id": creation_id,
-             "reason": "New panes exist; startup/delivery is pending. Observe only these IDs. "
-                       "Do not recreate, reassign or send correction prompts."},
-        )
-        owner = self.registry.get(workspace["id"])
-        if self.publish is not None and owner is not None and created:
-            await self._announce(
-                lambda: terminals_added_event(
-                    owner, created, source_layer="agentic_ide.orchestration",
-                )
+            # Persist identity before slow CLI startup. Cancellation or a late result
+            # must never turn "pane allocated" into permission to allocate another.
+            await asyncio.to_thread(
+                self.ledger.finish, "workspace-create", creation_id,
+                {**result, "status": "uncertain", "success": False, "request_id": creation_id,
+                 "reason": "New panes exist; startup/delivery is pending. Observe only these IDs. "
+                           "Do not recreate, reassign or send correction prompts."},
             )
-        prompt = str(args.get("prompt") or "").strip()
-        if prompt:
-            result["deliveries"] = list(
-                await asyncio.gather(
-                    *(
-                        self.run(
-                            {
-                                "action": "send",
-                                **target,
-                                "request_id": request_id,
-                                "prompt": prompt,
-                                "image_refs": args.get("image_refs", []),
-                                "_image_scope": args.get("_image_scope", ""),
-                            },
-                            trace_id=trace_id,
-                        )
-                        for target, request_id in zip(targets, delivery_ids, strict=True)
+            owner = self.registry.get(workspace["id"])
+            if self.publish is not None and owner is not None and created:
+                await self._announce(
+                    lambda: terminals_added_event(
+                        owner, created, source_layer="agentic_ide.orchestration",
                     )
                 )
-            )
-            result["success"] = not creation_error and all(
-                d.get("status") == "accepted" for d in result["deliveries"]
-            )
-        return result
+            prompt = str(args.get("prompt") or "").strip()
+            if prompt:
+                result["deliveries"] = list(
+                    await asyncio.gather(
+                        *(
+                            self.run(
+                                {
+                                    "action": "send",
+                                    **target,
+                                    "request_id": request_id,
+                                    "prompt": prompt,
+                                    "image_refs": args.get("image_refs", []),
+                                    "_image_scope": args.get("_image_scope", ""),
+                                },
+                                trace_id=trace_id,
+                            )
+                            for target, request_id in zip(targets, delivery_ids, strict=True)
+                        )
+                    )
+                )
+                result["success"] = not creation_error and all(
+                    d.get("status") == "accepted" for d in result["deliveries"]
+                )
+            return result
+        finally:
+            if loop_slot_handle and not retained:
+                SCHEDULER.release(loop_slot_handle)
 
     async def _announce(self, event_factory: Callable[[], Any]) -> None:
         """Tell the open UI about a change; the change stands either way (AP-18)."""
