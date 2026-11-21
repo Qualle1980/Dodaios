@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Final
 
+from jarvis.core.process_tree import make_process_tree
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
 from jarvis.core.result_scope import annotate_command_sample
 
@@ -56,6 +57,8 @@ _GREP_MAX_FILE_BYTES = 2_000_000
 _GLOB_MAX_RESULTS = 500
 _DEFAULT_COMMAND_TIMEOUT_S = 120.0
 _MAX_COMMAND_TIMEOUT_S = 900.0
+#: After a timeout kill, never wait longer than this for the shell to exit.
+_COMMAND_STOP_GRACE_S = 2.0
 
 # Directories no search should descend into — the usual dependency and
 # build folders that make a Grep over a project take minutes.
@@ -158,7 +161,13 @@ TOOL_SPECS: Final[tuple[dict[str, Any], ...]] = (
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "timeout_s": {"type": "integer", "description": "Seconds, default 120."},
+                "timeout_s": {
+                    "type": "integer",
+                    "description": (
+                        "Timeout in seconds (default 120, maximum 900). "
+                        "The command and its child processes are killed when it expires."
+                    ),
+                },
             },
             "required": ["command"],
         },
@@ -493,18 +502,82 @@ def _grep(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     return out + partial, False
 
 
+def normalize_command_timeout(raw: Any) -> float:
+    """Seconds for RunCommand, capped; millisecond-looking values are converted.
+
+    Models sometimes pass ``120000`` meaning 120 s (milliseconds). Values above
+    the max that divide evenly by 1000 into a legal second budget are treated
+    as milliseconds so a long search cannot pin the turn for the full cap.
+    """
+    try:
+        timeout = float(raw if raw is not None and raw != "" else _DEFAULT_COMMAND_TIMEOUT_S)
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_COMMAND_TIMEOUT_S
+    if timeout != timeout or timeout in {float("inf"), float("-inf")}:  # NaN / inf
+        timeout = _DEFAULT_COMMAND_TIMEOUT_S
+    if (
+        timeout > _MAX_COMMAND_TIMEOUT_S
+        and timeout >= 1000.0
+        and abs(timeout - round(timeout)) < 1e-9
+        and int(round(timeout)) % 1000 == 0
+    ):
+        as_seconds = timeout / 1000.0
+        if 1.0 <= as_seconds <= _MAX_COMMAND_TIMEOUT_S:
+            timeout = as_seconds
+    return max(1.0, min(timeout, _MAX_COMMAND_TIMEOUT_S))
+
+
+async def _taskkill_tree(pid: int) -> None:
+    """Windows fallback when a Job Object is unavailable: ``taskkill /T``."""
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            creationflags=NO_WINDOW_CREATIONFLAGS,
+        )
+    except (OSError, ValueError):
+        return
+    try:
+        await asyncio.wait_for(killer.wait(), timeout=3.0)
+    except (TimeoutError, ProcessLookupError):
+        with _suppress_os():
+            killer.kill()
+
+
+async def _terminate_command_tree(proc: asyncio.subprocess.Process, tree: Any) -> None:
+    """Kill the shell and every descendant, then wait briefly for exit."""
+    with _suppress_os():
+        tree.close()
+    if proc.returncode is None:
+        with _suppress_os():
+            proc.kill()
+        if sys.platform == "win32" and proc.returncode is None and proc.pid:
+            # Job Object may have been a no-op; taskkill still reaps the tree.
+            if not getattr(tree, "supports_containment", False):
+                await _taskkill_tree(proc.pid)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_COMMAND_STOP_GRACE_S)
+    except (TimeoutError, ProcessLookupError):
+        pass
+
+
 async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     command = str(args.get("command") or "").strip()
     if not command:
         return "command is required", True
-    timeout = float(args.get("timeout_s") or _DEFAULT_COMMAND_TIMEOUT_S)
-    timeout = max(1.0, min(timeout, _MAX_COMMAND_TIMEOUT_S))
+    timeout = normalize_command_timeout(args.get("timeout_s"))
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env["CI"] = env.get("CI", "1")  # most tools drop interactive prompts/colours on CI
     env.setdefault("NO_COLOR", "1")
     argv = [*shell_argv(), command]
     started = time.perf_counter()
+    tree = make_process_tree("agent-chat-run")
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -516,19 +589,26 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
             creationflags=NO_WINDOW_CREATIONFLAGS,
         )
     except (OSError, ValueError) as exc:
+        with _suppress_os():
+            tree.close()
         return f"Could not start the shell: {exc}", True
+    if proc.pid:
+        try:
+            tree.assign(proc.pid)
+        except OSError as exc:
+            log.warning("RunCommand: process-tree assign failed for pid %s: %s", proc.pid, exc)
     try:
         raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:
-        with _suppress_os():
-            proc.kill()
-        with _suppress_os():
-            await proc.wait()
+        await _terminate_command_tree(proc, tree)
         return f"Command timed out after {int(timeout)} s: {command}", True
     except asyncio.CancelledError:
-        with _suppress_os():
-            proc.kill()
+        await _terminate_command_tree(proc, tree)
         raise
+    finally:
+        # Process already exited on the success path; closing the job is safe.
+        with _suppress_os():
+            tree.close()
     text = raw.decode("utf-8", errors="replace")
     took = time.perf_counter() - started
     code = proc.returncode

@@ -48,6 +48,22 @@ def test_command_is_write_detects_gh_and_git():
     assert wg.command_is_write("git commit -m msg")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push",
+        "git push origin HEAD",
+        "git push origin main",
+        "git -C /x/y push",
+        "git -C D:/repo push origin HEAD",
+        "git --git-dir .git push --force-with-lease",
+        "git -c push.default=simple push",
+    ],
+)
+def test_git_push_variants_are_writes(command: str):
+    assert wg.command_is_write(command)
+
+
 def test_reads_are_not_writes():
     assert not wg.command_is_write("gh issue view 217 --json assignees")
     assert not wg.command_is_write("gh issue list")
@@ -219,6 +235,64 @@ def test_folder_tool_write_needs_ok(tmp_path: Path):
     run = tools["RunCommand"]
     assert run.write_needs_ok({"command": "gh issue edit 1 --add-assignee x"})
     assert not run.write_needs_ok({"command": "gh issue view 1"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push",
+        "git push origin HEAD",
+        "git -C /tmp/repo push origin HEAD",
+    ],
+)
+async def test_run_gated_tool_asks_for_git_push_in_chat_and_main(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """git push always asks in chat mode and on a main checkout."""
+    main = tmp_path / "main"
+    main.mkdir()
+    (main / ".git").mkdir()
+    asked: list[str] = []
+
+    async def ask(call_id: str, name: str, args: dict[str, Any], summary: str) -> str:
+        asked.append(str(args.get("command")))
+        return "deny"
+
+    async def fake_execute(name: str, args: dict[str, Any], *, cwd: Path):
+        return "should-not-run", False
+
+    monkeypatch.setattr("jarvis.agent_chat.runner_api.execute_tool", fake_execute)
+
+    # Chat mode (even with a preferred folder) must ask.
+    handle_chat = TurnHandle(
+        session=_session(mode="chat", cwd=str(main)),
+        turn_id="t1",
+        emit=lambda _e: asyncio.sleep(0),
+        request_approval=ask,
+        cancel=asyncio.Event(),
+    )
+    out, err = await _run_gated_tool(
+        handle_chat, "auto", "c1", "RunCommand", {"command": command}, main
+    )
+    assert err is True
+    assert asked and command in asked[0]
+
+    asked.clear()
+    handle_main = TurnHandle(
+        session=_session(mode="project", cwd=str(main)),
+        turn_id="t2",
+        emit=lambda _e: asyncio.sleep(0),
+        request_approval=ask,
+        cancel=asyncio.Event(),
+    )
+    out2, err2 = await _run_gated_tool(
+        handle_main, "auto", "c2", "RunCommand", {"command": command}, main
+    )
+    assert err2 is True
+    assert asked and command in asked[0]
+    assert "write gate" in out.lower() or "Denied" in out
+    assert "write gate" in out2.lower() or "Denied" in out2
 
 
 # --- gaps closed after the 2026-11-21 review ---------------------------------

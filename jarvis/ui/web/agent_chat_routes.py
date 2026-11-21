@@ -244,8 +244,8 @@ class CreateSessionBody(BaseModel):
     #: Agentic IDE's chat mode ("agent"), or the Local models section's setup
     #: assistant ("local-models"). Fixed for the session's life.
     surface: SurfaceName = "agent"
-    #: Work mode: ``chat`` (default, no project folder) or ``project``
-    #: (cwd required). Distinct from ``permission_mode``.
+    #: Work mode: ``chat`` (default; optional preferred folder, not a project)
+    #: or ``project`` (cwd required). Distinct from ``permission_mode``.
     mode: SessionModeName = "chat"
 
 
@@ -936,10 +936,11 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
                 + ", ".join(m.id for m in permission_modes(ladder))
             ),
         )
-    # Session work mode decides the folder: chat never gets one; project
-    # needs a validated directory (no surface/home fallback).
+    # Session work mode decides the folder: chat may keep an optional
+    # preferred directory (still chat, not project); project needs a
+    # validated directory (no surface/home fallback).
     if body.mode == "chat":
-        cwd: str | None = ""
+        cwd = _validate_cwd(body.cwd) if (body.cwd or "").strip() else ""
     else:
         cwd = _validate_cwd(body.cwd)
         if cwd is None:
@@ -1061,9 +1062,13 @@ async def patch_session(
     if body.mode is not None:
         fields["mode"] = body.mode
     if next_mode == "chat":
-        # Chat mode never keeps a project folder — clear on mode switch or
-        # ignore a client that still sends cwd.
-        if body.mode == "chat" or body.cwd is not None:
+        # Chat may keep an optional preferred folder without becoming project.
+        # Clearing: explicit empty cwd, or switch to chat without a new cwd
+        # when the client omits cwd and wants the default empty chat folder.
+        if body.cwd is not None:
+            folder = _validate_cwd(body.cwd) if (body.cwd or "").strip() else ""
+            fields["cwd"] = folder or ""
+        elif body.mode == "chat" and body.cwd is None and not (current.cwd or "").strip():
             fields["cwd"] = ""
     elif body.cwd is not None:
         folder = _validate_cwd(body.cwd)

@@ -118,3 +118,72 @@ async def test_append_write_verify_ok_path(monkeypatch: pytest.MonkeyPatch, tmp_
         cwd=tmp_path,
     )
     assert "[write-verify OK]" in out
+
+
+@pytest.mark.asyncio
+async def test_gated_write_then_verify_mismatch_via_runner_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Write exits 0 through ``_run_gated_tool``; verify read shows MISMATCH."""
+    import asyncio
+    from typing import Any
+
+    from jarvis.agent_chat.runner_api import TurnHandle, _run_gated_tool
+    from jarvis.agent_chat.store import AgentChatSession
+
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: ../main/.git/worktrees/wt\n", encoding="utf-8")
+    calls: list[str] = []
+
+    async def fake_execute(name: str, args: dict[str, Any], *, cwd: Path):
+        cmd = str(args.get("command") or "")
+        calls.append(cmd)
+        if "issue edit" in cmd:
+            return "https://github.com/o/r/issues/217\n[exit 0 · 0.1s]", False
+        if "issue view" in cmd:
+            return '{"assignees":[{"login":"someone-else"}]}', False
+        return "unexpected", True
+
+    monkeypatch.setattr("jarvis.agent_chat.runner_api.execute_tool", fake_execute)
+
+    handle = TurnHandle(
+        session=AgentChatSession(
+            session_id="s1",
+            title="",
+            provider="fakeprov",
+            model="m",
+            effort="",
+            cwd=str(wt),
+            permission_mode="auto",
+            vendor_session=None,
+            created_ms=0,
+            updated_ms=0,
+            message_count=0,
+            preview="",
+            surface="agent",
+            mode="project",
+        ),
+        turn_id="t1",
+        emit=lambda _e: asyncio.sleep(0),
+        request_approval=lambda *_a, **_k: asyncio.sleep(0, result="deny"),
+        cancel=asyncio.Event(),
+    )
+    write_args = {"command": "gh issue edit 217 --add-assignee grok"}
+    output, is_error = await _run_gated_tool(
+        handle, "auto", "c1", "RunCommand", write_args, wt
+    )
+    assert is_error is False
+    assert "https://github.com/o/r/issues/217" in output
+    # Same appendix path the runner uses after ``_run_gated_tool``.
+    final = await _append_write_verify(
+        name="RunCommand",
+        args=write_args,
+        output=output,
+        is_error=is_error,
+        cwd=wt,
+    )
+    assert "[write-verify MISMATCH]" in final
+    assert "missing grok" in final
+    assert any("issue edit" in c for c in calls)
+    assert any("issue view" in c for c in calls)

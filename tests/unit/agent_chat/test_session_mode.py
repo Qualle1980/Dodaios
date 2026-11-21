@@ -80,7 +80,10 @@ def test_update_session_can_set_mode(tmp_path: Path):
     assert after is not None and after.mode == "project" and after.cwd == str(tmp_path)
 
 
-def test_service_chat_mode_clears_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_service_chat_mode_keeps_optional_cwd_without_becoming_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Chat may hold a preferred folder; mode stays chat (not project)."""
     from jarvis.agent_chat import runner_api
 
     monkeypatch.setitem(
@@ -91,7 +94,11 @@ def test_service_chat_mode_clears_cwd(tmp_path: Path, monkeypatch: pytest.Monkey
     svc = AgentChatService(store=AgentChatStore(":memory:"))
     session = svc.create_session(provider="fakeprov", cwd=str(tmp_path), mode="chat")
     assert session.mode == "chat"
-    assert session.cwd == ""
+    assert session.cwd == str(tmp_path)
+
+    empty = svc.create_session(provider="fakeprov", cwd="", mode="chat")
+    assert empty.mode == "chat"
+    assert empty.cwd == ""
 
 
 def test_service_project_mode_requires_cwd(monkeypatch: pytest.MonkeyPatch):
@@ -105,6 +112,23 @@ def test_service_project_mode_requires_cwd(monkeypatch: pytest.MonkeyPatch):
     svc = AgentChatService(store=AgentChatStore(":memory:"))
     with pytest.raises(ValueError, match="project mode requires a working folder"):
         svc.create_session(provider="fakeprov", mode="project")
+
+
+def test_chat_mode_with_cwd_still_gates_writes(tmp_path: Path):
+    """Optional chat cwd does not turn the session into an auto-write project."""
+    from jarvis.agent_chat import write_gate as wg
+
+    main = tmp_path / "main"
+    main.mkdir()
+    (main / ".git").mkdir()
+    d = wg.evaluate_write_gate(
+        tool_name="RunCommand",
+        args={"command": "git push origin HEAD"},
+        mode="chat",
+        cwd=str(main),
+    )
+    assert d.is_write and d.needs_ok
+    assert "chat mode" in d.reason
 
 
 def test_service_project_mode_keeps_explicit_cwd(

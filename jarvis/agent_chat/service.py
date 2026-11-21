@@ -864,10 +864,11 @@ class AgentChatService:
             session_mode = "project" if (cwd or "").strip() else DEFAULT_SESSION_MODE
         if session_mode not in SESSION_MODES:
             raise ValueError(f"mode must be one of {SESSION_MODES}, not {session_mode!r}")
-        # Chat mode never gets a project folder. Project mode requires an
+        # Chat mode may keep an optional preferred folder for relative paths;
+        # it stays chat (write gate still asks). Project mode requires an
         # explicit valid cwd — no home / surface default fallback.
         if session_mode == "chat":
-            folder = ""
+            folder = (cwd or "").strip()
         else:
             folder = (cwd or "").strip()
             if not folder:

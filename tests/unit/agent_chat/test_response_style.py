@@ -20,6 +20,15 @@ def test_api_and_main_chat_receive_the_same_reporting_policy(tmp_path: Path) -> 
     assert CONVERSATIONAL_RESPONSE_STYLE in _WRITTEN_CHAT_STYLE
 
 
+def test_system_prompt_asks_ok_before_claiming_writes(tmp_path: Path) -> None:
+    """Before a write, the model must say it asks for OK — not that it already acts."""
+    prompt = system_prompt(cwd=tmp_path, assistant_name="Assistant")
+    assert "asking for Ahmad's OK" in prompt
+    assert "Never claim you are assigning, pushing, committing" in prompt
+    assert "[write-verify OK|MISMATCH]" in prompt
+    assert CONVERSATIONAL_RESPONSE_STYLE in prompt
+
+
 def test_fresh_and_resumed_defaults_allow_detail_and_preserve_essential_information() -> None:
     assert CONVERSATIONAL_TURN_REMINDER in CONVERSATIONAL_RESPONSE_STYLE
     for policy in (CONVERSATIONAL_RESPONSE_STYLE, CONVERSATIONAL_TURN_REMINDER):
