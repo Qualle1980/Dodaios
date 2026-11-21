@@ -13015,6 +13015,10 @@ class BrainManager:
         if images:
             chain = self._lead_vision_chain(chain)
         screen_turn_t0 = time.perf_counter() if images else None
+        # Mutable so a first 429 can re-queue the same (provider, model) after
+        # waiting retryDelay once (rate_limit_tracker.plan_rate_limit_retry).
+        chain = list(chain)
+        rate_wait_retried: set[tuple[str, str | None]] = set()
 
         for idx, (prov_name, model) in enumerate(chain):
             # Skip providers already marked dead in THIS turn.
@@ -13637,8 +13641,38 @@ class BrainManager:
                         prov_name, _health_ledger.MODALITY_BRAIN, exc, model=model
                     )
                 if kind == "rate_limit":
-                    self._rate_tracker.mark_rate_limited(prov_name, model)
-                    log.warning("Rate-Limited %s(%s) — 30s Cooldown aktiviert", prov_name, model)
+                    from jarvis.brain.rate_limit_tracker import plan_rate_limit_retry
+
+                    wait_retry, delay_s = plan_rate_limit_retry(
+                        (prov_name, model),
+                        rate_wait_retried,
+                        msg,
+                        default_delay=self._rate_tracker.cooldown_s,
+                    )
+                    if wait_retry:
+                        log.warning(
+                            "Rate-Limited %s(%s) — waiting %.1fs (API retryDelay) "
+                            "then retrying once",
+                            prov_name,
+                            model,
+                            delay_s,
+                        )
+                        try:
+                            await asyncio.sleep(delay_s)
+                        except asyncio.CancelledError:
+                            raise
+                        # Same request again before any fallback.
+                        chain.insert(idx + 1, (prov_name, model))
+                        continue
+                    self._rate_tracker.mark_rate_limited(
+                        prov_name, model, cooldown_s=delay_s
+                    )
+                    log.warning(
+                        "Rate-Limited %s(%s) — %.1fs cooldown, falling back",
+                        prov_name,
+                        model,
+                        delay_s,
+                    )
                     provider_errors.append(
                         (prov_name, model, "rate_limit", "HTTP 429"))
                 else:

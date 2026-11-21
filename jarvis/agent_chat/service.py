@@ -836,7 +836,10 @@ class AgentChatService:
         title: str = "",
         surface: str = DEFAULT_SURFACE,
         account_id: str = "",
+        mode: str = "",
     ) -> AgentChatSession:
+        from jarvis.agent_chat.store import DEFAULT_SESSION_MODE, SESSION_MODES
+
         row = provider_row(provider)
         if row is None and not supports_api_runner(provider):
             raise ValueError(f"Unknown agent-chat provider: {provider!r}")
@@ -853,15 +856,33 @@ class AgentChatService:
             from jarvis.agent_chat.effort import default_effort
 
             eff = default_effort(provider)
+        session_mode = (mode or "").strip()
+        if not session_mode:
+            # Explicit folder without mode → project; otherwise the default
+            # is chat (no project folder). Callers that mean chat must pass
+            # mode="chat" (or omit both mode and cwd).
+            session_mode = "project" if (cwd or "").strip() else DEFAULT_SESSION_MODE
+        if session_mode not in SESSION_MODES:
+            raise ValueError(f"mode must be one of {SESSION_MODES}, not {session_mode!r}")
+        # Chat mode may keep an optional preferred folder for relative paths;
+        # it stays chat (write gate still asks). Project mode requires an
+        # explicit valid cwd — no home / surface default fallback.
+        if session_mode == "chat":
+            folder = (cwd or "").strip()
+        else:
+            folder = (cwd or "").strip()
+            if not folder:
+                raise ValueError("project mode requires a working folder (cwd)")
         return self.store.create_session(
             provider=provider,
             model=model or (row.default_model if row else ""),
             effort=eff,
-            cwd=cwd or self.default_cwd(surface),
+            cwd=folder,
             permission_mode=permission_mode,
             title=title,
             surface=surface,
             account_id=account_id,
+            mode=session_mode,
         )
 
     def is_running(self, session_id: str) -> bool:

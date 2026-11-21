@@ -49,24 +49,48 @@ FOLDER_RISK_TIERS: Final[dict[str, RiskTier]] = {
 class FolderTool:
     """One folder tool as a Jarvis ``Tool``: the spec from ``tools.py``, a cwd, a tier."""
 
-    def __init__(self, spec: dict[str, Any], cwd: Path, risk_tier: RiskTier) -> None:
+    def __init__(
+        self,
+        spec: dict[str, Any],
+        cwd: Path,
+        risk_tier: RiskTier,
+        *,
+        session_mode: str = "chat",
+    ) -> None:
         self.name: str = str(spec["name"])
         self.description: str = str(spec.get("description") or self.name)
         self.schema: dict[str, Any] = dict(spec.get("input_schema") or {"type": "object"})
         self.risk_tier: RiskTier = risk_tier
         self.read_only = self.name in folder.READ_ONLY_TOOLS
         self._cwd = cwd
+        self._session_mode = session_mode or "chat"
 
     @property
     def cwd(self) -> Path:
         return self._cwd
 
+    @property
+    def session_mode(self) -> str:
+        return self._session_mode
+
     async def execute(self, args: dict[str, Any], ctx: ExecutionContext) -> ToolResult:
+        # Write-gate OK is enforced before execute via ChatGrant.force_ask
+        # (approval_bridge) and via runner_api._run_gated_tool on the API path.
+        # After Ahmad approves, this runs the command normally.
+        _ = ctx
         output, is_error = await folder.execute_tool(self.name, dict(args or {}), cwd=self._cwd)
         return ToolResult(
             success=not is_error,
             output=output,
             error=output if is_error else None,
+        )
+
+    def write_needs_ok(self, args: dict[str, Any] | None) -> bool:
+        """Whether this call is a gated GitHub/git write for the session mode."""
+        from jarvis.agent_chat.write_gate import needs_write_ok
+
+        return needs_write_ok(
+            self.name, args, mode=self._session_mode, cwd=self._cwd
         )
 
     def describe_args(self, args: dict[str, Any]) -> dict[str, str]:
@@ -78,11 +102,14 @@ class FolderTool:
         return f"FolderTool({self.name!r}, cwd={str(self._cwd)!r}, tier={self.risk_tier!r})"
 
 
-def folder_tools(cwd: Path, *, stance: str = "ask") -> dict[str, Tool]:
+def folder_tools(
+    cwd: Path, *, stance: str = "ask", session_mode: str = "chat"
+) -> dict[str, Tool]:
     """The folder tools for one chat turn, keyed by name.
 
     In ``plan`` only the read-only tools are offered at all — a plan-mode
     chat gets no writing hands, rather than hands that are refused later.
+    ``session_mode`` (``chat`` / ``project``) feeds the GitHub/git write gate.
     """
     read_only = stance == PLAN_STANCE
     out: dict[str, Tool] = {}
@@ -90,7 +117,12 @@ def folder_tools(cwd: Path, *, stance: str = "ask") -> dict[str, Tool]:
         name = str(spec["name"])
         if read_only and name not in folder.READ_ONLY_TOOLS:
             continue
-        out[name] = FolderTool(spec, cwd, FOLDER_RISK_TIERS.get(name, "ask"))
+        out[name] = FolderTool(
+            spec,
+            cwd,
+            FOLDER_RISK_TIERS.get(name, "ask"),
+            session_mode=session_mode,
+        )
     return out
 
 

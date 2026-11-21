@@ -228,6 +228,9 @@ _WS_PING_S = 20.0
 # ------------------------------------------------------------------ bodies
 
 
+SessionModeName = Literal["project", "chat"]
+
+
 class CreateSessionBody(BaseModel):
     provider: str
     account_id: str = ""
@@ -241,6 +244,9 @@ class CreateSessionBody(BaseModel):
     #: Agentic IDE's chat mode ("agent"), or the Local models section's setup
     #: assistant ("local-models"). Fixed for the session's life.
     surface: SurfaceName = "agent"
+    #: Work mode: ``chat`` (default; optional preferred folder, not a project)
+    #: or ``project`` (cwd required). Distinct from ``permission_mode``.
+    mode: SessionModeName = "chat"
 
 
 class PatchSessionBody(BaseModel):
@@ -250,6 +256,7 @@ class PatchSessionBody(BaseModel):
     effort: str | None = None
     cwd: str | None = None
     permission_mode: str | None = None
+    mode: SessionModeName | None = None
 
 
 class MessageBody(BaseModel):
@@ -929,7 +936,18 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
                 + ", ".join(m.id for m in permission_modes(ladder))
             ),
         )
-    cwd = _folder_for(body.surface, body.cwd)
+    # Session work mode decides the folder: chat may keep an optional
+    # preferred directory (still chat, not project); project needs a
+    # validated directory (no surface/home fallback).
+    if body.mode == "chat":
+        cwd = _validate_cwd(body.cwd) if (body.cwd or "").strip() else ""
+    else:
+        cwd = _validate_cwd(body.cwd)
+        if cwd is None:
+            raise HTTPException(
+                status_code=400,
+                detail="project mode requires a working folder (cwd)",
+            )
     try:
         session = svc.create_session(
             provider=body.provider,
@@ -940,6 +958,7 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
             title=body.title,
             surface=body.surface,
             account_id=body.account_id,
+            mode=body.mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1039,8 +1058,31 @@ async def patch_session(
         fields["effort"] = normalize_effort(provider, body.effort)
     current = svc.store.get_session(session_id)
     assert current is not None
-    if body.cwd is not None and not kit_for(current.surface).plain:
-        fields["cwd"] = _validate_cwd(body.cwd) or svc.default_cwd(current.surface)
+    next_mode = body.mode if body.mode is not None else getattr(current, "mode", "chat")
+    if body.mode is not None:
+        fields["mode"] = body.mode
+    if next_mode == "chat":
+        # Chat may keep an optional preferred folder without becoming project.
+        # Clearing: explicit empty cwd, or switch to chat without a new cwd
+        # when the client omits cwd and wants the default empty chat folder.
+        if body.cwd is not None:
+            folder = _validate_cwd(body.cwd) if (body.cwd or "").strip() else ""
+            fields["cwd"] = folder or ""
+        elif body.mode == "chat" and body.cwd is None and not (current.cwd or "").strip():
+            fields["cwd"] = ""
+    elif body.cwd is not None:
+        folder = _validate_cwd(body.cwd)
+        if folder is None:
+            raise HTTPException(
+                status_code=400,
+                detail="project mode requires a working folder (cwd)",
+            )
+        fields["cwd"] = folder
+    elif body.mode == "project" and not (current.cwd or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="project mode requires a working folder (cwd)",
+        )
     runner = resolve_runner(
         fields.get("provider") or current.provider,
         surface=current.surface,

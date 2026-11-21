@@ -127,6 +127,20 @@ def system_prompt(*, cwd: Path, assistant_name: str, plan: bool = False) -> str:
         "- When sharing code, use fenced blocks with a language tag; put file paths "
         "in backticks.\n"
         "- Never invent file contents, command output or results you did not observe.\n"
+        "- Do not search on your own for a file, folder or repository the person did not "
+        "name. First ask where it should be, and name the places you would look (for "
+        "example the Desktop, a project folder, or the folder you are in). Do not guess "
+        "a project and do not walk the disk. Only after the person answers, search in "
+        "that place, narrow, with a depth limit and without AppData, node_modules or .venv.\n"
+        "- Without a named repository or project, do not pick one yourself. Ask which "
+        "repository the person means before you read or change anything in it.\n"
+        "- Before any GitHub or git write, say only that you are asking for Ahmad's "
+        "OK. Never claim you are assigning, pushing, committing, or otherwise doing "
+        "the write until that approval succeeds.\n"
+        "- After every GitHub or git write, the runner runs a read check and appends "
+        "a [write-verify OK|MISMATCH] block to the tool result. Say you are verifying "
+        "before claiming done. On MISMATCH, report the deviation; never say the write "
+        "succeeded.\n"
         "- When the task is done, stop calling tools. Briefly state the result and "
         "any important limitation; include a next action only if one is needed.\n\n"
         + CONVERSATIONAL_RESPONSE_STYLE
@@ -511,6 +525,9 @@ async def run_api_turn(handle: TurnHandle, user_text: str) -> None:
                     if output == _PERMISSION_UPGRADED:
                         permission_mode = "auto"
                         output, is_error = await execute_tool(name, args, cwd=cwd)
+                    output = await _append_write_verify(
+                        name=name, args=args, output=output, is_error=is_error, cwd=cwd
+                    )
                     await handle.emit(
                         make_event(
                             "tool_result",
@@ -560,6 +577,36 @@ async def run_api_turn(handle: TurnHandle, user_text: str) -> None:
 _PERMISSION_UPGRADED: Final[str] = "\0permission-upgraded\0"
 
 
+async def _append_write_verify(
+    *,
+    name: str,
+    args: dict[str, Any],
+    output: str,
+    is_error: bool,
+    cwd: Path,
+) -> str:
+    """After a successful write ``RunCommand``, force a read and append the check."""
+    if name != "RunCommand" or is_error:
+        return output
+    command = str((args or {}).get("command") or "")
+    if not command.strip():
+        return output
+    from jarvis.agent_chat.write_verify import format_verify_appendix, run_write_verify
+
+    async def _read(cmd: str) -> tuple[str, bool]:
+        return await execute_tool("RunCommand", {"command": cmd}, cwd=cwd)
+
+    result = await run_write_verify(
+        write_command=command,
+        write_output=output,
+        write_is_error=is_error,
+        execute_read=_read,
+    )
+    if result is None:
+        return output
+    return output + format_verify_appendix(result)
+
+
 async def _run_gated_tool(
     handle: TurnHandle,
     permission_mode: str,
@@ -574,7 +621,30 @@ async def _run_gated_tool(
     mutating tool; ``accept-edits`` lets Write/Edit through and asks for
     RunCommand; ``auto`` asks for nothing; ``plan`` never reaches here (the
     model has no mutating tools) but is treated like ``ask`` if it did.
+
+    Independently of the ladder, GitHub/git writes go through
+    :mod:`jarvis.agent_chat.write_gate`: chat mode and project-on-main always
+    need Ahmad's explicit OK; a linked worktree may write; reads stay free.
     """
+    from jarvis.agent_chat.write_gate import denial_message, evaluate_write_gate
+
+    session_mode = str(getattr(handle.session, "mode", "") or "")
+    gate = evaluate_write_gate(
+        tool_name=name, args=args, mode=session_mode, cwd=cwd
+    )
+    if gate.needs_ok:
+        decision = await handle.request_approval(
+            call_id, name, args, summarize_call(name, args)
+        )
+        if decision == "deny":
+            return denial_message(gate.reason), True
+        if decision == "cancel":
+            return "Cancelled.", True
+        if decision == "allow_always":
+            # Write-gate OK is per call; do not promote the whole ladder.
+            return await execute_tool(name, args, cwd=cwd)
+        return await execute_tool(name, args, cwd=cwd)
+
     if name in READ_ONLY_TOOLS or permission_mode == "auto":
         return await execute_tool(name, args, cwd=cwd)
     if permission_mode == "accept-edits" and name in EDIT_TOOLS:
