@@ -412,7 +412,7 @@ def _parse_page_data(
     # Exact machine-readable markers preserve the frontmatter key/value pair.
     # Plain flattened values cannot distinguish ``status: verified`` from a
     # different field that happens to contain the word "verified".
-    for key in ("status", "note_type"):
+    for key in ("status", "note_type", "id", "slug"):
         value = str(frontmatter.get(key, "")).strip().casefold()
         marker_value = re.sub(r"[^a-z0-9_-]+", "_", value).strip("_")
         if marker_value:

@@ -29,19 +29,30 @@ Vault-root resolution (§6 AGENT-B, spec A7):
     field is unavailable at construction time, the tool falls back to the
     resolver's default vault location and logs a single WARNING.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from jarvis.core.protocols import ToolResult
+from jarvis.memory.wiki.recall_quality import lexical_passage, rank_hits
+from jarvis.memory.wiki.search import SearchHit
 
 if TYPE_CHECKING:
     from jarvis.memory.wiki.search import VaultSearch
 
 log = logging.getLogger(__name__)
+
+_MAX_HITS = 3
+_CANDIDATE_DEPTH = 10
+_MAX_EXCERPT_CHARS = 480
+_MAX_BLOCK_CHARS = 1800
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_NO_EXCERPT = "[no excerpt available; open the note for content]"
 
 
 class WikiRecallTool:
@@ -51,8 +62,8 @@ class WikiRecallTool:
 
     name: str = "wiki-recall"
     description: str = (
-        "Search the user's long-term Obsidian wiki for notes matching keywords. "
-        "Returns a compact markdown summary with up to 5 ranked hits. Use this "
+        "Search the user's long-term Obsidian wiki for notes matching the query. "
+        "Returns a compact markdown summary with up to 3 ranked hits and excerpts. Use this "
         "when the user asks 'what do we know about X', 'who is Y', or references "
         "a past project, person, or decision by name."
     )
@@ -68,7 +79,7 @@ class WikiRecallTool:
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 10,
-                "default": 5,
+                "default": 3,
             },
         },
         "required": ["query"],
@@ -103,9 +114,9 @@ class WikiRecallTool:
             When the vault root does not exist at execute time.
         """
         query = str(args.get("query", "")).strip()
-        k = int(args.get("k", 5))
+        k = int(args.get("k", _MAX_HITS))
         # Clamp defensively — schema validation may not have run upstream.
-        k = max(1, min(k, 10))
+        k = max(1, min(k, _MAX_HITS))
 
         vault_root = self._search._root  # type: ignore[attr-defined]
 
@@ -119,52 +130,56 @@ class WikiRecallTool:
                 error=f"vault unavailable at {vault_root}",
             )
 
-        hits = self._search.search(query, k=k)
-        # With semantic search switched on, add pages that mean the same but
-        # share no word with the query. Never waits for the model, and runs
-        # off the event loop: encoding the query is CPU work.
-        hits = await asyncio.to_thread(_with_semantic_hits, hits, query, vault_root)
+        lexical = self._search.search(query, k=_CANDIDATE_DEPTH)
+        exact_lookup = getattr(self._search, "search_exact", None)
+        exact = exact_lookup(query, k=k) if exact_lookup else []
+        semantic = await asyncio.to_thread(_semantic_hits, query, vault_root)
+        hits = rank_hits(exact, lexical, semantic)[:k]
+        semantic_passages = {hit.path: hit.snippet for hit in semantic}
+        lexical_paths = {hit.path for hit in lexical}
+        body_evidence_paths = lexical_paths | {hit.path for hit in exact}
 
         log.info("wiki-recall: %d hit(s) for query (k=%d)", len(hits), k)
 
+        display_query = " ".join(query.split())[:120]
         if not hits:
             return ToolResult(
                 success=True,
-                output=(
-                    f'No wiki matches found for "{query}" in {vault_root}.'
-                ),
+                output=(f'No wiki matches found for "{display_query}" in {vault_root}.'),
             )
 
-        lines: list[str] = [f'## Wiki hits for "{query}"']
+        lines = [f'## Wiki hits for "{display_query}"']
+        length = len(lines[0])
+        indexed_body = getattr(self._search, "indexed_body", None)
         for hit in hits:
-            # Render path relative to vault_root so the brain sees a short,
-            # portable path rather than an absolute Windows path.
             try:
                 rel_path = hit.path.relative_to(vault_root)
             except ValueError:
                 rel_path = hit.path
 
-            # Filename / frontmatter / alias hits have an empty body snippet by
-            # contract (SearchHit.snippet). The injector already falls back to
-            # ``preview`` (leading prose); recall used to drop the hit to a
-            # bare title+path, so a live model that cannot call wiki-page-read
-            # answered "nothing found" while holding the right note
-            # (live 2026-11-14, Werkzeugschleife → live-loop-broken-and-proven).
-            body = (hit.snippet or getattr(hit, "preview", "") or "").strip()
-            if body:
-                content_part = f" — {body}"
+            body = indexed_body(hit) if indexed_body else None
+            if hit.path in body_evidence_paths and body is not None:
+                excerpt = await asyncio.to_thread(lexical_passage, query, hit.title, body)
             else:
-                # AP-30: a hit with no prose is a visible fault, not "".
+                excerpt = semantic_passages.get(hit.path, "")
+            if not excerpt and indexed_body is None:
+                excerpt = hit.snippet or hit.preview
+
+            if not excerpt:
                 log.warning(
-                    "wiki-recall: hit %r has empty snippet and preview; "
-                    "emitting title/path only",
-                    getattr(hit, "title", rel_path),
+                    "wiki-recall: hit %r has empty snippet and preview; no body excerpt available",
+                    hit.title,
                 )
-                content_part = " — [no excerpt available; open the note for content]"
-            lines.append(
-                f"- **{hit.title}**{content_part} "
-                f"[{_trust_label(hit)}] ({rel_path})"
-            )
+                excerpt = _NO_EXCERPT
+            prefix = f"- **{' '.join(hit.title.split())[:160]}** — "
+            suffix = f" [{_trust_label(hit)}] ({rel_path})"
+            remaining = _MAX_BLOCK_CHARS - length - len(prefix) - len(suffix) - 1
+            available = min(_MAX_EXCERPT_CHARS, remaining)
+            if available < min(len(excerpt), 80):
+                break
+            line = f"{prefix}{_clip_excerpt(excerpt, available)}{suffix}"
+            lines.append(line)
+            length += len(line) + 1
 
         return ToolResult(success=True, output="\n".join(lines))
 
@@ -197,14 +212,29 @@ def _trust_label(hit: Any) -> str:
     return "status unknown"
 
 
-def _with_semantic_hits(hits: list[Any], query: str, vault_root: Path) -> list[Any]:
-    try:
-        from jarvis.memory.wiki.semantic_search import with_semantic_hits
+def _clip_excerpt(excerpt: str, limit: int) -> str:
+    excerpt = " ".join(excerpt.split())
+    if len(excerpt) <= limit:
+        return excerpt
+    boundaries = (
+        match.start()
+        for match in _SENTENCE_END.finditer(excerpt[: limit + 1])
+        if match.start() < limit
+    )
+    end = max(boundaries, default=limit - 1)
+    return excerpt[:end].rstrip() + "…"
 
-        return with_semantic_hits(hits, query, vault_root=vault_root)
-    except Exception as exc:  # noqa: BLE001 - the word search result stands on its own
+
+def _semantic_hits(query: str, vault_root: Path) -> list[SearchHit]:
+    try:
+        from jarvis.memory.wiki.semantic_search import get_active
+
+        active = get_active()
+        if active is not None and active.vault_root == vault_root:
+            return active.search(query, k=_CANDIDATE_DEPTH, full_passage=True)
+    except Exception as exc:  # noqa: BLE001 - lexical recall stands on its own
         log.debug("wiki-recall: semantic search skipped: %s", exc)
-        return hits
+    return []
 
 
 def _build_search_instance() -> VaultSearch:
@@ -238,8 +268,7 @@ def _build_search_instance() -> VaultSearch:
     resolved = resolve_vault_root(raw).path
     if raw is None:
         log.warning(
-            "wiki-recall: cfg.wiki_integration.vault_root not found; "
-            "defaulting to %s",
+            "wiki-recall: cfg.wiki_integration.vault_root not found; defaulting to %s",
             resolved,
         )
 

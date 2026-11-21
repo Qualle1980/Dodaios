@@ -82,6 +82,7 @@ class SemanticVaultSearch:
         *,
         k: int = 5,
         min_score: float = MIN_SIMILARITY,
+        full_passage: bool = False,
         wait: bool = False,
     ) -> list[SearchHit]:
         """Up to *k* pages, best first, each with its best-matching passage.
@@ -111,7 +112,7 @@ class SemanticVaultSearch:
             return []
 
         best: dict[str, int] = {}
-        for index in scores.argsort()[::-1]:
+        for index in (-scores).argsort(kind="stable"):
             score = float(scores[index])
             if score < min_score or len(best) >= k:
                 break
@@ -123,7 +124,7 @@ class SemanticVaultSearch:
                 SearchHit(
                     title=title or Path(rel_path).stem,
                     path=self._root / rel_path,
-                    snippet=_clip(text),
+                    snippet=text if full_passage else _clip(text),
                     score=round(float(scores[index]), 4),
                     preview=_clip(text),
                 )

@@ -184,11 +184,37 @@ class VaultSearch:
         if not query or not query.strip():
             return []
 
-        tokens = [t for t in query.split() if t.strip()]
+        return self._search_ranked(query, k)
+
+    def search_exact(self, query: str, *, k: int) -> list[SearchHit]:
+        """Look up exact titles, note paths, and indexed identifiers separately."""
+        return self._search_ranked(query, k, exact=query.strip())
+
+    def indexed_body(self, hit: SearchHit) -> str | None:
+        """Return the same indexed text searched for this hit, including external sources."""
+        try:
+            if hit.source_type == SOURCE_TYPE_CANONICAL:
+                conn, root = self._get_conn(), self._root
+            else:
+                source = next((item for item in self._external if item.name == hit.source), None)
+                if source is None:
+                    return None
+                conn, root = self._external_conn(source), source.path
+            key = hit.path.relative_to(root).as_posix()
+            row = conn.execute("SELECT body FROM wiki_fts WHERE path = ?", (key,)).fetchone()
+            return str(row[0] or "") if row else None
+        except (sqlite3.Error, ValueError) as exc:
+            log.debug("wiki-recall: indexed body unavailable: %s", exc)
+            return None
+
+    def _search_ranked(self, query: str, k: int, *, exact: str = "") -> list[SearchHit]:
+        tokens = re.findall(r"[^\W_]+", exact) if exact else query.split()
         if not tokens:
             return []
 
         match_expr = _build_match_expr(tokens)
+        if not match_expr:
+            return []
 
         try:
             conn = self._get_conn()
@@ -197,7 +223,7 @@ class VaultSearch:
             return []
 
         try:
-            hits = self._run_query(conn, match_expr, k)
+            hits = self._run_query(conn, match_expr, k, exact=exact)
         except sqlite3.OperationalError as exc:
             # Table may not exist yet (index not built) — degrade gracefully.
             log.debug("VaultSearch: FTS query failed (%s) — returning []", exc)
@@ -208,7 +234,7 @@ class VaultSearch:
         if not self._external:
             return hits
         for source in self._external:
-            hits.extend(self._search_external(source, match_expr, k))
+            hits.extend(self._search_external(source, match_expr, k, exact=exact))
         # Stable sort: on equal score the active vault keeps its place first.
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[:k]
@@ -250,8 +276,8 @@ class VaultSearch:
         if self._owns_conn and self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.debug("VaultSearch: index close skipped: %s", exc)
             self._conn = None
         for ext_conn in self._external_conns.values():
             try:
@@ -304,7 +330,7 @@ class VaultSearch:
             return conn
 
     def _search_external(
-        self, source: ExternalSource, match_expr: str, k: int
+        self, source: ExternalSource, match_expr: str, k: int, *, exact: str = ""
     ) -> list[SearchHit]:
         """Hits from one read-only source; any failure only drops its hits."""
         try:
@@ -314,6 +340,7 @@ class VaultSearch:
                 match_expr,
                 k,
                 root=source.path,
+                exact=exact,
                 source=source.name,
                 source_type=SOURCE_TYPE_EXTERNAL,
                 require_verified=(
@@ -335,6 +362,7 @@ class VaultSearch:
         source: str = CANONICAL_SOURCE,
         source_type: str = SOURCE_TYPE_CANONICAL,
         require_verified: bool = False,
+        exact: str = "",
     ) -> list[SearchHit]:
         root = self._root if root is None else root
         # BM25 weights are positional over EVERY column, including the
@@ -367,8 +395,10 @@ class VaultSearch:
                 " AND lower(path) NOT GLOB '*/index-*.md'"
                 " AND instr(frontmatter, '__fm_status_verified__') > 0"
             )
-        sql += " ORDER BY bm25_score LIMIT ?"
-        params.append(k)
+        sql += " ORDER BY bm25_score"
+        if not exact:
+            sql += " LIMIT ?"
+            params.append(k)
         cursor = conn.execute(sql, params)
         # Lowercased bare tokens for the "did body actually contain a hit?" check.
         # Strip the quotes AND the prefix marker: '"drogen"*' and '"drogen"'
@@ -379,8 +409,20 @@ class VaultSearch:
             for tok in match_expr.split(" OR ")
         ]
         hits: list[SearchHit] = []
+        exact_title = exact.casefold()
+        exact_path = exact_title.replace("\\", "/").removesuffix(".md")
+        exact_id = re.sub(r"[^a-z0-9_-]+", "_", exact_title).strip("_")
+        id_markers = {f"__fm_id_{exact_id}__", f"__fm_slug_{exact_id}__"}
         for row in cursor:
             rel_path_str, title, body, bm25_raw, frontmatter = row
+            if exact:
+                note_path = rel_path_str.casefold().removesuffix(".md")
+                if (
+                    exact_title != (title or "").casefold()
+                    and exact_path not in (note_path, note_path.rsplit("/", 1)[-1])
+                    and not id_markers.intersection((frontmatter or "").split())
+                ):
+                    continue
             abs_path = root / rel_path_str
             score = _normalise_bm25(bm25_raw)
             # The excerpt is built from the body lines that carry query terms,
@@ -398,6 +440,8 @@ class VaultSearch:
                     source_type=source_type,
                 )
             )
+            if len(hits) >= k:
+                break
         log.debug(
             "VaultSearch: %d hits for match=%r, vault=%s",
             len(hits),
