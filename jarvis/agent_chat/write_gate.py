@@ -480,9 +480,6 @@ _GIT_WRITE_VERBS: Final[frozenset[str]] = frozenset(
         "mv",
         "add",
         "worktree",
-        "branch",
-        "remote",
-        "config",
         "gc",
         "prune",
     }
@@ -505,9 +502,64 @@ def _git_is_write(args: list[str]) -> bool:
     if i >= len(args):
         return False
     verb = args[i].lower()
+    rest = args[i + 1 :]
     if verb in _GIT_WRITE_VERBS:
         return True
+    if verb == "branch":
+        return _git_branch_is_write(rest)
+    if verb == "remote":
+        return _git_remote_is_write(rest)
+    if verb == "config":
+        return _git_config_is_write(rest)
     return False
+
+
+#: ``git branch`` lists unless it creates, deletes, renames or copies.
+_GIT_BRANCH_WRITE_FLAGS: Final[frozenset[str]] = frozenset(
+    {"-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy", "-f", "--force"}
+)
+
+
+#: ``git branch`` listing modes: a following name is a pattern, not a new branch.
+_GIT_BRANCH_LIST_FLAGS: Final[frozenset[str]] = frozenset(
+    {"-l", "--list", "--show-current", "-a", "--all", "-r", "--remotes", "-v", "-vv",
+     "--verbose", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+     "--format", "--sort", "--color", "--no-color"}
+)
+
+
+def _git_branch_is_write(rest: list[str]) -> bool:
+    if any(tok in _GIT_BRANCH_WRITE_FLAGS for tok in rest):
+        return True
+    if any(tok in _GIT_BRANCH_LIST_FLAGS for tok in rest):
+        return False
+    return any(not tok.startswith("-") for tok in rest)  # a bare name creates a branch
+
+
+#: ``git remote`` lists unless it adds, removes or changes a remote.
+_GIT_REMOTE_WRITE_SUBS: Final[frozenset[str]] = frozenset(
+    {"add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune", "update"}
+)
+
+
+def _git_remote_is_write(rest: list[str]) -> bool:
+    for tok in rest:
+        if tok.startswith("-"):
+            continue
+        return tok.lower() in _GIT_REMOTE_WRITE_SUBS
+    return False
+
+
+def _git_config_is_write(rest: list[str]) -> bool:
+    """``git config`` reads with --get/--list or a single key; writes with a value or --unset/--add."""
+    write_flags = {"--unset", "--unset-all", "--add", "--replace-all", "--remove-section",
+                   "--rename-section", "--edit", "-e"}
+    positional = [t for t in rest if not t.startswith("-")]
+    if any(t in write_flags for t in rest):
+        return True
+    if any(t in {"--get", "--get-all", "--list", "-l", "--get-regexp"} for t in rest):
+        return False
+    return len(positional) >= 2  # key and value
 
 
 #: HTTP clients whose mutating calls reach GitHub directly.

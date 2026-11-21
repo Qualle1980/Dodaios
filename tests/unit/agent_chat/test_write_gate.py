@@ -268,3 +268,31 @@ def test_scripts_that_call_github_mutating_are_writes():
 def test_script_reading_github_is_a_read():
     cmd = "python -c \"import requests; print(requests.get('https://api.github.com/repos/o/r').text)\""
     assert not wg.command_is_write(cmd)
+
+
+def test_git_branch_remote_config_reads_are_free():
+    # Found in the live check 2026-11-21: these listing forms were gated.
+    assert not wg.command_is_write("git branch --show-current")
+    assert not wg.command_is_write("git branch")
+    assert not wg.command_is_write("git branch -a")
+    assert not wg.command_is_write("git remote -v")
+    assert not wg.command_is_write("git remote show origin")
+    assert not wg.command_is_write("git remote get-url origin")
+    assert not wg.command_is_write("git config --get user.name")
+    assert not wg.command_is_write("git config --list")
+    assert not wg.command_is_write("git config user.name")
+
+
+def test_git_branch_remote_config_writes_are_gated():
+    assert wg.command_is_write("git branch feature/x")
+    assert wg.command_is_write("git branch -D old")
+    assert wg.command_is_write("git remote add up https://x")
+    assert wg.command_is_write("git remote set-url origin https://x")
+    assert wg.command_is_write("git config user.name Ahmad")
+    assert wg.command_is_write("git config --unset user.name")
+
+
+def test_git_branch_list_with_pattern_is_read():
+    assert not wg.command_is_write("git branch --list claude/general-worker-fix")
+    assert not wg.command_is_write("git branch -a --contains HEAD")
+    assert wg.command_is_write("git branch claude/new-topic")
