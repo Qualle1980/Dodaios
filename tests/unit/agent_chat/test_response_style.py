@@ -111,8 +111,9 @@ def test_society_api_turn_carries_the_reply_policy_exactly_once(briefed: bool) -
     assert "WRITTEN CHAT STYLE" in prompt
 
 
-def test_system_prompt_stops_broad_search_and_asks_for_location(tmp_path):
+def test_system_prompt_asks_before_searching_or_guessing_a_repo(tmp_path):
     prompt = system_prompt(cwd=tmp_path, assistant_name="Assistant")
-    assert "10 seconds" in prompt
-    assert "Do not walk the whole disk" in prompt
-    assert "ask the person where the file is" in prompt
+    assert "Do not search on your own" in prompt
+    assert "name the places you would look" in prompt
+    assert "Do not guess" in prompt
+    assert "do not pick one yourself" in prompt
