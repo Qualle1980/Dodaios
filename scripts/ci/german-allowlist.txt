@@ -484,3 +484,9 @@ jarvis/voice_engine/bench/corpus/de.json
 #     real transcripts that pin it ---
 jarvis/sessions/chat_titles.py
 tests/unit/sessions/test_chat_titles.py
+
+# --- Speech-input vocabulary: the German words a spoken query uses, mapped
+#     onto the English tool names discovery ranks against (AGENTS.md allows
+#     speech-input vocabulary). Kept in its own module so the words live in
+#     one declared place instead of scattered through the ranking logic. ---
+jarvis/live/query_vocabulary.py
