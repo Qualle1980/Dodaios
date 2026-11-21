@@ -1,7 +1,5 @@
-// Stays on zod v3, deliberately. These schemas sit in the STARTUP chunk (the
-// socket opens as the app mounts), so their cost is paid before the first
-// paint and `zod/v4` looked like free savings. Measured on the real bundle it
-// is the opposite: v4's core added ~30 KB here. Re-measure before trying again.
+// These schemas sit in the STARTUP chunk (the socket opens as the app mounts).
+// Dependabot requires zod >= 4.6.6; single-arg z.record() became z.record(key, value).
 import { z } from "zod";
 
 /** Envelope emitted by server over /ws for every bus-event.
@@ -15,7 +13,7 @@ export const WSEventEnvelope = z.object({
   source_layer: z.string().default(""),
   timestamp_ns: z.number(),
   trace_id: z.string(),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.string(), z.unknown()).default({}),
 });
 export type WSEventEnvelopeT = z.infer<typeof WSEventEnvelope>;
 
@@ -43,7 +41,7 @@ export const WSMessageIn = z.object({
   type: z.literal("message"),
   kind: z.enum(["text", "voice", "system", "action"]),
   content: z.string(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type WSMessageInT = z.infer<typeof WSMessageIn>;
 
@@ -65,7 +63,7 @@ export const WSCommand = z.object({
     // task into the live conversation context.
     "mission.inject",
   ]),
-  payload: z.record(z.unknown()).default({}),
+  payload: z.record(z.string(), z.unknown()).default({}),
 });
 export type WSCommandT = z.infer<typeof WSCommand>;
 
