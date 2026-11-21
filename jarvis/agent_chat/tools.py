@@ -549,21 +549,83 @@ async def _taskkill_tree(pid: int) -> None:
             killer.kill()
 
 
+def _unblock_command_pipes(proc: asyncio.subprocess.Process) -> None:
+    """Unblock ``communicate()`` when a descendant still holds the write end.
+
+    After a tree kill, a breakaway grandchild can keep stdout open so the
+    StreamReader never sees EOF. Feeding EOF lets the pending read finish.
+    """
+    for stream in (proc.stdout, proc.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.feed_eof()
+        except Exception:
+            # Already closed or not a StreamReader — drain path still ends via cancel.
+            pass
+
+
 async def _terminate_command_tree(proc: asyncio.subprocess.Process, tree: Any) -> None:
-    """Kill the shell and every descendant, then wait briefly for exit."""
+    """Kill the shell and every descendant, then wait briefly for exit.
+
+    On Windows, ``taskkill /T`` runs first while the shell is still the parent
+    of its tree. Git Bash / MSYS children often break away from the Job Object
+    (``CREATE_BREAKAWAY_FROM_JOB``); closing the job then kills only bash and
+    skips ``taskkill`` once ``returncode`` is set — orphans keep the stdout
+    pipe open and ``communicate()`` never completes.
+    """
+    pid = proc.pid
+    if sys.platform == "win32" and pid:
+        await _taskkill_tree(pid)
     with _suppress_os():
         tree.close()
     if proc.returncode is None:
         with _suppress_os():
             proc.kill()
-        if sys.platform == "win32" and proc.returncode is None and proc.pid:
-            # Job Object may have been a no-op; taskkill still reaps the tree.
-            if not getattr(tree, "supports_containment", False):
-                await _taskkill_tree(proc.pid)
     try:
         await asyncio.wait_for(proc.wait(), timeout=_COMMAND_STOP_GRACE_S)
     except (TimeoutError, ProcessLookupError):
         pass
+
+
+async def _await_command_output(
+    proc: asyncio.subprocess.Process,
+    tree: Any,
+    timeout: float,
+) -> tuple[bytes | None, bool]:
+    """Wait for ``communicate()`` up to ``timeout``; on expiry kill the tree.
+
+    Uses ``asyncio.wait`` (no cancel-on-timeout) so the kill runs even when a
+    stuck pipe read would ignore cancellation, then unblocks and drains the
+    communicate task under a short grace.
+    """
+    comm = asyncio.create_task(proc.communicate())
+    try:
+        done, _pending = await asyncio.wait({comm}, timeout=timeout)
+        if comm not in done:
+            await _terminate_command_tree(proc, tree)
+            _unblock_command_pipes(proc)
+            try:
+                await asyncio.wait_for(comm, timeout=_COMMAND_STOP_GRACE_S)
+            except (TimeoutError, asyncio.CancelledError):
+                if not comm.done():
+                    comm.cancel()
+                    try:
+                        await comm
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            return None, True
+        return comm.result()[0], False
+    except asyncio.CancelledError:
+        await _terminate_command_tree(proc, tree)
+        _unblock_command_pipes(proc)
+        if not comm.done():
+            comm.cancel()
+            try:
+                await comm
+            except (asyncio.CancelledError, Exception):
+                pass
+        raise
 
 
 async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
@@ -598,17 +660,13 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
         except OSError as exc:
             log.warning("RunCommand: process-tree assign failed for pid %s: %s", proc.pid, exc)
     try:
-        raw, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        await _terminate_command_tree(proc, tree)
-        return f"Command timed out after {int(timeout)} s: {command}", True
-    except asyncio.CancelledError:
-        await _terminate_command_tree(proc, tree)
-        raise
+        raw, timed_out = await _await_command_output(proc, tree, timeout)
     finally:
         # Process already exited on the success path; closing the job is safe.
         with _suppress_os():
             tree.close()
+    if timed_out or raw is None:
+        return f"Command timed out after {int(timeout)} s: {command}", True
     text = raw.decode("utf-8", errors="replace")
     took = time.perf_counter() - started
     code = proc.returncode
