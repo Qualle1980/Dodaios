@@ -42,14 +42,19 @@ from jarvis.agent_chat.service import AgentChatService
 from jarvis.agent_chat.store import AgentChatStore
 from jarvis.agentic_ide import agent_transcript
 from jarvis.agentic_ide import delegation_wait as ide_wait
+from jarvis.brain.workspace_git_tool import WorkspaceGitTool
+from jarvis.brain.workspace_test_tool import WorkspaceTestTool
 from jarvis.core.bus import EventBus
-from jarvis.core.config import SafetyBlacklistConfig, SafetyConfig, SafetyWhitelistConfig
+from jarvis.core.config import (
+    AgenticIdeConfig,
+    SafetyBlacklistConfig,
+    SafetyConfig,
+    SafetyWhitelistConfig,
+)
 from jarvis.core.protocols import ExecutionContext, ToolResult
 from jarvis.safety import ApprovalWorkflow, RiskTierEvaluator, ToolExecutor
 from tests.fakes.fake_chief_brain import Call, ScriptedChief, Wave
-
-#: This test run's own interpreter — the one that has pytest.
-PYTHON = sys.executable.replace("\\", "/")
+from tests.fakes.fake_workspace_checkout import FakeCheckoutOrchestrator
 
 NO_WORKER_REQUEST = "Zeig den aktuellen Stand von Bubble."  # i18n-allow: the person's words
 CONTINUE_REQUEST = "Arbeite an Bubble weiter."  # i18n-allow: the person's words
@@ -208,6 +213,35 @@ class DelegateTool:
         return ToolResult(success=True, output="accepted")
 
 
+#: The suite the user configured for Bubble, on the interpreter that has pytest.
+#: The General never writes this: ``workspace-test`` has no field for it.
+BUBBLE_SUITE = AgenticIdeConfig(
+    test_commands={
+        "*": [sys.executable, "-m", "pytest", "test_calc.py", "-q", "-p", "no:cacheprovider"]
+    }
+)
+#: The General's two verification hands. Neither is a shell.
+VERIFY_TOOLS = ("workspace-git", "workspace-test")
+
+
+def _checkout_tools(workspace: FakeWorkspace) -> dict[str, Any]:
+    """``workspace-git`` and ``workspace-test`` over the workspace's real checkout.
+
+    Resolution and execution are the product's own modules; only the graph the
+    orchestrator resolves against is a fake, bound to this workspace's id.
+    """
+    gateway = FakeCheckoutOrchestrator(
+        workspace.folder,
+        project_id=workspace.project_id,
+        workspace_id=workspace.id,
+        config=BUBBLE_SUITE,
+    )
+    return {
+        WorkspaceGitTool.name: WorkspaceGitTool(gateway),
+        WorkspaceTestTool.name: WorkspaceTestTool(gateway),
+    }
+
+
 # ------------------------------------------------------------------ harness
 
 
@@ -350,12 +384,11 @@ async def test_a_hard_step_is_delegated_as_a_bounded_brief_not_the_original_orde
                 ),
                 reply="I read calc.py and asked T1 for subtract().",
             ),
+            # The General holds read hands only (no shell), so its follow-up
+            # look is a folder read, not ``git status`` through RunCommand.
             Wave(
-                calls=(
-                    Call("RunCommand", {"command": "git status --porcelain"}),
-                    Call("RunCommand", {"command": "git diff"}),
-                ),
-                reply="Checked: nothing changed on disk, so this is unverified.",
+                calls=(Call("Read", {"file_path": "calc.py"}),),
+                reply="Read calc.py: no subtract() on disk yet, so this is unverified.",
             ),
         ],
         tools={delegate.name: delegate},
@@ -421,7 +454,12 @@ async def test_a_cli_completion_alone_may_not_be_reported_as_a_pass(chat):
 
 
 async def test_an_independent_git_and_test_read_is_what_makes_a_pass(chat):
-    """Case 4: the chief reads the real diff and runs the real tests — then PASS stands."""
+    """Case 4: the chief reads the real change and runs the real suite — then PASS stands.
+
+    The General holds no shell: the change is read with ``workspace-git state``
+    and the suite runs through ``workspace-test``, both naming the job's own
+    workspace.
+    """
     pane = FakePane(name="T1")
     workspace = FakeWorkspace(pane, folder=chat.project)
     registry = FakeRegistry((workspace, pane))
@@ -443,6 +481,7 @@ async def test_an_independent_git_and_test_read_is_what_makes_a_pass(chat):
         )
         return _transcript(pane.last_prompt, reply="Added subtract to calc.py.")
 
+    mine = {"workspace_id": workspace.id}
     rig = chat(
         [
             Wave(
@@ -451,37 +490,83 @@ async def test_an_independent_git_and_test_read_is_what_makes_a_pass(chat):
             ),
             Wave(
                 calls=(
-                    Call("RunCommand", {"command": "git diff"}),
-                    # A real suite in the project, on the interpreter that
-                    # actually has pytest (PATH python here does not).
-                    Call(
-                        "RunCommand",
-                        # Forward slashes: RunCommand runs through a shell that
-                        # would eat the backslashes of a Windows path.
-                        {"command": f'"{PYTHON}" -m pytest test_calc.py -q'},
-                    ),
+                    Call("workspace-git", {"op": "state", **mine}),
+                    # The suite the user configured, run in the job's checkout.
+                    Call("workspace-test", dict(mine)),
                 ),
-                reply="Verified: the diff adds subtract() and both tests pass. PASS.",
+                reply="Verified: the change adds subtract() and both tests pass. PASS.",
             ),
         ],
-        tools={delegate.name: delegate},
+        tools={delegate.name: delegate, **_checkout_tools(workspace)},
     )
 
     rig["reader"]["fn"] = apply_edit
     events = await _run(rig, CONTINUE_REQUEST)
 
     chief: ScriptedChief = rig["chief"]
-    checks = [e for e in chief.executed if e.tool == "RunCommand"]
-    assert len(checks) == 2, checks
+    # No shell was offered, so none could be used.
+    assert "RunCommand" not in [e.tool for e in chief.executed]
+    checks = [e for e in chief.executed if e.tool in VERIFY_TOOLS]
+    assert [e.tool for e in checks] == list(VERIFY_TOOLS), checks
     assert all(e.result.success for e in checks), [
         (e.args, e.result.output) for e in checks
     ]
-    assert "subtract" in str(checks[0].result.output)
-    assert "2 passed" in str(checks[1].result.output), checks[1].result.output
+    state, suite = (e.result.output for e in checks)
+    assert {c["path"] for c in state["changes"]} == {"calc.py", "test_calc.py"}, state
+    assert suite["passed"] is True and suite["exit_code"] == 0, suite
+    assert "2 passed" in suite["summary"], suite["summary"]
+    assert suite["workspace_id"] == workspace.id and len(suite["commit"]) == 40
     # Exactly one delegation; the verified answer is allowed to say PASS.
     assert len(delegate.briefs) == 1
     assert len(chief.calls) == 2
     assert "PASS" in _said(events).upper()
+
+
+async def test_a_failing_suite_keeps_the_pass_from_the_person(chat):
+    """Case 4b: the change is read and the suite runs, but it fails. No PASS."""
+    pane = FakePane(name="T1")
+    workspace = FakeWorkspace(pane, folder=chat.project)
+    registry = FakeRegistry((workspace, pane))
+    delegate = DelegateTool(registry, {"T1": (workspace, pane)})
+
+    def apply_broken_edit(*_a, **_k):
+        tests = rig["project"] / "test_calc.py"
+        tests.write_text(
+            tests.read_text(encoding="utf-8")
+            + "\n\ndef test_subtract():\n    from calc import subtract\n\n"
+            "    assert subtract(3, 1) == 2\n",
+            encoding="utf-8",
+        )
+        return _transcript(pane.last_prompt, reply="Done. PASS, tests pass.")
+
+    mine = {"workspace_id": workspace.id}
+    rig = chat(
+        [
+            Wave(
+                calls=(Call(delegate.name, {"terminal_id": "T1", "prompt": "Add subtract()."}),),
+                reply="Sent to T1.",
+            ),
+            Wave(
+                calls=(
+                    Call("workspace-git", {"op": "state", **mine}),
+                    Call("workspace-test", dict(mine)),
+                ),
+                reply="PASS - subtract() is implemented and all tests pass.",
+            ),
+        ],
+        tools={delegate.name: delegate, **_checkout_tools(workspace)},
+    )
+
+    rig["reader"]["fn"] = apply_broken_edit
+    events = await _run(rig, CONTINUE_REQUEST)
+
+    chief: ScriptedChief = rig["chief"]
+    suite = next(e for e in chief.executed if e.tool == "workspace-test")
+    # The run itself worked and said "failed": that is the evidence.
+    assert suite.result.success and suite.result.output["passed"] is False, suite.result
+    assert suite.result.output["exit_code"] != 0
+    assert "PASS" not in _said(events).upper(), _said(events)
+    assert "PASS" not in _streamed(events).upper(), _streamed(events)
 
 
 # ------------------------------------------------------ 5. refusals and stops
@@ -597,8 +682,10 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
                 ),
                 reply="Sent to T1 with model=sonnet.",
             ),
+            # Read hands only on the General: the file itself is the evidence
+            # that nothing changed, not a ``git status`` shell call.
             Wave(
-                calls=(Call("RunCommand", {"command": "git status --porcelain"}),),
+                calls=(Call("Read", {"file_path": "calc.py"}),),
                 reply="T1 stopped at a permission prompt and nothing changed. UNVERIFIED.",
             ),
         ],
@@ -609,9 +696,11 @@ async def test_a_pane_whose_model_is_unknown_is_not_a_completed_task(chat):
     events = await _run(rig, CONTINUE_REQUEST)
 
     chief: ScriptedChief = rig["chief"]
-    # The checkout is genuinely untouched: the status read came back empty.
-    status = [e for e in chief.executed if e.tool == "RunCommand"][-1]
-    assert "calc.py" not in str(status.result.output), status.result.output
+    # The checkout is genuinely untouched: the file still holds only add().
+    look = [e for e in chief.executed if e.tool == "Read"][-1]
+    assert look.result.success, look.result
+    assert "def add" in str(look.result.output), look.result.output
+    assert "subtract" not in str(look.result.output), look.result.output
     assert "PASS" not in _said(events).upper()
     assert len(delegate.briefs) == 1
 
@@ -776,16 +865,17 @@ async def test_a_rejected_claim_is_corrected_and_then_accepted(chat):
             ),
             # The claim nobody earned: no diff read, no test run.
             Wave(reply="PASS - subtract() is implemented and all tests pass."),
-            # The correction wave does the work the gate asked for.
+            # The correction wave does the work the gate asked for, with the
+            # General's own read hands: no shell is on offer.
             Wave(
                 calls=(
-                    Call("RunCommand", {"command": "git diff"}),
-                    Call("RunCommand", {"command": f'"{PYTHON}" -m pytest test_calc.py -q'}),
+                    Call("workspace-git", {"op": "state", "workspace_id": workspace.id}),
+                    Call("workspace-test", {"workspace_id": workspace.id}),
                 ),
-                reply="Verified: the diff adds subtract() and both tests pass. PASS.",
+                reply="Verified: the change adds subtract() and both tests pass. PASS.",
             ),
         ],
-        tools={delegate.name: delegate},
+        tools={delegate.name: delegate, **_checkout_tools(workspace)},
     )
 
     rig["reader"]["fn"] = apply_edit
@@ -802,7 +892,7 @@ async def test_a_rejected_claim_is_corrected_and_then_accepted(chat):
     # prompt travels as the turn's BRIEFING, not as the person's words
     # (``is_continuation_prompt``), so that is where it is read back.
     chief: ScriptedChief = rig["chief"]
-    briefings = [e.system_extra for e in chief.executed if e.tool == "RunCommand"]
+    briefings = [e.system_extra for e in chief.executed if e.tool in VERIFY_TOOLS]
     assert briefings, chief.executed
     assert "Missing evidence" in briefings[0], briefings[0]
     assert "test_missing" in briefings[0], briefings[0]
@@ -810,8 +900,10 @@ async def test_a_rejected_claim_is_corrected_and_then_accepted(chat):
 
     # The agent was not re-ordered; the chief got the evidence itself.
     assert len(delegate.briefs) == 1
-    checks = [e for e in chief.executed if e.tool == "RunCommand"]
-    assert len(checks) == 2 and all(e.result.success for e in checks)
+    checks = [e for e in chief.executed if e.tool in VERIFY_TOOLS]
+    assert [e.tool for e in checks] == list(VERIFY_TOOLS), checks
+    assert all(e.result.success for e in checks), [e.result for e in checks]
+    assert checks[1].result.output["passed"] is True, checks[1].result.output
 
     answer = _said(events)
     assert "PASS" in answer.upper(), answer

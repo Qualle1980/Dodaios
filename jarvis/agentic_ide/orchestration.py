@@ -1625,7 +1625,7 @@ class WorkspaceOrchestrator:
         to_created = action == "send" and str(args.get("terminal_id") or "") in created
         if (args.get("_requires_new") or creation) and not to_created and action not in {
             "inspect", "create", "open_workspace", "context", "observe", "status", "watch",
-            "git",
+            "git", "test",
         }:
             # A NEW request cannot borrow an idle pane for its new task, but it
             # may also carry independent work for an agent the user NAMED
@@ -1668,6 +1668,10 @@ class WorkspaceOrchestrator:
             from . import workspace_git
 
             return await workspace_git.run(self, args)
+        if action == "test":
+            from . import workspace_tests
+
+            return await workspace_tests.run(self, args)
         if action in {"status", "watch"}:
             from . import task_state
 

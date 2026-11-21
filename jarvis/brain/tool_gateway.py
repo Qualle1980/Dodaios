@@ -293,12 +293,16 @@ class BrainSupervisorToolGateway:
             name: tool for name, tool in tools.items() if not name.startswith("agentic-ide-")
         }
         kept[self._workspace_tool.name] = self._workspace_tool
-        # The same addressed service also answers for a workspace's repository.
+        # The same addressed service also answers for a workspace's repository
+        # and runs its configured tests: the read hands a General without a
+        # shell verifies delegated work with.
         workspaces = getattr(self._workspace_tool, "gateway", None)
         if workspaces is not None:
             from jarvis.brain.workspace_git_tool import WorkspaceGitTool
+            from jarvis.brain.workspace_test_tool import WorkspaceTestTool
 
             kept[WorkspaceGitTool.name] = WorkspaceGitTool(workspaces)
+            kept[WorkspaceTestTool.name] = WorkspaceTestTool(workspaces)
         return kept
 
     def voice_catalog(self) -> tuple[SupervisorToolDescriptor, ...]:

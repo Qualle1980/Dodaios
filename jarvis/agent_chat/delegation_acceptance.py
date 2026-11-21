@@ -18,7 +18,8 @@ for evidence **bound to that job**, not for two true booleans:
   something;
 * a **test run** — a real runner as the command's own program, not a word
   inside it, without ``--collect-only`` and friends, inside that checkout, and
-  reporting a pass;
+  reporting a pass -- or ``workspace-test`` naming that job's workspace, whose
+  structured result says ``passed`` on the commit the job finished on;
 * both **after** the job was handed back, so a suite that ran before the
   change cannot certify it;
 * and, where the command names a revision, that revision must be the one the
@@ -165,6 +166,10 @@ class Receipt:
     #: Where the call ran. For the folder tools this is the chat's own folder.
     cwd: str = ""
     at: float = field(default_factory=time.time)
+    #: The tool's structured result, when it returned one. ``workspace-test``
+    #: is judged on this (``passed``, ``workspace_id``, ``commit``), never on
+    #: words in its output.
+    data: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -196,6 +201,7 @@ class EvidenceLedger:
                     success=bool(success),
                     output=str(output or ""),
                     cwd=str(cwd or ""),
+                    data=dict(output) if isinstance(output, Mapping) else {},
                 )
             )
         except Exception:  # noqa: BLE001 - a lost receipt has to fail closed
@@ -261,6 +267,8 @@ _GIT_READS = ("diff", "show")
 #: ``workspace-git`` operations that report a workspace's own changes.
 _GIT_TOOL_READS = frozenset({"state"})
 _GIT_TOOL = "workspace-git"
+#: Runs the user's configured suite in a named workspace; no command of its own.
+_TEST_TOOL = "workspace-test"
 
 _RUNNERS = frozenset(
     {
@@ -376,7 +384,13 @@ def runs_tests(tool_name: str, args: Any) -> bool:
 
     The program has to BE a runner, not merely be mentioned: ``echo pytest``
     prints a word and exits 0, and it used to satisfy this.
+
+    ``workspace-test`` always runs a suite: the command is the user's
+    configured one, so there is nothing in its arguments to judge. Whether it
+    PASSED is read from its structured result in :func:`_test_passed`.
     """
+    if str(tool_name or "") == _TEST_TOOL:
+        return True
     tokens = _tokens(_command_of(args))
     if not tokens:
         return False
@@ -406,6 +420,19 @@ def _said_something(output: str) -> bool:
 def reports_a_pass(output: str) -> bool:
     """Whether a test run's own output says a suite passed."""
     return bool(_PASSED_RE.search(str(output or "")))
+
+
+def _test_passed(receipt: Receipt) -> bool:
+    """Whether a test-run receipt says the suite passed.
+
+    ``workspace-test`` returns a verdict computed from the exit code, so that
+    verdict is the evidence; its summary text may say "3 passed" beside a
+    failure. A shell run only has its output, so its output has to say it.
+    """
+    if receipt.tool == _TEST_TOOL:
+        data = receipt.data
+        return data.get("status") == "ok" and data.get("passed") is True
+    return reports_a_pass(receipt.output)
 
 
 def _inside(path: str, root: str) -> bool:
@@ -478,12 +505,24 @@ class DelegatedJob:
             # An omitted workspace means "the visible one", which is not
             # provably this job's -- which is the whole point of the check.
             return bool(named) and named == self.workspace_id
+        if receipt.tool == _TEST_TOOL:
+            named = str(receipt.args.get("workspace_id") or "")
+            # Named by the model AND resolved by the orchestrator to the same
+            # workspace: a selector that matched elsewhere proves nothing here.
+            ran_in = str(receipt.data.get("workspace_id") or "")
+            return bool(named) and named == self.workspace_id and ran_in == named
         return _inside(_git_workspace(receipt.args, receipt.cwd), self.root)
 
     def right_revision(self, receipt: Receipt) -> bool:
         """A command naming a revision must name the one this job ended on."""
         if not self.head_sha:
             return True
+        if receipt.tool == _TEST_TOOL:
+            # A suite run has to say which commit it ran on, and it must be
+            # the one the job finished on; an unnamed one cannot be bound.
+            ran_on = str(receipt.data.get("commit") or "").casefold()
+            head = self.head_sha.casefold()
+            return len(ran_on) >= 7 and (head.startswith(ran_on) or ran_on.startswith(head))
         named = _git_revision_tokens(_command_of(receipt.args))
         return all(self.head_sha.casefold().startswith(token) for token in named)
 
@@ -506,7 +545,7 @@ class DelegatedJob:
                 continue
             if is_change and (receipt.tool == _GIT_TOOL or _said_something(receipt.output)):
                 change = True
-            if is_test and reports_a_pass(receipt.output):
+            if is_test and _test_passed(receipt):
                 test = True
         gaps: list[str] = []
         if not change:

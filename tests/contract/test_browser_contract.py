@@ -438,9 +438,17 @@ async def test_browser_denial_stops_only_its_planner_before_releasing_reply(
 
 
 async def test_jarvis_chat_uses_the_lead_browser_with_its_selected_model(tmp_path, monkeypatch):
+    """The lead browser runs on the chat's selected model without rewriting the roster.
+
+    The General (``jarvis`` surface) no longer offers ``society_browser`` in its
+    kit: its hands are read, search, memory and handoff only. The browser
+    binding itself is still the lead's, so it is exercised directly through
+    ``lead_browser_tools`` and the kit is asserted NOT to hand it out.
+    """
     from jarvis.agent_chat.surface_kits import kit_for
     from jarvis.agent_chat.tool_catalog import build_catalog, resolve_choices
     from jarvis.core.protocols import ToolResult
+    from jarvis.society.browser.tool import lead_browser_tools
     from jarvis.society.runtime import SocietyRuntime
 
     runtime = SocietyRuntime(tmp_path, seed_starter_team=False)
@@ -460,8 +468,10 @@ async def test_jarvis_chat_uses_the_lead_browser_with_its_selected_model(tmp_pat
             cwd=str(tmp_path / "chat"),
             permission_mode="ask",
         )
-        tools = kit_for("jarvis").session_tools(None, None, session)
-        assert "Read" in tools
+        general = kit_for("jarvis").session_tools(None, None, session)
+        assert "Read" in general
+        assert "society_browser" not in general
+        tools = lead_browser_tools(session)
         choice = resolve_choices(["tool:society_browser"], build_catalog(tools))[0]
         assert choice.tool_names == ("society_browser",)
         result = await tools["society_browser"].execute(

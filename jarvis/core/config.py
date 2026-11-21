@@ -4661,6 +4661,46 @@ class AgenticIdeConfig(BaseModel):
         ),
     )
 
+    test_commands: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "The test suite ``workspace-test`` runs in a coding workspace, as an argv list "
+            "(never a shell string). Keyed by project id or project name; '*' applies to "
+            "every project without its own entry. Empty: ``workspace-test`` runs nothing "
+            "and says so. The model never supplies this command. Read by "
+            "``jarvis.agentic_ide.workspace_tests``."
+        ),
+    )
+
+    @field_validator("test_commands", mode="before")
+    @classmethod
+    def _usable_test_commands(cls, value: object) -> dict[str, list[str]]:
+        """Keep only well-formed argv lists; a bad entry must not block the boot.
+
+        A string is dropped rather than split: splitting it would be a shell
+        grammar of our own, and a Windows path's backslashes do not survive one.
+        """
+        if not isinstance(value, dict):
+            if value not in (None, ""):
+                logging.getLogger(__name__).warning(
+                    "agentic_ide.test_commands is not a table; ignoring it"
+                )
+            return {}
+        kept: dict[str, list[str]] = {}
+        for key, argv in value.items():
+            if (
+                isinstance(argv, list)
+                and argv
+                and all(isinstance(part, str) and part for part in argv)
+            ):
+                kept[str(key)] = list(argv)
+            else:
+                logging.getLogger(__name__).warning(
+                    "agentic_ide.test_commands[%r] is not a non-empty list of strings; "
+                    "ignoring it", key,
+                )
+        return kept
+
     @field_validator("prompt_writer", mode="before")
     @classmethod
     def _usable_writer(cls, value: object) -> str:

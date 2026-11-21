@@ -159,13 +159,27 @@ def build_override(
     reasoning_effort: ReasoningEffort | None = (
         effort if effort in _EFFORTS else None  # type: ignore[assignment]
     )
+    if kit_tools is not None:
+        tools_extra = dict(kit_tools)
+    elif kit.session_tools is not None:
+        # Prefer the surface builder so a jarvis turn never falls back to the
+        # full mutating folder set when the caller omitted kit_tools.
+        try:
+            tools_extra = dict(kit.session_tools(getattr(brain, "_config", None), brain, session))
+        except Exception:  # noqa: BLE001 — empty hands beat the mutating fallback
+            log.warning(
+                "surface %s: kit tools fallback failed; offering no kit hands",
+                session.surface,
+                exc_info=True,
+            )
+            tools_extra = {}
+    else:
+        tools_extra = folder_tools(cwd, stance=stance)
     return TurnOverride(
         provider=provider,
         model=model,
         reasoning_effort=reasoning_effort,
-        tools_extra=(
-            dict(kit_tools) if kit_tools is not None else folder_tools(cwd, stance=stance)
-        ),
+        tools_extra=tools_extra,
         tool_filter=_compose_filters(
             kit.tool_filter,
             kit.session_tool_filter(session) if kit.session_tool_filter is not None else None,
@@ -218,27 +232,14 @@ async def kit_payload(session: AgentChatSession, brain: Any) -> tuple[dict[str, 
     cfg = getattr(brain, "_config", None)
     tools: dict[str, Tool] | None = None
     extra = ""
-    coding_tool: Tool | None = None
-    if session.surface == "jarvis":
-        from jarvis.society.surface import coding_tool_for_session
-
-        try:
-            coding_tool = await coding_tool_for_session(session.session_id)
-            if coding_tool is not None:
-                tools = folder_tools(Path(session.cwd), stance=session.permission_mode or "ask")
-                tools[coding_tool.name] = coding_tool
-        except Exception:
-            log.warning("Dodaios chat: coding-session capability unavailable", exc_info=True)
+    # The General (jarvis) hands coding work to panes via workspace-orchestrate;
+    # coding-session stays out of its offered schema (S2 / chain readiness).
     if kit.session_tools is not None:
         try:
             tools = kit.session_tools(cfg, brain, session)
         except Exception as exc:  # noqa: BLE001 - the turn runs without the kit's hands
             log.warning("surface %s: kit tools not built: %s", session.surface, exc, exc_info=True)
             tools = {}
-        if coding_tool is not None:
-            # The kit's own hands replace the folder set; the granted
-            # coding-session control must survive that replacement.
-            tools = {**(tools or {}), coding_tool.name: coding_tool}
     elif kit.tools is not None:
         try:
             tools = kit.tools(cfg, brain)
@@ -515,7 +516,26 @@ async def run_brain_turn(
             current = await asyncio.to_thread(live_catalog, brain, cwd=str(cwd), stance=stance)
             choices = resolve_choices([row.id for row in tool_choices], current)
             base = dict(getattr(brain, "_tools", {}) or {})
-            extra = dict(kit_tools) if kit_tools is not None else folder_tools(cwd, stance=stance)
+            if kit_tools is not None:
+                extra = dict(kit_tools)
+            else:
+                # Same surface-aware fallback as build_override: never reintroduce
+                # Write/Edit/RunCommand on a jarvis turn via the catalog path.
+                kit = kit_for(session.surface)
+                if kit.session_tools is not None:
+                    try:
+                        extra = dict(
+                            kit.session_tools(getattr(brain, "_config", None), brain, session)
+                        )
+                    except Exception:  # noqa: BLE001 — empty beats mutating
+                        log.warning(
+                            "surface %s: kit tools for tool_choices failed",
+                            session.surface,
+                            exc_info=True,
+                        )
+                        extra = {}
+                else:
+                    extra = folder_tools(cwd, stance=stance)
             base.update(extra)
             extra.update(selection_tools(choices, base))
             kit_tools = extra

@@ -125,4 +125,35 @@ def test_a_kit_filter_keeps_only_its_own_hands(monkeypatch: pytest.MonkeyPatch) 
     tools = {n: _T(n) for n in ("probe_read", "search_web", "patch", "spawn-worker")}
     assert kit.tool_filter is not None
     assert sorted(kit.tool_filter(tools)) == ["probe_read"]  # type: ignore[arg-type]
-    assert kit_for("jarvis").tool_filter is None
+    # The General's kit filter drops mutating / write / spawn hands; read and
+    # ask tools (including workspace-orchestrate) stay.
+    jarvis_filter = kit_for("jarvis").tool_filter
+    assert jarvis_filter is not None
+    general = {
+        n: _T(n)
+        for n in (
+            "Read",
+            "Write",
+            "Edit",
+            "RunCommand",
+            "run_shell",
+            "run-shell",
+            "computer_use",
+            "run-skill",
+            "parallel",
+            "coding-session",
+            "society_browser",
+            "wiki-ingest",
+            "contact-upsert",
+            "call-contact",
+            "update_profile",
+            "wiki-recall",
+            "workspace-orchestrate",
+        )
+    }
+    assert sorted(jarvis_filter(general)) == [  # type: ignore[arg-type]
+        "Read",
+        "wiki-ingest",
+        "wiki-recall",
+        "workspace-orchestrate",
+    ]
