@@ -540,11 +540,12 @@ async def _taskkill_tree(pid: int) -> None:
             stderr=asyncio.subprocess.DEVNULL,
             creationflags=NO_WINDOW_CREATIONFLAGS,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        log.debug("RunCommand: taskkill could not start for pid %s: %s", pid, exc)
         return
     try:
         await asyncio.wait_for(killer.wait(), timeout=3.0)
-    except (TimeoutError, ProcessLookupError):
+    except (TimeoutError, ProcessLookupError):  # a stuck taskkill is killed; the job close follows
         with _suppress_os():
             killer.kill()
 
@@ -560,19 +561,54 @@ def _unblock_command_pipes(proc: asyncio.subprocess.Process) -> None:
             continue
         try:
             stream.feed_eof()
-        except Exception:
-            # Already closed or not a StreamReader — drain path still ends via cancel.
-            pass
+        except Exception as exc:  # noqa: BLE001 - any failure leaves the bounded drain in charge
+            # Already closed or not a StreamReader; ``_settle`` still ends the drain.
+            log.debug("RunCommand: feeding EOF to a command pipe failed: %s", exc)
+
+
+def _retrieve_outcome(task: asyncio.Future[Any]) -> None:
+    """Done-callback for an abandoned task: read its outcome so asyncio stays quiet.
+
+    The command already has its answer ("timed out"); whatever the abandoned
+    reader ends with is no longer anyone's business, and an unread exception
+    would only surface later as a misleading "never retrieved" warning.
+    """
+    if not task.cancelled():
+        task.exception()
+
+
+async def _settle(task: asyncio.Future[Any], what: str) -> bool:
+    """Let ``task`` end within a fixed budget; never wait on it longer.
+
+    ``await task`` and ``asyncio.wait_for(task)`` both wait for as long as the
+    task takes to honour its cancel — unbounded for a reader stuck on a pipe a
+    descendant still holds. ``asyncio.wait`` returns at its deadline whatever
+    the task does, so the turn gets its result back on time.
+    """
+    done, _ = await asyncio.wait({task}, timeout=_COMMAND_STOP_GRACE_S)
+    if task in done:
+        return True
+    task.cancel()
+    done, _ = await asyncio.wait({task}, timeout=_COMMAND_STOP_GRACE_S)
+    if task in done:
+        return True
+    task.add_done_callback(_retrieve_outcome)
+    log.warning(
+        "RunCommand: %s did not stop %.0f s after the kill; returning without it",
+        what,
+        2 * _COMMAND_STOP_GRACE_S,
+    )
+    return False
 
 
 async def _terminate_command_tree(proc: asyncio.subprocess.Process, tree: Any) -> None:
     """Kill the shell and every descendant, then wait briefly for exit.
 
     On Windows, ``taskkill /T`` runs first while the shell is still the parent
-    of its tree. Git Bash / MSYS children often break away from the Job Object
-    (``CREATE_BREAKAWAY_FROM_JOB``); closing the job then kills only bash and
-    skips ``taskkill`` once ``returncode`` is set — orphans keep the stdout
-    pipe open and ``communicate()`` never completes.
+    of its tree: it reaches a process that started before the shell joined the
+    job. Closing the job then reaps everything else, including orphans whose
+    parent already exited, which ``taskkill /T`` cannot find. That only holds
+    because the job forbids breakaway (``_run_command``).
     """
     pid = proc.pid
     if sys.platform == "win32" and pid:
@@ -582,49 +618,33 @@ async def _terminate_command_tree(proc: asyncio.subprocess.Process, tree: Any) -
     if proc.returncode is None:
         with _suppress_os():
             proc.kill()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=_COMMAND_STOP_GRACE_S)
-    except (TimeoutError, ProcessLookupError):
-        pass
+    await _settle(asyncio.ensure_future(proc.wait()), "the shell")
 
 
 async def _await_command_output(
     proc: asyncio.subprocess.Process,
     tree: Any,
-    timeout: float,
+    budget_s: float,
 ) -> tuple[bytes | None, bool]:
-    """Wait for ``communicate()`` up to ``timeout``; on expiry kill the tree.
+    """Wait for ``communicate()`` up to ``budget_s``; on expiry kill the tree.
 
-    Uses ``asyncio.wait`` (no cancel-on-timeout) so the kill runs even when a
-    stuck pipe read would ignore cancellation, then unblocks and drains the
-    communicate task under a short grace.
+    Every wait after the deadline is bounded (``_settle``): the kill, the
+    reader drain and the cancel path each return on time even when a pipe read
+    never sees EOF and ignores its cancellation.
     """
-    comm = asyncio.create_task(proc.communicate())
+    comm = asyncio.ensure_future(proc.communicate())
     try:
-        done, _pending = await asyncio.wait({comm}, timeout=timeout)
+        done, _pending = await asyncio.wait({comm}, timeout=budget_s)
         if comm not in done:
             await _terminate_command_tree(proc, tree)
             _unblock_command_pipes(proc)
-            try:
-                await asyncio.wait_for(comm, timeout=_COMMAND_STOP_GRACE_S)
-            except (TimeoutError, asyncio.CancelledError):
-                if not comm.done():
-                    comm.cancel()
-                    try:
-                        await comm
-                    except (asyncio.CancelledError, Exception):
-                        pass
+            await _settle(comm, "the output reader")
             return None, True
         return comm.result()[0], False
     except asyncio.CancelledError:
         await _terminate_command_tree(proc, tree)
         _unblock_command_pipes(proc)
-        if not comm.done():
-            comm.cancel()
-            try:
-                await comm
-            except (asyncio.CancelledError, Exception):
-                pass
+        await _settle(comm, "the output reader")
         raise
 
 
@@ -639,7 +659,9 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     env.setdefault("NO_COLOR", "1")
     argv = [*shell_argv(), command]
     started = time.perf_counter()
-    tree = make_process_tree("agent-chat-run")
+    # No breakaway: Git Bash execs every program with CREATE_BREAKAWAY_FROM_JOB
+    # when the job allows it, and an escaped process outlives the timeout.
+    tree = make_process_tree("agent-chat-run", allow_breakaway=False)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -649,6 +671,10 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             creationflags=NO_WINDOW_CREATIONFLAGS,
+            # POSIX containment signals the shell's process GROUP; without a
+            # session of its own the shell shares Jarvis's group, and closing
+            # the tree would signal the server itself.
+            start_new_session=os.name != "nt",
         )
     except (OSError, ValueError) as exc:
         with _suppress_os():
@@ -662,7 +688,8 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     try:
         raw, timed_out = await _await_command_output(proc, tree, timeout)
     finally:
-        # Process already exited on the success path; closing the job is safe.
+        # On success this reaps what the command left running in the
+        # background: the tool contract ends child processes with the command.
         with _suppress_os():
             tree.close()
     if timed_out or raw is None:

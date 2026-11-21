@@ -33,12 +33,19 @@ teardown that runs on the event loop, where an ``await`` grace period would
 stall every other pane. The POSIX escalation therefore runs on a short-lived
 timer thread rather than a sleep.
 
-``allow_breakaway`` is left ON. A process created with
+``allow_breakaway`` is ON by default. A process created with
 ``CREATE_BREAKAWAY_FROM_JOB`` inside a job that forbids breakaway does not
 detach — it FAILS TO START, and a toolchain that does this (some installers,
-some launchers) would turn containment into "the agent will not open". Nothing
-in a normal CLI's tree asks to break away, so permitting it costs nothing real
-and removes a whole class of spawn failures.
+some launchers) would turn containment into "the agent will not open". For a
+long-lived coding pane that trade is right.
+
+A bounded shell command is the opposite case and passes
+``allow_breakaway=False``: Git Bash (MSYS) asks for breakaway whenever it execs
+a program and the job permits it, so ``git``, ``python``, ``sleep`` and ``find``
+started from ``bash -c`` all LEFT the job (measured 2026-11-21 with
+``IsProcessInJob``), and a backgrounded or orphaned one outlived the command's
+timeout every time. With breakaway forbidden the same commands start normally
+and stay inside, so closing the job reaps them.
 """
 from __future__ import annotations
 
@@ -159,7 +166,7 @@ class _WindowsJob:
     def supports_containment(self) -> bool:
         return not self._closed
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, allow_breakaway: bool = True) -> None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -189,9 +196,10 @@ class _WindowsJob:
         self._name = name
         try:
             info = _JobObjectExtendedLimitInformation()
-            info.BasicLimitInformation.LimitFlags = (
-                _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
-            )
+            flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if allow_breakaway:
+                flags |= _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            info.BasicLimitInformation.LimitFlags = flags
             if not kernel32.SetInformationJobObject(
                 handle,
                 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -352,7 +360,7 @@ class _PosixProcessGroup:
                 )
 
 
-def make_process_tree(name: str) -> ProcessTree:
+def make_process_tree(name: str, *, allow_breakaway: bool = True) -> ProcessTree:
     """A kill-on-close container for one spawned process tree.
 
     Never raises. A host where containment cannot be set up gets the honest
@@ -360,11 +368,12 @@ def make_process_tree(name: str) -> ProcessTree:
     than one that refuses to open.
 
     ``name`` appears in the log lines only; it is never a Windows object name
-    (see :class:`_WindowsJob`).
+    (see :class:`_WindowsJob`). ``allow_breakaway`` matters on Windows only (see
+    the module docstring); a POSIX process group has no breakaway to forbid.
     """
     if sys.platform == "win32":
         try:
-            return _WindowsJob(name)
+            return _WindowsJob(name, allow_breakaway=allow_breakaway)
         except Exception as exc:  # noqa: BLE001 - containment is a safeguard
             logger.warning(
                 "Could not create a job object for {} — its descendants will not be reaped: {}",
