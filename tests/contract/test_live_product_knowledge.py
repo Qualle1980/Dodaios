@@ -26,15 +26,20 @@ def test_both_live_models_carry_the_product_brief():
     assert PRODUCT_BRIEF in wire["instructions"]
     assert PRODUCT_BRIEF in wire["delegation"]["responses"]["instructions"]
     assert "Agentic IDE" in PRODUCT_BRIEF and "product_help" in PRODUCT_BRIEF
+    assert "runtime_location" in PRODUCT_BRIEF
     # Small enough to ride along in every call without a real cost.
-    assert len(PRODUCT_BRIEF) < 2600
+    assert len(PRODUCT_BRIEF) < 2800
 
 
 def test_voice_catalog_offers_product_help_but_workers_do_not_get_it():
     manager = SimpleNamespace(_tools={}, _config=SimpleNamespace(computer_use=None))
     gateway = BrainSupervisorToolGateway(manager)
-    assert "product_help" in {d.name for d in gateway.voice_catalog()}
-    assert "product_help" not in {d.name for d in gateway.catalog()}
+    names = {d.name for d in gateway.voice_catalog()}
+    assert "product_help" in names
+    assert "runtime_location" in names
+    worker_names = {d.name for d in gateway.catalog()}
+    assert "product_help" not in worker_names
+    assert "runtime_location" not in worker_names
 
 
 async def test_spoken_question_finds_the_matching_guide():

@@ -231,12 +231,20 @@ CURATED_MODELS: dict[str, list[ModelInfo]] = {
             ("gpt-5.4-nano", "GPT-5.4 Nano"),
         ]
     ),
+    # Checked against the live AI Studio catalog on 2026-11-06. Two ids that
+    # used to sit here answer nothing: ``gemini-3.7-flash`` and
+    # ``gemini-3.5-flash`` are not in Google's model list at all - only the
+    # Flash-Lite build of 3.5 exists. ``gemini-2.5-flash`` is deprecated and
+    # routes to ``gemini-3.5-flash-lite`` from 2026-12-01, so it stays listed
+    # but last. The Lite tier leads the Flash tier on request allowance, not
+    # on capability: a free AI Studio project gets ~500 requests/day on
+    # Flash-Lite against ~20 on Flash, which decides whether a chat install
+    # survives a day at all.
     "gemini": _curated(
         [
             ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-            ("gemini-3.7-flash", "Gemini 3.7 Flash"),
             ("gemini-3.6-flash", "Gemini 3.6 Flash"),
-            ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+            ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
             ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
             ("gemini-3-flash-preview", "Gemini 3 Flash"),
             ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
@@ -600,15 +608,26 @@ REALTIME_MODELS: dict[str, list[ModelInfo]] = {
             ("gpt-realtime-mini", "GPT Realtime Mini"),
         ]
     ),
-    # gemini-live — verified 2026-07-10 against ai.google.dev/gemini-api/docs/models
-    # (the Live API model list). ``gemini-3.1-flash-live-preview`` is the current
-    # flagship (matches ``_MODEL`` in ``jarvis/plugins/realtime/gemini_live.py``);
-    # ``gemini-2.5-flash-native-audio-preview-12-2025`` is the current 2.5-series
-    # native-audio sibling still listed on that page. The older
-    # ``gemini-2.0-flash-live-preview`` family is marked for shutdown — omitted.
+    # gemini-live — re-verified 2026-11-06 against the account's own Live model
+    # list (``?key=…`` filtered on ``bidiGenerateContent``), which is the only
+    # authoritative answer: nine Live models, two of them newer than everything
+    # that used to be listed here.
+    #
+    # ``gemini-3.8-live`` leads, and the reason is function calling, not size.
+    # Google's Live tool documentation says ``gemini-3.1-flash-live-preview``
+    # supports SYNCHRONOUS function calling only — "execution pauses until you
+    # send the tool response" — so every tool a live conversation touches stops
+    # the conversation. 3.8 Live supports ``behavior: NON_BLOCKING``, which is
+    # what a spoken turn needs to stay a conversation while a tool runs. Both
+    # also carry Google Search natively.
+    #
+    # The 3.1 preview stays selectable: it is a real model and someone may
+    # prefer it. It is simply not what an install should default to.
     "gemini-live": _curated(
         [
-            ("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (default)"),
+            ("gemini-3.8-live", "Gemini 3.8 Live (default)"),
+            ("gemini-3.8-live-extended-thinking", "Gemini 3.8 Live Extended Thinking"),
+            ("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live (tools block)"),
             (
                 "gemini-2.5-flash-native-audio-latest",
                 "Gemini 2.5 Flash Native Audio (latest alias)",

@@ -259,3 +259,87 @@ def test_register_from_config_without_section_keeps_registration(
 ) -> None:
     ext.register_from_config(SimpleNamespace())
     assert ext.registered() == (external,)
+
+
+
+def _write_governed_note(path: Path, *, status: str, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nstatus: {status}\n---\n\n# {path.stem}\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_agent_learning_filter_is_switchable_and_scopes_the_index_exclusion(
+    vault_root: Path, tmp_path: Path
+) -> None:
+    """The gate drops unverified notes AND generated index pages.
+
+    The index exclusion is a filename rule, so it stays inside the gated
+    branch: with the gate off an ``index-*.md`` page is ordinary content and
+    recall must still find it, because a legacy CONTENT note can carry that
+    name.
+    """
+    vault_root = tmp_path / "canonical"
+    vault_root.mkdir()
+    source_root = tmp_path / "Agent-Learnings"
+    _write_governed_note(
+        source_root / "verified.md",
+        status="verified",
+        body="DReaderNeedle verified evidence.",
+    )
+    _write_governed_note(
+        source_root / "proposed.md",
+        status="proposed",
+        body="DReaderNeedle proposed claim.",
+    )
+    _write_governed_note(
+        source_root / "Index-generated.md",
+        status="verified",
+        body="DReaderNeedle generated index.",
+    )
+    source = ExternalSource(name="ak-agent-learnings", path=source_root)
+
+    unfiltered = _search(vault_root, tmp_path, sources=(source,)).search(
+        "DReaderNeedle", k=10
+    )
+    assert {hit.path.name for hit in unfiltered} == {
+        "verified.md",
+        "proposed.md",
+        "Index-generated.md",
+    }
+
+    conn = sqlite3.connect(":memory:")
+    fts_index.rebuild_index(vault_root, conn)
+    filtered = VaultSearch(
+        vault_root,
+        conn=conn,
+        external_sources=(source,),
+        verified_only=True,
+    ).search("DReaderNeedle", k=10)
+    assert [hit.path.name for hit in filtered] == ["verified.md"]
+
+
+def test_verified_filter_does_not_hide_other_external_sources(
+    vault_root: Path, tmp_path: Path
+) -> None:
+    vault_root = tmp_path / "canonical"
+    vault_root.mkdir()
+    source_root = tmp_path / "Reference-Notes"
+    _write_governed_note(
+        source_root / "proposed.md",
+        status="proposed",
+        body="OtherSourceNeedle remains visible.",
+    )
+    source = ExternalSource(name="reference-notes", path=source_root)
+    conn = sqlite3.connect(":memory:")
+    fts_index.rebuild_index(vault_root, conn)
+
+    hits = VaultSearch(
+        vault_root,
+        conn=conn,
+        external_sources=(source,),
+        verified_only=True,
+    ).search("OtherSourceNeedle", k=10)
+
+    assert [hit.path.name for hit in hits] == ["proposed.md"]

@@ -99,6 +99,9 @@ DEFAULT_RECHECK_INTERVAL_S = 300.0
 #: are allowed to spend the character budget. A strict subset of
 #: ``jarvis.memory.wiki.profile.PROFILE_SECTIONS`` (guarded by a parity test):
 #: "Decisions" and "Sources" are episodic bookkeeping, not who someone is.
+#: "Relationships" is excluded on purpose: the standing block rides every
+#: live turn to a cloud provider, and third-party personal facts must not
+#: (live 2026-11-14). Those notes stay in the vault for deliberate recall.
 PROFILE_SECTION_PRIORITY: tuple[str, ...] = (
     "Summary",
     "Identity",
@@ -106,7 +109,6 @@ PROFILE_SECTION_PRIORITY: tuple[str, ...] = (
     "Work style",
     "Values",
     "Active projects",
-    "Relationships",
 )
 
 #: Entries per group. One verbose section must not be able to eat the card.
@@ -129,6 +131,54 @@ _HEADING_RE = re.compile(r"\A\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*\Z")
 _EMPHASIS_RE = re.compile(r"[*_`~]{1,3}")
 _WS_RE = re.compile(r"\s+")
 _KEY_NOISE_RE = re.compile(r"[^\w]+", re.UNICODE)
+#: "Birthday: 1 January" / "favourite dish: pasta" — field-level dedupe key.
+_FIELD_LABEL_RE = re.compile(
+    r"\A(name|birthday|birth\s*date|date\s*of\s*birth|favourite\s*dish|"
+    r"favorite\s*dish|github|language|languages|speaks|reply\s*language|"
+    r"primary\s*language|answers?\s*in|project|goal)\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+_GENERIC_NAMES = frozenset({"user", "the user", "me", "owner"})
+#: Lines that set how the assistant should speak / which language the user uses.
+#:
+#: A bare language name is NOT one of them. The first version also matched
+#: `german|english|...` anywhere, so "writes every commit in English"
+#: or "translate legacy German in files you touch" became THE language line: it
+#: took the provenance suffix, and every later line -- the real one included --
+#: was then dropped as a duplicate. That is the contradictory-language-key bug
+#: this collector exists to prevent. A language counts only when a cue says the
+#: line is about which language is spoken or answered in.
+_LANGUAGE_LINE_RE = re.compile(
+    r"(?:"
+    r"\b(?:primary|main|default|reply|output|answer|spoken)?\s*languages?\b"
+    r"|\bspeaks?\b"
+    r"|\banswers?\s+in\b"
+    r"|\breply(?:\s+in)?\b"
+    r"|\b(?:haupt)?sprache\b"  # i18n-allow: German cue matched in user text
+    r"|\bspricht\b"
+    r"|\bantwortet\s+(?:auf|in)\b"
+    r")",
+    re.IGNORECASE,
+)
+#: Reply/output pins beat "primary language" / "speaks …" lists when both exist.
+_LANGUAGE_REPLY_PIN_RE = re.compile(
+    r"\b(?:reply|output|answer)\s*languages?\b|\banswers?\s+in\b|\breply\s+in\b",
+    re.IGNORECASE,
+)
+#: Conservative third-party markers for vault sentences (not the user).
+_THIRD_PARTY_RE = re.compile(
+    r"(?:"
+    r"\b(?:partner|spouse|wife|husband|girlfriend|boyfriend|mother|father|"
+    r"brother|sister|sibling|friend|colleague|coworker|child|son|daughter|"
+    r"relationship)\b"
+    r"|\b(?:he|she)\s+(?:is|has|was|prefers|likes|lives)\b"
+    r")",
+    re.IGNORECASE,
+)
+_QUESTION_NAME_RE = re.compile(
+    r"[?¿؟]|^\s*(?:what|who|wie|was|wer|wo|wann|warum|which|where|when|why)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,16 +237,99 @@ def _key(text: str) -> str:
     return _KEY_NOISE_RE.sub("", text.casefold())
 
 
+#: Synonyms collapse to one field key so "Birthday" / "Date of birth" / "Birth
+#: date" cannot each take a card slot with the same fact.
+_FIELD_ALIASES: dict[str, str] = {
+    "birthday": "birthday",
+    "birthdate": "birthday",
+    "dateofbirth": "birthday",
+    "favouritedish": "favourite_dish",
+    "favoritedish": "favourite_dish",
+    "language": "language",
+    "languages": "language",
+    "speaks": "language",
+    "replylanguage": "language",
+    "primarylanguage": "language",
+    "answersin": "language",
+    "github": "github",
+    "name": "name",
+    "project": "project",
+    "goal": "goal",
+}
+
+
+def _field_key(text: str) -> str | None:
+    """Canonical field name for ``Key: value`` lines, else None."""
+    match = _FIELD_LABEL_RE.match(text)
+    if match is None:
+        return None
+    raw = _key(match.group(1))
+    return _FIELD_ALIASES.get(raw, raw)
+
+
+def _is_language_line(text: str) -> bool:
+    return bool(_LANGUAGE_LINE_RE.search(text))
+
+
+def _is_junk_name(text: str) -> bool:
+    """Reject placeholder / interrogative names that pollute the Name group."""
+    folded = text.casefold().strip()
+    if folded in _GENERIC_NAMES:
+        return True
+    if _QUESTION_NAME_RE.search(text):
+        return True
+    if len(folded) > 40:
+        return True
+    return False
+
+
+def _is_third_party_line(text: str) -> bool:
+    """Conservative: personal facts that read as about someone else."""
+    return bool(_THIRD_PARTY_RE.search(text))
+
+
 class _Collector:
     """Ordered, deduplicated groups of card entries."""
 
     def __init__(self) -> None:
         self._groups: dict[str, list[str]] = {}
         self._keys: list[str] = []
+        self._field_keys: set[str] = set()
+        self._language_kept: bool = False
+        self._language_is_reply_pin: bool = False
+        self._language_source: str = ""
+        self._language_label: str = ""
+        self._language_text: str = ""
 
     def add(self, label: str, value: object) -> None:
         text = _clean(value)
         if not text:
+            return
+        name_field = _FIELD_LABEL_RE.match(text)
+        name_value = text
+        if name_field and _key(name_field.group(1)) == "name":
+            name_value = text[name_field.end() :].strip()
+        if label == "Name" and _is_junk_name(text):
+            return
+        if name_field and _key(name_field.group(1)) == "name" and _is_junk_name(name_value):
+            return
+        if _is_third_party_line(text):
+            return
+        if _is_language_line(text):
+            is_pin = bool(_LANGUAGE_REPLY_PIN_RE.search(text))
+            if self._language_kept and not (is_pin and not self._language_is_reply_pin):
+                return
+            if self._language_kept and is_pin and not self._language_is_reply_pin:
+                self._drop_language_line()
+            annotated = f"{text} (from {label})"
+            self._language_kept = True
+            self._language_is_reply_pin = is_pin
+            self._language_source = label
+            self._language_label = label
+            self._language_text = annotated
+            text = annotated
+        field = _field_key(text)
+        if field and field in self._field_keys:
             return
         key = _key(text)
         if not key or self._is_duplicate(key):
@@ -205,7 +338,24 @@ class _Collector:
         if len(bucket) >= _MAX_ENTRIES_PER_GROUP:
             return
         self._keys.append(key)
+        if field:
+            self._field_keys.add(field)
         bucket.append(text)
+
+    def _drop_language_line(self) -> None:
+        """Remove a weaker language line so a reply pin can replace it."""
+        if not self._language_text:
+            return
+        label = self._language_label
+        old = self._language_text
+        bucket = self._groups.get(label)
+        if bucket and old in bucket:
+            bucket.remove(old)
+        old_key = _key(old)
+        self._keys = [k for k in self._keys if k != old_key]
+        field = _field_key(old)
+        if field:
+            self._field_keys.discard(field)
 
     def _is_duplicate(self, key: str) -> bool:
         for seen in self._keys:
@@ -220,6 +370,15 @@ class _Collector:
 
     def groups(self) -> list[tuple[str, list[str]]]:
         return [(label, list(entries)) for label, entries in self._groups.items() if entries]
+
+    @property
+    def language_source(self) -> str:
+        return self._language_source
+
+    def mark_language_resolved(self, source: str) -> None:
+        """A prior source already fixed the language line (e.g. memory-vault)."""
+        self._language_kept = True
+        self._language_source = source
 
 
 # ---------------------------------------------------------------------------
@@ -321,19 +480,48 @@ def distill_identity_card(
     *,
     profile_markdown: str = "",
     core_memory: Mapping[str, Any] | None = None,
+    vault_sections: Sequence[tuple[str, Sequence[str]]] = (),
     max_chars: int = MAX_IDENTITY_CARD_CHARS,
 ) -> str:
     """Deterministically distill the sources into a card of ``<= max_chars``.
 
     Pure function: same input, same output, no IO, no model call. Returns ""
     when the sources carry nothing — the caller then emits no block at all.
+
+    ``vault_sections`` is what the personal memory vault selected (ADR-0044),
+    as ``(section, sentences)``. It goes FIRST and shares the SAME budget as
+    the notes, so the standing block does not grow by a single character: a
+    vault memory carries its own provenance and can be superseded, pinned and
+    forgotten, while a line distilled out of a note can do none of that. As
+    the vault fills, the notes fade out of the card on their own.
     """
+    lines: list[str] = []
+    used = 0
+    language_kept = False
+
+    for _section, sentences in vault_sections:
+        for sentence in sentences:
+            text = " ".join(str(sentence).split())
+            if not text or _is_third_party_line(text):
+                continue
+            if _is_language_line(text):
+                if language_kept:
+                    continue
+                text = f"{text} (from memory-vault)"
+                language_kept = True
+            line = f"- {text}"
+            projected = used + (1 if lines else 0) + len(line)
+            if projected > max_chars:
+                break
+            used = projected
+            lines.append(line)
+
     collector = _Collector()
+    if language_kept:
+        collector.mark_language_resolved("memory-vault")
     _collect_profile(collector, profile_markdown or "")
     _collect_core_memory(collector, core_memory)
 
-    lines: list[str] = []
-    used = 0
     for label, entries in collector.groups():
         prefix = f"- {label}: "
         line = ""
@@ -417,7 +605,6 @@ def _vault_profile_path(config: Any) -> Path | None:
 _NAME_FACT_RE = re.compile(r"^\s*[-*]\s*name\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _ALIASES_RE = re.compile(r"^aliases\s*:\s*\[([^\]]*)\]", re.IGNORECASE | re.MULTILINE)
 _TITLE_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
-_GENERIC_NAMES = frozenset({"user", "the user", "me", "owner"})
 
 
 def _plausible_name(raw: str) -> str | None:
@@ -477,6 +664,29 @@ def _core_memory_path(config: Any) -> Path | None:
         return None
 
 
+def collect_vault_sections(
+    config: Any = None, *, max_chars: int = MAX_IDENTITY_CARD_CHARS
+) -> list[tuple[str, list[str]]]:
+    """What the personal memory vault wants in the standing block (ADR-0044).
+
+    ``[]`` when the vault is switched off, empty or unavailable. Never raises:
+    an ambient block must not be the reason a turn fails.
+    """
+    try:
+        from jarvis.memory.vault import runtime  # noqa: PLC0415 - off the boot path (AP-26)
+
+        vault = runtime.active(config)
+        if vault is None:
+            return []
+        return [
+            (section, [m.text for m in memories])
+            for section, memories in vault.profile_selection(max_chars=max_chars)
+        ]
+    except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
+        log.debug("identity card: memory vault unavailable", exc_info=True)
+        return []
+
+
 def collect_sources(config: Any = None) -> tuple[str, Mapping[str, Any] | None, tuple[str, ...]]:
     """Read every available source once. Returns ``(profile, core, labels)``.
 
@@ -506,8 +716,20 @@ def collect_sources(config: Any = None) -> tuple[str, Mapping[str, Any] | None, 
     return profile, core, tuple(labels)
 
 
-def _hash_sources(profile: str, core: Mapping[str, Any] | None) -> str:
+def _hash_sources(
+    profile: str,
+    core: Mapping[str, Any] | None,
+    vault_sections: Sequence[tuple[str, Sequence[str]]] = (),
+) -> str:
     digest = hashlib.sha256()
+    # The vault is part of the identity now, so a changed memory has to move
+    # the hash. Without this the card would serve its cached text until a note
+    # happened to change too.
+    for section, sentences in vault_sections:
+        digest.update(str(section).encode("utf-8", "replace"))
+        for sentence in sentences:
+            digest.update(b"")
+            digest.update(str(sentence).encode("utf-8", "replace"))
     digest.update(profile.encode("utf-8", "replace"))
     digest.update(b"\x00")
     if core is not None:
@@ -612,7 +834,12 @@ class IdentityCardCache:
                 return self._card
             try:
                 profile, core, labels = collect_sources(self._config)
-                source_hash = _hash_sources(profile, core)
+                vault_sections = collect_vault_sections(
+                    self._config, max_chars=self._max_chars
+                )
+                if vault_sections:
+                    labels = (*labels, "memory-vault")
+                source_hash = _hash_sources(profile, core, vault_sections)
             except Exception:  # noqa: BLE001 — a prompt build must never break here
                 log.debug("identity card: source read failed", exc_info=True)
                 self._checked_at = now
@@ -633,6 +860,7 @@ class IdentityCardCache:
             text = distill_identity_card(
                 profile_markdown=profile,
                 core_memory=core,
+                vault_sections=vault_sections,
                 max_chars=self._max_chars,
             )
             card = IdentityCard(text=text, source_hash=source_hash, sources=labels)
@@ -657,55 +885,68 @@ class IdentityCardCache:
 # Process-wide accessor (what the prompt builder calls)
 # ---------------------------------------------------------------------------
 
-_default_cache: IdentityCardCache | None = None
+#: Smallest compact card. A voice surface pays its instructions again on every
+#: turn, because the provider holds the session context, so it gets half the
+#: budget - but never so little that the person's own name falls out.
+MIN_COMPACT_IDENTITY_CARD_CHARS = 400
+
+_caches: dict[bool, IdentityCardCache] = {}
 _default_lock = threading.Lock()
 
 
-def _cache_for(config: Any) -> IdentityCardCache:
-    global _default_cache
+def _budget(config: Any, *, compact: bool) -> int:
+    max_chars = MAX_IDENTITY_CARD_CHARS
+    raw_max = getattr(getattr(config, "wiki_context", None), "identity_card_max_chars", None)
+    try:
+        if raw_max is not None:
+            max_chars = max(0, min(int(raw_max), MAX_IDENTITY_CARD_CHARS))
+    except (TypeError, ValueError):
+        max_chars = MAX_IDENTITY_CARD_CHARS
+    if not compact:
+        return max_chars
+    return min(max_chars, max(MIN_COMPACT_IDENTITY_CARD_CHARS, max_chars // 2))
+
+
+def _cache_for(config: Any, *, compact: bool = False) -> IdentityCardCache:
     with _default_lock:
-        if _default_cache is None:
-            max_chars = MAX_IDENTITY_CARD_CHARS
-            raw_max = getattr(
-                getattr(config, "wiki_context", None), "identity_card_max_chars", None
-            )
-            try:
-                if raw_max is not None:
-                    max_chars = max(0, min(int(raw_max), MAX_IDENTITY_CARD_CHARS))
-            except (TypeError, ValueError):
-                max_chars = MAX_IDENTITY_CARD_CHARS
-            _default_cache = IdentityCardCache(config=config, max_chars=max_chars)
-        return _default_cache
+        cache = _caches.get(compact)
+        if cache is None:
+            cache = IdentityCardCache(config=config, max_chars=_budget(config, compact=compact))
+            _caches[compact] = cache
+        return cache
 
 
 def reset_identity_card_cache() -> None:
-    """Drop the process-wide cache (tests, and an in-app source switch)."""
-    global _default_cache
+    """Drop the process-wide caches (tests, and an in-app source switch)."""
     with _default_lock:
-        _default_cache = None
+        _caches.clear()
 
 
-def identity_card_text(config: Any = None) -> str:
+def identity_card_text(config: Any = None, *, compact: bool = False) -> str:
     """The current card text, or "" when there is nothing to say."""
     try:
-        return _cache_for(config).text()
+        return _cache_for(config, compact=compact).text()
     except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
         log.debug("identity card: unavailable", exc_info=True)
         return ""
 
 
-def identity_card_block(config: Any = None) -> str:
+def identity_card_block(config: Any = None, *, compact: bool = False) -> str:
     """The framed block for the cached system-prompt prefix, or "".
 
     Disabled by ``[wiki_context].identity_card = false``. Safe to call on every
     prompt build: after the first call it is a lock, a clock read and a string
     return.
+
+    ``compact`` halves the budget for a voice surface, which pays its
+    instructions again on every turn because the provider holds the session
+    context. Each budget has its own cache, so the two do not evict each other.
     """
     try:
         wiki_cfg = getattr(config, "wiki_context", None)
         if wiki_cfg is not None and not bool(getattr(wiki_cfg, "identity_card", True)):
             return ""
-        return _cache_for(config).block()
+        return _cache_for(config, compact=compact).block()
     except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
         log.debug("identity card: unavailable", exc_info=True)
         return ""

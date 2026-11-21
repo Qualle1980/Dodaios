@@ -192,7 +192,10 @@ def test_get_voice_mode_cross_family_gemini_only(monkeypatch):
     assert body["realtime_available"] is True
     assert body["active_provider"] == "gemini-live"
     assert body["active_provider_label"] == "Gemini Live"
-    assert body["active_model"] == "gemini-3.1-flash-live-preview"
+    # Unpinned, so the catalog's lead is what a session would really open.
+    from jarvis.brain.model_catalog import REALTIME_MODELS
+
+    assert body["active_model"] == REALTIME_MODELS["gemini-live"][0].id
 
 
 def test_get_voice_mode_reports_browser_audio_of_the_automatic_provider(monkeypatch):

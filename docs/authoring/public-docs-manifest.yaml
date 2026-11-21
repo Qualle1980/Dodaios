@@ -1,7 +1,7 @@
 version: 1
 language: en
 content_root: docs/product
-page_count: 49
+page_count: 50
 navigation_principle: reader-journey
 authoring_contract:
   audience: People using Dodaios, including readers with no software background.
@@ -924,6 +924,26 @@ pages:
       - control-api-reference
       - providers-and-api-keys
       - troubleshooting
+    reader_level: beginner
+    maturity: stable
+
+  - section: Privacy, safety, and support
+    section_order: 6
+    order: 7
+    slug: websocket-tickets
+    file: docs/product/privacy-safety-and-support/websocket-tickets.md
+    title: "WebSocket tickets"
+    diataxis: explanation
+    summary: Why Dodaios mints short-lived WebSocket tickets, when HTTPS is required, and how that relates to the Control Key.
+    authoritative_sources:
+      - jarvis/ui/web/surface_security.py
+      - jarvis/ui/web/server_pairing_routes.py
+      - jarvis/ui/web/frontend/src/lib/connectBudget.ts
+    related:
+      - control-key
+      - control-api-reference
+      - troubleshooting
+      - architecture
     reader_level: beginner
     maturity: stable
 

@@ -17,7 +17,7 @@ import pytest
 
 from jarvis.core.bus import EventBus
 from jarvis.core.config import SafetyConfig
-from jarvis.core.events import ActionApprovalRequired, ActionExecuted
+from jarvis.core.events import ActionApprovalRequired, ActionApproved, ActionExecuted
 from jarvis.core.protocols import ExecutionContext, ToolResult
 from jarvis.safety.approval import ApprovalWorkflow
 from jarvis.safety.risk_tier import RiskTierEvaluator
@@ -138,10 +138,35 @@ class _IntentTool(_AskTool):
 
 
 @pytest.mark.asyncio
-async def test_explicit_intent_skips_the_confirmation() -> None:
-    # Claude-Code permission model: the user asked for the deletion themselves —
-    # the ask-tier action runs immediately, recorded as explicit-intent.
-    executor, approval, _bus = _executor()
+async def test_explicit_intent_pre_answers_the_confirmation() -> None:
+    # Decision 0002: the user asked for the deletion themselves — the ask-tier
+    # action still arms a ticket and publishes ActionApprovalRequired, then the
+    # explicit-intent grant answers it. No second question, full audit trail.
+    # Real ApprovalWorkflow so the pre-answer on the ticket is what execute sees
+    # (the spy wait() used elsewhere would overwrite who approved).
+    bus = EventBus()
+    executor = ToolExecutor(
+        bus=bus,
+        evaluator=RiskTierEvaluator(SafetyConfig(approval_mode="ask")),
+        approval=ApprovalWorkflow(bus),
+    )
+    required: list[ActionApprovalRequired] = []
+    approved: list[ActionApproved] = []
+    executed: list[ActionExecuted] = []
+
+    async def _capture_required(event: ActionApprovalRequired) -> None:
+        required.append(event)
+
+    async def _capture_approved(event: ActionApproved) -> None:
+        approved.append(event)
+
+    async def _capture_executed(event: ActionExecuted) -> None:
+        executed.append(event)
+
+    bus.subscribe(ActionApprovalRequired, _capture_required)
+    bus.subscribe(ActionApproved, _capture_approved)
+    bus.subscribe(ActionExecuted, _capture_executed)
+
     tool = _IntentTool()
     result = await executor.execute(
         tool, args={"command": "rm -rf x"},
@@ -150,9 +175,12 @@ async def test_explicit_intent_skips_the_confirmation() -> None:
     )
     assert result.success is True
     assert tool.calls == 1
-    assert approval.wait_calls == 0
+    assert required
+    assert any(e.approved_by == "explicit-intent" for e in approved)
     assert tool.last_ctx is not None
     assert tool.last_ctx.approved_by == "explicit-intent"
+    assert executed
+    assert executed[-1].approved_by == "explicit-intent"
 
 
 @pytest.mark.asyncio

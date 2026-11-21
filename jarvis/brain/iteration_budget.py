@@ -37,6 +37,8 @@ class IterationBudget:
     #: configured tool model. Tripping this behaves exactly like the other
     #: two bounds: the loop's budget directive forces one final grounded
     #: synthesis round — an honest answer, never a silent drop.
+    #: Maintainer mandate 2026-08-24 (7c985c1ba): bounds may only encode
+    #: hard API / hardware / safety limits, never save context on purpose.
     max_input_tokens_total: int = 50_000_000
     turns_used: int = 0
     tokens_used: int = 0           # OUTPUT tokens accumulated (runaway-generation signal)

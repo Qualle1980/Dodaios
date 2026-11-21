@@ -125,6 +125,16 @@ describe("provider-bound section health", () => {
       detail: "probe result",
       latency_ms: 10,
       integration_ok: providerStatus !== "unreachable" && providerStatus !== "error",
+      proof:
+        providerStatus === "ok"
+          ? "answered"
+          : providerStatus === "bad_key"
+            ? "reachable"
+            : providerStatus === "no_credits" ||
+                providerStatus === "rate_limited" ||
+                providerStatus === "model_unavailable"
+              ? "authenticated"
+              : "nothing",
     };
 
     expect(sectionHealthFromProviderTest(result, "OpenRouter")).toMatchObject({

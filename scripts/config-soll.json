@@ -92,7 +92,7 @@
     "log_path": "state/latency_log.jsonl"
   },
   "brain.providers.antigravity": {
-    "model": "gemini-3.5-flash"
+    "model": "gemini-3.8-flash-medium"
   },
   "brain.providers.openrouter": {
     "model": "google/gemini-3.5-flash",
@@ -121,8 +121,8 @@
   "brain.providers.ollama": {
     "tool_model": "gemma4:12b-it-qat",
     "cu_model": "gemma4:12b-it-qat",
-    "model": "deepseek-r1:14b",
-    "deep_model": "deepseek-r1:14b"
+    "model": "gemma4:12b-it-qat",
+    "deep_model": "gemma4:26b-a4b-it-qat"
   },
   "brain.providers.grok": {
     "tool_model": "grok-4.6",

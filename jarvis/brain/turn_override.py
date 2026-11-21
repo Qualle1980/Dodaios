@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from jarvis.core.protocols import ReasoningEffort, Tool
 
+from .iteration_budget import IterationBudget
 from .loop_control import LoopControl
 
 GuardFailureReason = Literal["mandated_tool_unfulfilled", "unbacked_action_claim"]
@@ -90,11 +91,12 @@ class TurnOverride:
     """The pick for one ``generate`` call.
 
     ``provider`` / ``model``
-        The chain is exactly this pair — no cross-provider fallback: a person
-        who picked a model must get that model or an honest error, never a
-        silent stand-in. When the pick cannot call tools at all (a text-only
-        brain), the manager's intelligent-router lead still runs in front of
-        it, as it does for a tool-incapable voice brain.
+        The selected pair goes first. If it fails before any text or tool
+        result, reachable seat-allowed stand-ins may follow (cloud before
+        local), and the receipt names who answered. A mid-stream failure stays
+        an honest error instead of splicing a second answer. When the pick
+        cannot call tools at all (a text-only brain), the manager still does
+        not install a separate tool lead for an explicit chat pick.
     ``reasoning_effort``
         Forwarded onto every request of the turn; ``None`` keeps the
         provider's default.
@@ -130,6 +132,10 @@ class TurnOverride:
         Steering, phase reports and the verification pass for this turn
         (``jarvis/brain/loop_control.py``). ``None`` leaves the tool-use loop
         exactly as it was, which is what voice, tasks and missions get.
+    ``budget``
+        Shared ``IterationBudget`` for a multi-wave chat turn (Instant coding
+        via ``run_with_delegates``). ``None`` lets the dispatcher allocate a
+        fresh budget for this generate call only.
     """
 
     provider: str
@@ -144,6 +150,7 @@ class TurnOverride:
     allow_force_spawn: bool = False
     system_extra: str = ""
     loop_control: LoopControl | None = None
+    budget: IterationBudget | None = None
     receipt: TurnReceipt = field(default_factory=TurnReceipt)
 
 

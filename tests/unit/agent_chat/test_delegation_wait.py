@@ -102,7 +102,13 @@ async def test_six_delegates_finish_one_original_turn_after_all_reports(
     assert len(finishes) == 1
     assert finishes[0]["payload"]["usage"] == {"output_tokens": 8}
     assert finishes[0]["payload"]["cost_usd"] == 0.02
-    assert len([e for e in events if e["kind"] == "notice"]) == 6
+    # Pipeline progress notices (pipeline_progress) are separate from the six
+    # delegation reports this test is about.
+    reports = [
+        e for e in events
+        if e["kind"] == "notice" and e["payload"].get("kind") == "delegation_report"
+    ]
+    assert len(reports) == 6
     assert "Finding 5" in str(messages_from_events(events))
     assert not svc.is_running(session.session_id)
     store.close()

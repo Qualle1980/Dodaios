@@ -215,6 +215,13 @@ recall_store = "sqlite"
 archival_store = "sqlite"   # chromadb was removed; sqlite is the supported backend
 data_dir = "./data"          # per-user runtime data (gitignored)
 
+# ── Personal memory vault (ADR-0044) — what Dodaios knows about you ──
+# Atomic memories in data/memory/vault.db. A changed fact closes the old one
+# with a date instead of overwriting it, so "now" and "before" both stay
+# answerable, and anything stored can be exported or forgotten whole.
+[memory.vault]
+enabled = true               # false: nothing is written and no memory reaches a prompt
+
 # ── Knowledge wiki (Obsidian vault) — self-creates an empty vault on first run ──
 [wiki_integration]
 enabled = true

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Mapping
 from typing import Any, Final
 
 from jarvis.core.protocols import ExecutionContext, ToolResult
@@ -230,6 +231,44 @@ def _merge_outcomes(outcomes: list[Any]) -> Any:
     return SearchOutcome(results=merged, backend=backend, status=status)
 
 
+def _query_variants(args: Mapping[str, Any]) -> list[str]:
+    """Every distinct search phrasing in *args*, in the order given.
+
+    Query variants (2026-07-17, BUG-072 follow-up): a research question used
+    to cost TWO sequential model rounds because the first search's evidence
+    was thin and the model refined its query in the next round -- a full
+    provider round-trip per refinement. Variants passed in ONE call run
+    concurrently under the same voice deadline, so the model gathers all its
+    evidence in a single round.
+
+    ``query`` accepts a LIST as well as a string. The prompt tells the model
+    to batch its variants into one call, but ``query`` -- not ``queries`` --
+    is the REQUIRED parameter, so a model that batches reaches for ``query``
+    and puts the list there. Reading it as a string raised
+    ``'list' object has no attribute 'strip'``, the turn failed, and the
+    assistant told the owner it had no internet access (live 2026-11-07, a
+    question about Crunchyroll prices; the retry a second later with a plain
+    string worked). A shape the prompt invites is not a client error.
+    """
+    raw_query = args.get("query")
+    primary = (
+        list(raw_query)
+        if isinstance(raw_query, (list, tuple))
+        else [raw_query]
+    )
+    variants: list[str] = []
+    seen: set[str] = set()
+    for candidate in [*primary, *(args.get("queries") or [])]:
+        text = str(candidate or "").strip()
+        if not text or text.casefold() in seen:
+            continue
+        seen.add(text.casefold())
+        variants.append(text)
+        if len(variants) == _MAX_QUERY_VARIANTS:
+            break
+    return variants
+
+
 async def _weather_results(query: str, client: Any) -> list[dict[str, Any]] | None:
     """Open-Meteo lookup: geocode the location in *query*, fetch a 3-day
     forecast, return it as one search-result snippet. ``None`` = not
@@ -351,21 +390,8 @@ class SearchWebTool:
     }
 
     async def execute(self, args: dict[str, Any], ctx: ExecutionContext) -> ToolResult:
-        query = (args.get("query") or "").strip()
         max_results = int(args.get("max_results", 5))
-        # Query variants (2026-07-17, BUG-072 follow-up): a research question
-        # used to cost TWO sequential model rounds because the first search's
-        # evidence was thin and the model refined its query in the next round
-        # — a full provider round-trip per refinement. Variants passed in ONE
-        # call run concurrently under the same voice deadline, so the model
-        # gathers all evidence in a single round.
-        raw_variants = args.get("queries")
-        variants: list[str] = []
-        for candidate in ([query] + list(raw_variants or []))[: _MAX_QUERY_VARIANTS + 1]:
-            text = str(candidate or "").strip()
-            if text and text.lower() not in {v.lower() for v in variants}:
-                variants.append(text)
-        variants = variants[:_MAX_QUERY_VARIANTS]
+        variants = _query_variants(args)
         if not variants:
             return ToolResult(success=False, output=None, error="query missing")
         query = variants[0]

@@ -314,7 +314,8 @@ function ReasoningPanel() {
           // card already shown.
           (e.payload.event_type === "MissionWaitingCapacity" && !e.payload.repeat) ||
           e.payload.event_type === "MissionCapacityDecision" ||
-          e.payload.event_type === "MissionPaidUsage",
+          e.payload.event_type === "MissionPaidUsage" ||
+          e.payload.event_type === "SubagentsDecided",
       );
     }),
   );
@@ -397,6 +398,34 @@ function ReasoningPanel() {
                       : "missions_view.capacity_wait.wait",
                   )}{" "}
                   {t("missions_view.capacity_wait.paid")}
+                </p>
+              </li>
+            );
+          }
+          if (env.payload.event_type === "SubagentsDecided") {
+            const p = env.payload;
+            const known = [
+              "single_helper",
+              "duplicate_tasks",
+              "budget_spent",
+              "over_budget",
+              "repeat_batch",
+              "empty_task",
+              "no_task",
+            ];
+            return (
+              <li
+                key={`${env.event_id}-${idx}`}
+                className="rounded border border-border/60 bg-card/30 p-2 text-xs"
+              >
+                <p className="text-foreground/90">
+                  {p.approved
+                    ? fill(t("subagents.approved"), { count: String(p.count) })
+                    : t(
+                        `subagents.refused.${
+                          known.includes(p.code) ? p.code : "other"
+                        }`,
+                      )}
                 </p>
               </li>
             );

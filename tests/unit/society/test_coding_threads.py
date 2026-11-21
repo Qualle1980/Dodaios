@@ -82,8 +82,13 @@ class Society:
 
 @pytest.fixture
 async def society(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from jarvis.agent_chat.loop_scheduler import SCHEDULER
+    from jarvis.agentic_ide.hand_off_retry import shared_gate
+
     monkeypatch.setattr(coding_threads, "SETTLE_S", 0.01)
     monkeypatch.setattr(coding_threads, "RETRY_S", 0.02)
+    SCHEDULER.reset()
+    shared_gate().clear_all()
 
     async def installed() -> dict[str, bool]:
         return {}
@@ -99,6 +104,8 @@ async def society(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     rt.owner = owner.session_id
     yield rt
     await rt.coding_threads.close()
+    SCHEDULER.reset()
+    shared_gate().clear_all()
 
 
 def tool(rt: Society) -> CodingThreadTool:
@@ -351,12 +358,91 @@ async def test_threads_run_with_full_access_and_open_without_a_card():
     assert t.risk_tier_for_args({"action": "read"}) == "safe"
 
 
-async def test_names_resolve_to_rows_and_models():
-    row = match_provider("Claude Code")
-    assert row is not None and row.id == "claude-api"
-    assert match_provider("codex").id == "openai-codex"
-    assert match_model(row, "Opus 5.5") == "claude-opus-5-5"
-    assert match_model(row, "some-future-model") == "some-future-model"
+async def test_names_resolve_to_rows_and_models(tmp_path, monkeypatch):
+    import json
+
+    from jarvis.agentic_ide.model_lists import ModelListSources, ModelListStore, install_shared_store
+
+    claude = tmp_path / "claude-ccd.json"
+    claude.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "fetchedAt": 1,
+                "staleAt": 2,
+                "catalog": {
+                    "config": {
+                        "models": [
+                            {
+                                "id": "claude-opus-5-5",
+                                "name": "Opus 5.5",
+                                "runtime": {
+                                    "effort_levels": ["low", "medium", "high"],
+                                    "default_effort": "medium",
+                                },
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    grok = tmp_path / "grok.json"
+    grok.write_text(
+        json.dumps(
+            {
+                "fetched_at": "t",
+                "models": {
+                    "grok-4.7": {
+                        "info": {
+                            "id": "grok-4.7",
+                            "name": "Grok 4.7",
+                            "reasoning_efforts": [
+                                {"id": "high", "value": "high", "default": True}
+                            ],
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    codex = tmp_path / "codex.json"
+    codex.write_text(
+        json.dumps(
+            {
+                "fetched_at": "t",
+                "models": [
+                    {
+                        "slug": "gpt-6.1-sol",
+                        "display_name": "Sol",
+                        "default_reasoning_level": "low",
+                        "supported_reasoning_levels": [{"effort": "low"}],
+                        "visibility": "list",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_shared_store(
+        ModelListStore(
+            store_path=tmp_path / "store.json",
+            sources=ModelListSources(
+                grok_cache=grok, codex_cache=codex, claude_catalog_file=claude
+            ),
+            now=lambda: 1_000.0,
+        )
+    )
+    try:
+        row = match_provider("Claude Code")
+        assert row is not None and row.id == "claude-api"
+        assert match_provider("codex").id == "openai-codex"
+        assert match_model(row, "Opus 5.5") == "claude-opus-5-5"
+        assert match_model(row, "some-future-model") == ""
+    finally:
+        install_shared_store(None)
 
 
 async def test_files_refuse_a_folder_that_is_no_project(

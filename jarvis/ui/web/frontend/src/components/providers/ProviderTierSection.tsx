@@ -1176,6 +1176,8 @@ export function ProviderTestControl({
         detail: (e as Error).message,
         latency_ms: 0,
         integration_ok: false,
+        // The call never returned a verdict; nothing was proven.
+        proof: "nothing",
       };
       setResult(next);
       recordVerdict(providerId, next);

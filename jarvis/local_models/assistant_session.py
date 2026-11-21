@@ -25,7 +25,10 @@ __all__ = [
     "SURFACE",
     "AgentsTier",
     "agents_tier",
+    "chain_candidates",
     "ensure_session",
+    "is_default_usable",
+    "is_tool_capable",
     "session_state",
 ]
 
@@ -59,7 +62,7 @@ def _known(provider: str) -> bool:
     return provider_row(provider) is not None or supports_api_runner(provider)
 
 
-def _tool_capable(provider: str) -> bool:
+def is_tool_capable(provider: str) -> bool:
     """Whether ``provider``'s brain plugin can call tools inside the brain loop.
 
     Read from the plugin itself (``can_call_tools`` / ``supports_tools``) via
@@ -87,12 +90,18 @@ def _tool_capable(provider: str) -> bool:
         return True
 
 
-def _default_usable(provider: str) -> bool:
-    """A credential exists: the provider's own key (the Tool Model bills
-    through it), the Agents-tier secret for the fallback chain, or a connected
-    subscription login. Without the last one a subscription-only install had
-    no agent chat at all (live 2026-10-24: "Pick a Tool Model with an API key
-    first" for the society agent, while the ChatGPT plan was signed in)."""
+def is_default_usable(provider: str) -> bool:
+    """A credential exists — or, for a keyless local runtime, the server answers.
+
+    A subscription login, an Agents-tier secret, or a provider-spec credential
+    still count. ``auth_mode == "none"`` alone does not: that only means "needs
+    no API key", and treating it as usable let a stopped Ollama win the worker
+    chain while memory learning wrote nothing (2026-11-10). Local billing cards
+    must prove reachability through
+    :func:`jarvis.local_models.runtime_reachable.is_local_runtime_reachable`
+    (plugin ``runtime_reachable`` or a card ``base_url`` GET) — capability, not
+    keylessness (AP-21).
+    """
     from jarvis.brain.resolver import _subscription_candidates, _subscription_connected
     from jarvis.core.config import get_jarvis_agent_secret, load_config
 
@@ -111,10 +120,18 @@ def _default_usable(provider: str) -> bool:
         log.debug("agents tier: credential lookup for %s failed", provider, exc_info=True)
     try:
         from jarvis.brain.app_control import is_credential_present
-        from jarvis.ui.web.provider_spec import get_spec
+        from jarvis.ui.web.provider_spec import get_spec, provider_billing
 
         spec = get_spec(provider)
-        return spec is not None and bool(is_credential_present(spec))
+        if spec is None or not is_credential_present(spec):
+            return False
+        # Keyless local: credential presence is vacuously true — prove the
+        # runtime answers before the worker/agents chain selects it.
+        if provider_billing(spec) == "local":
+            from jarvis.local_models.runtime_reachable import is_local_runtime_reachable
+
+            return is_local_runtime_reachable(provider)
+        return True
     except Exception:  # noqa: BLE001 — same: unreadable is "none"
         log.debug("agents tier: main credential lookup for %s failed", provider, exc_info=True)
         return False
@@ -167,6 +184,70 @@ def _chain(cfg: Any) -> list[tuple[str, str]]:
     return out
 
 
+def _provider_model(cfg: Any, provider: str) -> str:
+    """The configured model for ``provider``, or empty for the provider default."""
+    providers = getattr(getattr(cfg, "brain", None), "providers", None) or {}
+    return str(getattr(providers.get(provider), "model", "") or "").strip()
+
+
+def _rescue_candidates(cfg: Any) -> list[tuple[str, str]]:
+    """Capability-gated tail when the configured Agents/worker pick cannot run.
+
+    Used only after the configured Tool Model / ``[brain.worker]`` chain is
+    present but yields no usable provider — typically ``claude-api`` with no
+    Anthropic key (AP-22). Order prefers keyless local brains, then free-tier
+    Gemini when a key exists, then every other keyed brain family from the
+    shared secrets registry. Credential and tool-capability filters apply in
+    :func:`chain_candidates` / :func:`agents_tier`; this list is candidates
+    only.
+    """
+    from jarvis.core.config import PROVIDER_SECRET_CANDIDATES
+    from jarvis.ui.web.provider_spec import PROVIDERS
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(provider: str) -> None:
+        name = (provider or "").strip()
+        if not name or name in seen:
+            return
+        seen.add(name)
+        out.append((name, _provider_model(cfg, name)))
+
+    for spec in PROVIDERS:
+        if spec.tier != "brain" or spec.auth_mode != "none" or spec.account_login:
+            continue
+        _add(spec.id)
+
+    # Free-tier Gemini before other metered API families when a key exists.
+    if "gemini" in PROVIDER_SECRET_CANDIDATES:
+        _add("gemini")
+    for provider in PROVIDER_SECRET_CANDIDATES:
+        if provider == "gemini":
+            continue
+        _add(provider)
+    return out
+
+
+def _filter_pairs(
+    pairs: list[tuple[str, str]],
+    *,
+    usable: Callable[[str], bool],
+    tool_capable: Callable[[str], bool],
+) -> list[tuple[str, str]]:
+    """Keep known, tool-capable, credentialed pairs — never a silent dead brain."""
+    out: list[tuple[str, str]] = []
+    for provider, model in pairs:
+        if not _known(provider) or not tool_capable(provider):
+            continue
+        try:
+            if usable(provider):
+                out.append((provider, model))
+        except Exception:  # noqa: BLE001 — a failing probe is "not ready", with the reason logged
+            log.info("agents tier: usability probe for %s failed", provider, exc_info=True)
+    return out
+
+
 def _is_subscription(cfg: Any, provider: str) -> bool:
     from jarvis.brain.resolver import _subscription_candidates
 
@@ -183,19 +264,26 @@ def chain_candidates(
     usable: Callable[[str], bool] | None = None,
     tool_capable: Callable[[str], bool] | None = None,
 ) -> list[tuple[str, str]]:
-    """The worker pairs worth a live probe: known, tool-capable, credentialed."""
-    can_tools = tool_capable or _tool_capable
-    probe = usable or _default_usable
-    out: list[tuple[str, str]] = []
-    for provider, model in _chain(cfg):
-        if not _known(provider) or not can_tools(provider):
-            continue
-        try:
-            if probe(provider):
-                out.append((provider, model))
-        except Exception:  # noqa: BLE001 — a failing probe is "not ready", with the reason logged
-            log.info("agents tier: usability probe for %s failed", provider, exc_info=True)
-    return out
+    """The worker pairs worth a live probe: known, tool-capable, credentialed.
+
+    Walks the configured Tool Model / Agents chain first. Only when that chain
+    is present but yields no usable provider does the capability rescue tail
+    run (local / free Gemini / other keyed families). An unset worker tier
+    stays empty — picking a Tool Model is still required.
+    """
+    can_tools = tool_capable or is_tool_capable
+    probe = usable or is_default_usable
+    configured = _chain(cfg)
+    out = _filter_pairs(configured, usable=probe, tool_capable=can_tools)
+    if out or not configured:
+        return out
+    seen = {provider for provider, _model in out}
+    rescue = [
+        (provider, model)
+        for provider, model in _rescue_candidates(cfg)
+        if provider not in seen
+    ]
+    return _filter_pairs(rescue, usable=probe, tool_capable=can_tools)
 
 
 #: (provider, model) -> (ok, reason, monotonic) — one real call per pair per
@@ -206,6 +294,12 @@ _LIVE_TTL_S: Final[float] = 600.0
 
 def _reset_for_tests() -> None:
     _LIVE_CACHE.clear()
+    try:
+        from jarvis.local_models.runtime_reachable import reset_for_tests as _reset_reach
+
+        _reset_reach()
+    except Exception:  # noqa: BLE001 — test helper; absence must not break imports
+        log.debug("agents tier: reachability reset skipped", exc_info=True)
 
 
 async def probe_live(
@@ -287,36 +381,60 @@ def agents_tier(
     Walks the worker chain (primary, fallback, fallback 2) and takes the first
     provider that is known, can call tools, has a credential and — when a
     ``live`` map from :func:`probe_live` is given — answered a real call.
-    ``usable`` is the credential / login probe (the routes pass the
-    provider-agnostic worker check the API-keys page uses; the default reads
-    the Agents-tier secret); ``tool_capable`` defaults to asking the plugin.
+    When the configured chain is present but nothing in it can run, a
+    capability-gated rescue tail (local / free Gemini / other keyed families)
+    is tried once. ``usable`` is the credential / login probe (the routes pass
+    the provider-agnostic worker check the API-keys page uses; the default
+    reads the Agents-tier secret); ``tool_capable`` defaults to asking the
+    plugin.
     """
-    chain = _chain(cfg)
-    if not chain:
+    configured = _chain(cfg)
+    if not configured:
         return AgentsTier("", "", False, NOT_READY)
-    known = [(p, m) for p, m in chain if _known(p)]
+    known = [(p, m) for p, m in configured if _known(p)]
     if not known:
-        return AgentsTier(chain[0][0], "", False, NOT_READY)
-    can_tools = tool_capable or _tool_capable
+        return AgentsTier(configured[0][0], "", False, NOT_READY)
+    can_tools = tool_capable or is_tool_capable
     handy = [(p, m) for p, m in known if can_tools(p)]
     if not handy:
         return AgentsTier(known[0][0], known[0][1], False, NO_TOOLS)
-    probe = usable or _default_usable
+    probe = usable or is_default_usable
     last_reason = NOT_READY
-    for provider, model in handy:
-        try:
-            ok = bool(probe(provider))
-        except Exception:  # noqa: BLE001 — a failing probe is "not ready", with the reason logged
-            log.info("agents tier: usability probe for %s failed", provider, exc_info=True)
-            ok = False
-        if not ok:
-            continue
-        if live is not None and (provider, model) in live:
-            alive, reason = live[(provider, model)]
-            if not alive:
-                last_reason = reason or NOT_READY
+
+    def _first_ready(pairs: list[tuple[str, str]]) -> AgentsTier | None:
+        nonlocal last_reason
+        for provider, model in pairs:
+            try:
+                ok = bool(probe(provider))
+            except Exception:  # noqa: BLE001 — a failing probe is "not ready", logged
+                log.info("agents tier: usability probe for %s failed", provider, exc_info=True)
+                ok = False
+            if not ok:
                 continue
-        return AgentsTier(provider, model, True, "")
+            if live is not None and (provider, model) in live:
+                alive, reason = live[(provider, model)]
+                if not alive:
+                    last_reason = reason or NOT_READY
+                    continue
+            return AgentsTier(provider, model, True, "")
+        return None
+
+    ready = _first_ready(handy)
+    if ready is not None:
+        return ready
+
+    # Configured chain exhausted — rescue only when a worker/Tool Model was set.
+    rescue_known = [
+        (p, m)
+        for p, m in _rescue_candidates(cfg)
+        if _known(p) and can_tools(p) and all(p != cp for cp, _ in configured)
+    ]
+    # A live map only covers the pairs that were probed; do not auto-accept an
+    # unprobed rescue provider as ready when the caller asked for live proof.
+    if live is None:
+        rescued = _first_ready(rescue_known)
+        if rescued is not None:
+            return rescued
     return AgentsTier(handy[0][0], handy[0][1], False, last_reason)
 
 

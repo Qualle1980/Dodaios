@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
+
+from jarvis.memory.wiki.atomic_writer import AtomicWriter
+from jarvis.memory.wiki.curator import WikiCurator
+from jarvis.memory.wiki.curator_llm import WikiCuratorLLM
+from jarvis.memory.wiki.journal import CandidateJournal
+from jarvis.memory.wiki.log_writer import LogWriter
+from jarvis.memory.wiki.page import MarkdownPageRepository
+from jarvis.memory.wiki.vault_index import VaultIndex
 
 
 @dataclass(slots=True)
@@ -235,3 +244,36 @@ def write_page(
         rendered_body += f"\nSee [[{link}]]."
     path.write_text("\n".join(fm_lines) + "\n" + rendered_body + "\n", encoding="utf-8")
     return path
+
+# The real consolidator stack: a vault on disk with the curator and the
+# candidate journal wired to it. It lives here rather than in one test module
+# so a second module can use it without importing another module's fixture.
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path):
+    vault_root = tmp_path / "vault"
+    for sub in ("entities", "concepts", "projects", "sessions", "_archive", "attachments"):
+        (vault_root / sub).mkdir(parents=True)
+    (vault_root / "schema.md").write_text("# stub schema\n", encoding="utf-8")
+    (vault_root / "index.md").write_text("# Index\n", encoding="utf-8")
+    (vault_root / "log.md").write_text("# Wiki Log\n", encoding="utf-8")
+    (vault_root / "entities" / "ruben.md").write_text(
+        "---\ntype: entity\nslug: ruben\n---\n\n# Ruben\n\n## Summary\n\nThe user.\n",
+        encoding="utf-8",
+    )
+
+    repo = MarkdownPageRepository()
+    vault = VaultIndex(repo=repo)
+    await vault.scan(vault_root)
+    writer = AtomicWriter(vault_root=vault_root, backup_dir=tmp_path / "backups")
+    log_writer = LogWriter(log_path=vault_root / "log.md")
+    curator = WikiCurator(
+        repo=repo,
+        vault=vault,
+        writer=writer,
+        llm=WikiCuratorLLM.__new__(WikiCuratorLLM),
+        log_writer=log_writer,
+        vault_root=vault_root,
+    )
+    journal = CandidateJournal(tmp_path / "jarvis.db")
+    yield vault_root, curator, journal
+    journal.close()

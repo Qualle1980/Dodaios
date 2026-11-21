@@ -8,10 +8,11 @@ import json
 import logging
 import re
 import sys
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from jarvis.brain.cu_gate import CU_VEHICLE_TOOL_NAMES
+from jarvis.brain.turn_planner import TurnPath, TurnPlan, plan_turn
 from jarvis.control.cancel import CancelToken
 from jarvis.core.protocols import SupervisorToolGateway, SupervisorToolRequest
 from jarvis.live.coordination import NAMED_TOOLS
@@ -27,9 +28,73 @@ from jarvis.speech.hangup import (
 
 log = logging.getLogger(__name__)
 
+# Appended to every failed live tool receipt so the model must speak the
+# failure before it narrates success. The UI already shows "A tool action
+# failed"; without this line the spoken answer ignored those failures
+# (live 2026-11-11 E1/E2).
+_SPEAK_FAILURE_MANDATE = (
+    "Speak this failure to the user now. Do not claim the action succeeded."
+)
+# Returned when the model re-issues the exact same call in one user turn
+# (live 2026-11-14: workspace-orchestrate status / run_app_action loops at
+# 2–3 calls/s with almost no speech). Distinct from a progressing chain
+# (discover_tools → call_tool, or the same tool with different args).
+_REPEAT_SPEAK_NOW = (
+    "This exact tool call already returned for this user turn. "
+    "Use the prior receipt below. Speak the answer to the user now; "
+    "do not call this tool again with the same arguments."
+)
+# Past the sequential cap the session withholds further function responses
+# so Gemini Live's auto-reply loop stops (advisory text alone did not).
+_REPEAT_STORM_ENDED = (
+    "Identical tool-call storm ended for this user turn. "
+    "Speak the prior result to the user now. Do not call tools again "
+    "until the user speaks."
+)
+# Hang-up, approval and live task status must see a fresh turn. Screen
+# tools intentionally re-issue the same screenshot/click shape across
+# rounds. Reads may replay; effectful identical args re-run until the cap.
+_IDENTITY_REPLAY_EXCLUDED = frozenset({"end_call", "confirm_action", "task_status"})
+# First wave + one read replay, then withhold. Effectful allows a few
+# deliberate repeats ("skip two tracks", "volume up three times").
+_IDENTICAL_READ_SEQUENTIAL_CAP = 2
+_IDENTICAL_EFFECT_SEQUENTIAL_CAP = 3
+_ARGS_LOG_CHARS = 240
+_ERROR_LOG_CHARS = 160
+
+# Docs about this app itself. The shared planner (F-1) puts this in
+# ``required_capabilities`` for SELF_KNOWLEDGE turns; Gemini Live cannot be
+# forced to call it (``required_tool`` is dropped), so the live path runs the
+# lookup itself once per user turn and injects the result as context.
+SELF_KNOWLEDGE_CAPABILITY = "product_help"
+_GROUNDING_RESULT_CHARS = 8_000
+
 # A session.started event includes its declarations. Keep room for prompts and
 # history inside the 64 KiB message limit of smaller WebRTC clients.
 _CATALOG_BYTE_BUDGET = 24_000
+
+
+def annotate_failed_tool_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Mark a failed live receipt so the next spoken turn must name the failure.
+
+    Pending background releases stay untouched: they are not failures, and
+    they already carry their own "never say it is done" instruction.
+    """
+    if not isinstance(result, dict):
+        return result
+    if result.get("pending"):
+        return result
+    failed = result.get("success") is False or result.get("verified") is False
+    if not failed:
+        return result
+    error = str(result.get("error") or "A tool action failed.").strip()
+    if _SPEAK_FAILURE_MANDATE in error:
+        return result
+    return {
+        **result,
+        "error": f"{error} {_SPEAK_FAILURE_MANDATE}".strip(),
+        "speak_failure": True,
+    }
 _BUILTIN_TOOLS = frozenset(
     {"discover_tools", "call_tool", "confirm_action", "end_call", "task_status"}
 )
@@ -57,11 +122,48 @@ _GO_AHEAD_WORDS = frozenset(
 _APPROVAL_LOCALES = ("de", "en", "es", "pt")
 _RECENT_SEGMENTS = 4
 _REQUEST_TEXT_CHARS = 1200
-# Declared before every other tool so the size budget never drops them: the
-# app-steering tools and every tool the conversation rules name. A model that
-# is not given a tool it was told to use says it does not exist (live
-# 2026-10-14, a busy catalog sorted show_on_screen past the budget).
-_PRIORITY_TOOLS = frozenset({"find-app-action", "run-app-action", *NAMED_TOOLS})
+# Declared before every other tool so the size budget never drops them: every
+# tool the conversation rules name, then the app-steering and memory reads. A
+# model that is not given a tool it was told to use says it does not exist
+# (live 2026-10-14, a busy catalog sorted show_on_screen past the budget).
+#
+# Order is load-bearing. A frozenset alone forgot NAMED_TOOLS order, and the
+# packer then ranked promised tools by CORE_PRIORITY (which carries only
+# ``navigate`` of that tuple) and by name -- so show_on_screen, mid-tuple,
+# lost its slot while neighbours kept theirs (live 2026-11-14, 109 B short).
+# The tuple is the declaration order; the frozenset keeps membership O(1).
+# CORE_PRIORITY is not reused here: it does not list most NAMED_TOOLS, and
+# rank is not declaration (same lesson as the memory reads below).
+_PRIORITY_TOOLS_ORDER: Final[tuple[str, ...]] = (
+    *NAMED_TOOLS,
+    "find-app-action",
+    "run-app-action",
+    # The personal memory vault's read side (ADR-0044). Measured on a live
+    # gemini-live call 2026-11-11: the declaration carried 13 of 146 tools
+    # in 23977 of 24000 bytes, and all three of these were skipped at
+    # 541 / 504 / 360 bytes while screen_snapshot (275 B, CORE_PRIORITY
+    # rank 16) still fit -- the budget loop drops what does not fit with a
+    # bare ``continue``, so a heavy tool loses its slot to a lighter one
+    # that ranks far behind it. "What do you know about me" answered from
+    # the standing identity card alone and got two of three questions
+    # wrong, with function_calls=0 on every turn. Being ranked in
+    # CORE_PRIORITY is not enough; only this set survives the cut.
+    "memory-search",
+    "memory-history",
+    "memory-topics",
+    # Web search, for the same reason and found by the same log line: once
+    # the three memory reads were pinned, search_web was the tool that lost
+    # its slot (it held position 11 on the call before). It is CORE_PRIORITY
+    # rank 0, the grounding capability for any public fact
+    # (turn_planner.PUBLIC_FACT_GROUNDING_CAPABILITY), and a live call
+    # without it claimed outright to have no internet access (2026-11-07).
+    # A ranked tool is not a declared tool; only this set is.
+    "search_web",
+)
+_PRIORITY_TOOLS = frozenset(_PRIORITY_TOOLS_ORDER)
+_PRIORITY_RANK: Final[dict[str, int]] = {
+    name: index for index, name in enumerate(_PRIORITY_TOOLS_ORDER)
+}
 # Declared under its canonical name in every mode (see ``declarations``).
 _DIRECT_TOOLS = frozenset({"computer", "take_appshot"})
 # One screen, one mouse: these never run side by side, and a result that
@@ -193,6 +295,98 @@ def _board_section(section: str, output: Any) -> Any:
     return None
 
 
+# Words a user says for a capability whose TOOL NAME does not carry them.
+# Under ``defer_catalog`` the model reads a names-only index, so a tool whose
+# subject lives only in its description is invisible to the word the user
+# actually used. Live 2026-11-07 20:35 the model said it had no direct
+# access to the Obsidian vault -- while wiki-recall sat in the catalog and
+# ``discovery.discover`` searches descriptions, so one discover_tools call
+# would have found it. The model never asked. Calendar and Gmail worked in
+# the same turn because their names carry the user's word.
+#
+# This is a lexical bridge and nothing more: it only has to get the model to
+# ASK. It never claims a capability -- a hint is emitted only for a tool the
+# session actually holds, and the names themselves stay unannotated so a name
+# read back from the index still dispatches.
+SUBJECT_ALIASES: dict[str, tuple[str, ...]] = {
+    "wiki-recall": ("obsidian", "vault", "notes", "notizen"),  # i18n-allow: DE input word
+    # The memory names say "memory", but nobody asks for a memory: they ask
+    # what you know about them, or where they used to live. Without the
+    # bridge the subject of ADR-0044's read tools lives only in their
+    # descriptions, which a names-only index does not show.
+    "memory-search": ("remember", "about me", "gedächtnis", "erinnerst", "über mich"),  # i18n-allow: DE input words
+    "memory-history": ("before", "used to", "changed", "früher", "vorher", "damals"),  # i18n-allow: DE input words
+    # The name already carries "topics"; only the German word needs a bridge.
+    # i18n-allow: DE input word
+    "memory-topics": ("themen",),
+}
+
+# Spoken words that should lead discover_tools to any held github/* MCP tool.
+# The catalog names already contain "github"; these bridge "PR" / "pull request"
+# when the model only reads the names-only index under defer_catalog (F-2 / #601).
+_GITHUB_SUBJECT_WORDS: tuple[str, ...] = (
+    "pull request",
+    "pr",
+    "repo",
+    "repository",
+    "issue",
+)
+
+
+# How much of a promised tool's description its short declaration keeps.
+_COMPACT_DESCRIPTION_CHARS = 240
+
+
+def compact_declaration(declaration: dict) -> dict:
+    """The same tool in short: its first sentences, and its arguments without prose.
+
+    Names, types, enums and required fields stay, so a call built from it is
+    valid; discover_tools still returns the full schema.
+    """
+    text = str(declaration.get("description", ""))
+    short = text[:_COMPACT_DESCRIPTION_CHARS]
+    if len(text) > len(short):
+        cut = short.rfind(". ")
+        short = (short[: cut + 1] if cut > 0 else short) + " Full schema: discover_tools."
+    return {
+        **declaration,
+        "description": short,
+        "parameters": _without_prose(declaration.get("parameters", {})),
+    }
+
+
+# Annotations and value limits a short declaration leaves out. The full schema
+# still validates every call, and a refused call names the accepted arguments.
+_SCHEMA_PROSE = frozenset({
+    "description", "examples", "title", "$comment", "default",
+    "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "pattern",
+    "format",
+})
+
+
+def _without_prose(schema: Any) -> Any:
+    """A JSON schema with its prose and value limits removed, structure kept.
+
+    Only annotations go: a ``properties`` map keeps every argument, also one
+    that is itself called description or title.
+    """
+    if isinstance(schema, list):
+        return [_without_prose(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    kept: dict = {}
+    for key, value in schema.items():
+        if key in _SCHEMA_PROSE:
+            continue
+        if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(
+            value, dict
+        ):
+            kept[key] = {name: _without_prose(sub) for name, sub in value.items()}
+        else:
+            kept[key] = _without_prose(value)
+    return kept
+
+
 class LiveTools:
     """Single execution owner, including when both RTC and sideband see events.
 
@@ -245,8 +439,30 @@ class LiveTools:
         self._pending: dict[str, tuple[UUID, str, dict, int]] = {}
         self._names: dict[str, str] = {}
         self._defer_catalog = False
+        self._catalog_surface_reported: tuple[int, int, int] | None = None
         self.end_requested = False
         self.accepting = True
+        # Finished *replayable* receipts keyed by (revision, tool+args).
+        # Only successful reads and confirmation_required gates are stored;
+        # effectful successes are never silently swallowed.
+        self._finished_by_identity: dict[tuple[int, str], dict] = {}
+        # Identical calls still running. Tools outside ``_lane`` (the live
+        # 2026-11-14 storm was lane-free ``workspace-orchestrate`` and
+        # ``jarvis_run_app_action``) run concurrently, so a 2-3/s burst would
+        # pass the finished-receipt cache before the first call recorded one.
+        # A read-repeat awaits the running call and answers from its receipt.
+        self._inflight_by_identity: dict[tuple[int, str], asyncio.Future] = {}
+        # Completed sequential waves per identity in this revision. Concurrent
+        # waiters of one in-flight wave share a single wave.
+        self._sequential_waves: dict[tuple[int, str], int] = {}
+        # Pending receipts for identities already released to the background,
+        # so an identical waiter returns that task_id instead of awaiting and
+        # becoming a second background task (F7).
+        self._released_identity_pending: dict[tuple[int, str], dict] = {}
+        # Revisions that already ran planner-owned product_help grounding.
+        # One entry per user turn prevents the 2026-11-09 empty-args loop shape
+        # (177 identical calls) from ever forming on this path.
+        self._self_knowledge_grounded_revisions: set[int] = set()
 
     @property
     def revision(self) -> int:
@@ -258,10 +474,27 @@ class LiveTools:
         if value == self._revision:
             return
         self._revision = value
+        # A new user request may legitimately re-ask; drop the prior turn's
+        # identical-call state so progress is not blocked across turns.
+        self.invalidate_identical_receipts(reset_waves=True)
+        # Running calls keep their own future; only the lookup is dropped.
+        self._inflight_by_identity.clear()
+        self._released_identity_pending.clear()
         waiters, self._revision_waiters = self._revision_waiters, []
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_result(None)
+
+    def invalidate_identical_receipts(self, *, reset_waves: bool = True) -> None:
+        """Drop cached receipts when the world may have changed without a new user turn.
+
+        Background task reports and agent completions arrive as application
+        events that deliberately skip a revision bump; without this, the next
+        read would replay a pre-event receipt (F4).
+        """
+        self._finished_by_identity.clear()
+        if reset_waves:
+            self._sequential_waves.clear()
 
     def catalog(self):
         read = getattr(self.gateway, "voice_catalog", self.gateway.catalog)
@@ -272,6 +505,87 @@ class LiveTools:
         if self.cancel_token.is_cancelled():
             self.cancel_token = CancelToken()
         self.accepting = True
+
+    def plan_user_turn(self, text: str) -> TurnPlan:
+        """Consult the shared planner; never raise into the voice path."""
+        try:
+            return plan_turn(text)
+        except Exception:  # noqa: BLE001 — routing must never end a live call
+            log.warning(
+                "live[%s] turn planning failed; answering natively",
+                self.session_id,
+                exc_info=True,
+            )
+            return TurnPlan(path=TurnPath.NATIVE_REALTIME)
+
+    async def ground_self_knowledge_once(self, text: str) -> dict[str, Any] | None:
+        """Run ``product_help`` once when the planner requires it for this turn.
+
+        Returns the tool receipt to inject as model context, or ``None`` when
+        this turn needs no product guide (weather, plain chat, already grounded).
+        """
+        revision = self.revision
+        if revision in self._self_knowledge_grounded_revisions:
+            return None
+        plan = self.plan_user_turn(text)
+        if SELF_KNOWLEDGE_CAPABILITY not in plan.required_capabilities:
+            return None
+        # Claim the revision before the await so a concurrent consult cannot
+        # start a second lookup for the same user turn.
+        self._self_knowledge_grounded_revisions.add(revision)
+        if len(self._self_knowledge_grounded_revisions) > 32:
+            keep = sorted(self._self_knowledge_grounded_revisions)[-16:]
+            self._self_knowledge_grounded_revisions = set(keep)
+        query = str(text or "").strip()
+        if not query:
+            return None
+        reasons = ",".join(sorted(reason.value for reason in plan.reasons)) or "none"
+        log.info(
+            "live[%s] planner requires %s (reasons=%s); running it once for "
+            "revision %s before the model answers",
+            self.session_id,
+            SELF_KNOWLEDGE_CAPABILITY,
+            reasons,
+            revision,
+        )
+        try:
+            result = await self.execute(
+                f"planner-ground:{revision}",
+                SELF_KNOWLEDGE_CAPABILITY,
+                {"query": query},
+                revision,
+            )
+        except Exception:  # noqa: BLE001 — degrade; the model still answers
+            log.warning(
+                "live[%s] planner product_help grounding failed safely",
+                self.session_id,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(result, dict):
+            return None
+        log.info(
+            "live[%s] planner product_help grounding ready (revision=%s, "
+            "success=%s)",
+            self.session_id,
+            revision,
+            bool(result.get("success")),
+        )
+        return result
+
+    @staticmethod
+    def format_self_knowledge_context(result: dict[str, Any]) -> str:
+        """Compact product_help receipt for a trusted application text turn."""
+        body = json.dumps(result, ensure_ascii=False, default=str)
+        if len(body) > _GROUNDING_RESULT_CHARS:
+            body = body[:_GROUNDING_RESULT_CHARS] + "…"
+        return (
+            "[Application product guide result — not the user speaking. "
+            "Answer the user's latest question from this product_help guide "
+            "only. Do not invent product details absent from it, and do not "
+            "call product_help again for this turn.]\n"
+            + body
+        )
 
     async def cancel_work(self) -> None:
         self.cancel_token.cancel("user_cancelled")
@@ -334,7 +648,17 @@ class LiveTools:
         # Keep capture available even with a deferred catalog. Otherwise a live
         # model may reuse an old image or choose computer instead of the appshot
         # path that owns privacy filtering, the shutter effect and the receipt.
-        for descriptor in self.catalog():
+        # ONE catalog read for this whole pass instead of four. catalog()
+        # rebuilds every descriptor and declarations() runs on every rebuild,
+        # so the repeats were pure cost -- the same hot-path lesson
+        # _report_tool_surface records one layer up.
+        catalog = self.catalog()
+        # What follows the session built-ins is catalog, and only that is
+        # comparable to the catalog's own size. Counting the built-ins in
+        # would overstate the surface -- the exact kind of flattering number
+        # this whole report exists to replace.
+        builtins = len(definitions)
+        for descriptor in catalog:
             if descriptor.name not in _DIRECT_TOOLS:
                 continue
             definitions.append(
@@ -354,9 +678,30 @@ class LiveTools:
             )
             # A names-only index lets the same model choose an exact capability
             # without asking lexical search to infer the user's intent.
-            definitions[1]["description"] += " Available tool names: " + ", ".join(
-                sorted(descriptor.name for descriptor in self.catalog())
+            names = sorted(descriptor.name for descriptor in catalog)
+            definitions[1]["description"] += " Available tool names: " + ", ".join(names)
+            held = set(names)
+            hints = [
+                f"{'/'.join(words)} -> {tool}"
+                for tool, words in sorted(SUBJECT_ALIASES.items())
+                if tool in held
+            ]
+            github_held = sorted(
+                name
+                for name in held
+                if name.startswith("github/") or name.startswith("github_")
             )
+            if github_held:
+                shown = ", ".join(github_held[:6])
+                if len(github_held) > 6:
+                    shown += ", …"
+                hints.append(
+                    f"{'/'.join(_GITHUB_SUBJECT_WORDS)} -> {shown}"
+                )
+            if hints:
+                definitions[1]["description"] += (
+                    ". Words naming a tool whose own name does not: " + "; ".join(hints) + "."
+                )
             definitions[1]["parameters"]["properties"]["offset"] = {"type": "integer", "minimum": 0}
             return definitions
         # Count alone is insufficient: an imported tool may carry a large schema.
@@ -364,24 +709,144 @@ class LiveTools:
         # The tools that steer the app itself go first: sorted by name alone,
         # workspace-orchestrate fell past the budget and voice could not open
         # or brief a coding agent (live 2026-10-01).
-        ordered = sorted(self.catalog(), key=lambda d: (d.name not in _PRIORITY_TOOLS, d.name))
-        for descriptor in ordered:
-            if descriptor.name in _DIRECT_TOOLS:
-                continue
-            alias = self._alias(descriptor.name)
-            definition = {
-                "type": "function",
-                "name": alias,
-                "description": f"{descriptor.name}: {descriptor.description}",
-                "parameters": descriptor.input_schema,
-            }
-            size = _wire_size(definition) + 2
-            if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
-                continue
-            used_bytes += size
-            self._names[alias] = descriptor.name
-            definitions.append(definition)
+        #
+        # Behind them the order is CORE_PRIORITY, the one curated order this
+        # repo already keeps for the text brain -- not the alphabet. Sorted by
+        # name, the budget cut the catalog at roughly "p" and silently took
+        # everything after it: remember, search-web, update_soul, wiki-recall.
+        # A call could not look anything up and said so honestly, which is how
+        # 2026-11-07 and 2026-11-08 were both spent (BUG: the alphabet is not
+        # a priority). What does not fit stays reachable through
+        # discover_tools, which searches the whole catalog.
+        #
+        # Imported here, not at module level: jarvis.live keeps the brain's
+        # shortlist off its import path.
+        from jarvis.brain.tool_shortlist import CORE_PRIORITY, canonical
+
+        rank = {name: index for index, name in enumerate(CORE_PRIORITY)}
+        unranked = len(rank)
+        priority_count = len(_PRIORITY_TOOLS_ORDER)
+        ordered = sorted(
+            catalog,
+            key=lambda d: (
+                0 if d.name in _PRIORITY_TOOLS else 1,
+                (
+                    _PRIORITY_RANK[d.name]
+                    if d.name in _PRIORITY_TOOLS
+                    else priority_count + rank.get(canonical(d.name), unranked)
+                ),
+                d.name,
+            ),
+        )
+        # Two phases, because one pass cannot keep both promises at once.
+        #
+        # Phase 1 packs the promised tools -- _PRIORITY_TOOLS: the app-steering
+        # pair, the memory reads, search_web and every NAMED_TOOLS entry the
+        # conversation rules tell the model to use. They are declared whatever
+        # they weigh, and one that still does not fit is logged as a fault
+        # rather than dropped in silence.
+        #
+        # Phase 2 packs the rest in CORE_PRIORITY order and STOPS at the first
+        # tool that does not fit. A bare ``continue`` here was the defect
+        # measured on 2026-11-11: it skips the tool that is too heavy and keeps
+        # filling the remaining bytes from further down the order, so a light
+        # tool at rank 16 took the slot of a heavy one at rank 3. Three tools
+        # were evicted that way in one session, and the third
+        # (workspace-orchestrate) is why a voice turn could not delegate at
+        # all. Stopping is rank-respecting; skipping is not.
+        #
+        # The stop applies only to phase 2, so one oversized tool can cost the
+        # tools behind it their slots but can never cost a promised tool its
+        # own -- the risk a plain ``break`` over the whole order would carry.
+        for promised in (True, False):
+            for descriptor in ordered:
+                if descriptor.name in _DIRECT_TOOLS:
+                    continue
+                if (descriptor.name in _PRIORITY_TOOLS) is not promised:
+                    continue
+                alias = self._alias(descriptor.name)
+                definition = {
+                    "type": "function",
+                    "name": alias,
+                    "description": f"{descriptor.name}: {descriptor.description}",
+                    "parameters": descriptor.input_schema,
+                }
+                size = _wire_size(definition) + 2
+                if len(definitions) >= 52 or used_bytes + size > _CATALOG_BYTE_BUDGET:
+                    if promised:
+                        # A promised tool is declared in short before it is
+                        # dropped: workspace-orchestrate alone weighs 8662 B
+                        # of the 24000 and lost its slot the moment the memory
+                        # reads were pinned ahead of it (live 2026-11-12). Its
+                        # arguments stay valid without their prose, and
+                        # discover_tools still returns the full schema. The
+                        # same trade native.py already makes one level up.
+                        short = compact_declaration(definition)
+                        short_size = _wire_size(short) + 2
+                        if (
+                            len(definitions) < 52
+                            and used_bytes + short_size <= _CATALOG_BYTE_BUDGET
+                        ):
+                            log.info(
+                                "Live catalog declares promised tool %s in "
+                                "short: %d B instead of %d B",
+                                descriptor.name, short_size, size,
+                            )
+                            used_bytes += short_size
+                            self._names[alias] = descriptor.name
+                            definitions.append(short)
+                            continue
+                        # AP-30: a promised tool that cannot be declared is a
+                        # fault in the budget, not a routine skip. A model
+                        # told to use a tool it was never given says the tool
+                        # does not exist.
+                        log.error(
+                            "Live catalog cannot declare promised tool %s "
+                            "(%d B, %d B in short, %d of %d B used, %d "
+                            "definitions): raise the budget or shrink its schema",
+                            descriptor.name, size, short_size, used_bytes,
+                            _CATALOG_BYTE_BUDGET, len(definitions),
+                        )
+                        continue
+                    break
+                used_bytes += size
+                self._names[alias] = descriptor.name
+                definitions.append(definition)
+        declared = [
+            str(d.get("description", "")).split(": ", 1)[0] for d in definitions[builtins:]
+        ]
+        self._report_catalog_surface(
+            len(definitions) - builtins, len(catalog), used_bytes, declared
+        )
         return definitions
+
+    def _report_catalog_surface(
+        self, shown: int, total: int, used_bytes: int, declared: list[str] | None = None
+    ) -> None:
+        """Say how much of the catalog the declaration actually carries.
+
+        AP-30, the same lesson native.py already learned one level up: a
+        trimmed tool set looks exactly like a complete one. This loop drops
+        what does not fit with a bare ``continue``, so a call that could not
+        reach half its tools reported nothing at all, and the layer above it
+        logged "nothing is behind discover_tools" -- which was false. Reported
+        once per distinct surface: ``declarations`` runs on every rebuild.
+        """
+        state = (shown, total, used_bytes)
+        if self._catalog_surface_reported == state:
+            return
+        self._catalog_surface_reported = state
+        log.info(
+            "Live catalog declares %d of %d tools in %d of %d bytes; "
+            "the rest stay reachable through discover_tools",
+            shown, total, used_bytes, _CATALOG_BYTE_BUDGET,
+        )
+        # A count cannot say WHICH tools were cut, and "13 of 146" looked the
+        # same on the call where the memory reads were declared and on the one
+        # where they were not. Naming them is the only line that can disagree
+        # with a theory about the cut (2026-11-07, 2026-11-11).
+        if declared is not None:
+            log.info("Live catalog declared, in order: %s", ", ".join(declared) or "nothing")
 
     def _alias(self, name: str) -> str:
         """The function name a catalog tool is declared under: readable and unique.
@@ -468,7 +933,7 @@ class LiveTools:
         )
         if callable(self.on_task_released):
             self.on_task_released(task)
-        return {
+        pending = {
             "success": False,
             "pending": True,
             "status": "running_in_background",
@@ -483,6 +948,18 @@ class LiveTools:
             ),
             "background_tasks": [item.describe() for item in self.tasks.running()],
         }
+        # Identical waiters must reuse this pending receipt instead of
+        # awaiting and becoming a second background task for the same work.
+        identity = self._tool_call_identity(name, args)
+        if identity is not None:
+            key = (revision, identity)
+            self._released_identity_pending[key] = dict(pending)
+
+            def _clear_released(_done: Any, _key: tuple[int, str] = key) -> None:
+                self._released_identity_pending.pop(_key, None)
+
+            work.add_done_callback(_clear_released)
+        return pending
 
     async def _outlives_its_turn(
         self, work: asyncio.Future, name: str, args: dict, revision: int,
@@ -668,6 +1145,110 @@ class LiveTools:
             }
         if not self.accepting:
             return {"success": False, "status": "voice_closed_before_execution"}
+        self._log_tool_call(name, args)
+        # Identity once on the voice hot path (F9); consent/screen tools stay fresh.
+        identity = self._tool_call_identity(name, args)
+        key = (revision, identity) if identity is not None else None
+        if key is not None:
+            handled = await self._handle_identical_repeat(name, args, revision, key)
+            if handled is not None:
+                self._log_tool_result(name, handled)
+                return handled
+        inflight: asyncio.Future | None = None
+        if key is not None:
+            inflight = asyncio.get_running_loop().create_future()
+            self._inflight_by_identity[key] = inflight
+        try:
+            result, receipt = await self._claim_and_run(
+                call_id, name, args, revision, replay_result, identity=identity,
+            )
+        except BaseException:
+            # Waiters must get a receipt, never a cancellation aimed at the
+            # primary call (F1). Gemini stays blocked if a waiter raises.
+            if inflight is not None and not inflight.done():
+                failure = annotate_failed_tool_result({
+                    "success": False,
+                    "executed": False,
+                    "error": (
+                        "The identical in-flight call did not finish; "
+                        "inspect its state before retrying."
+                    ),
+                })
+                inflight.set_result(failure)
+            raise
+        finally:
+            if key is not None:
+                self._inflight_by_identity.pop(key, None)
+        if key is not None:
+            self._sequential_waves[key] = self._sequential_waves.get(key, 0) + 1
+        if inflight is not None and not inflight.done():
+            inflight.set_result(receipt)
+        return result
+
+    async def _handle_identical_repeat(
+        self,
+        name: str,
+        args: dict,
+        revision: int,
+        key: tuple[int, str],
+    ) -> dict | None:
+        """Answer, withhold, or coalesce an identical call; None means run it."""
+        pending = self._released_identity_pending.get(key)
+        if pending is not None:
+            log.info(
+                "Live tool %s identical arguments already running in background "
+                "in revision %s; returning pending receipt",
+                name, revision,
+            )
+            return self._as_identical_repeat(pending, preserve_instructions=True)
+
+        running = self._inflight_by_identity.get(key)
+        if running is not None:
+            log.info(
+                "Live tool %s is already running with identical arguments in "
+                "revision %s; awaiting that call",
+                name, revision,
+            )
+            prior = await asyncio.shield(running)
+            return self._as_identical_repeat(prior)
+
+        waves = self._sequential_waves.get(key, 0)
+        if waves <= 0:
+            return None  # first wave: execute
+
+        cap = self._identical_sequential_cap(name, args)
+        finished = self._finished_by_identity.get(key)
+        if waves >= cap:
+            log.warning(
+                "Live tool %s identical sequential wave %s hit cap %s in "
+                "revision %s; withholding function response",
+                name, waves, cap, revision,
+            )
+            return self._withhold_identical_receipt(finished)
+
+        if finished is not None:
+            log.info(
+                "Live tool %s repeated with identical arguments in revision %s; "
+                "returning prior receipt (wave %s)",
+                name, revision, waves + 1,
+            )
+            self._sequential_waves[key] = waves + 1
+            return self._as_identical_repeat(finished)
+
+        # Effectful under the cap: re-execute (deliberate repetition).
+        return None
+
+    async def _claim_and_run(
+        self,
+        call_id: str,
+        name: str,
+        args: dict,
+        revision: int,
+        replay_result: dict | None,
+        *,
+        identity: str | None = None,
+    ) -> tuple[dict, dict]:
+        """Run one claimed call; returns its result and the recorded receipt."""
         receipt = await asyncio.to_thread(
             self.ledger.claim,
             self.session_id,
@@ -677,7 +1258,8 @@ class LiveTools:
             revision,
         )
         if receipt is not None:
-            return receipt
+            self._log_tool_result(name, receipt)
+            return receipt, receipt
         try:
             if replay_result is not None and self.steering_replay_key(name, args) is None:
                 result = {
@@ -706,12 +1288,166 @@ class LiveTools:
                 "task_revision": revision,
                 "current_revision": self.revision,
             }
+        result = annotate_failed_tool_result(result)
         receipt = dict(result)
         if isinstance(receipt.get("output"), dict):
             receipt["output"] = {k: v for k, v in receipt["output"].items() if k != "_image"}
         take_images(receipt)
         await asyncio.to_thread(self.ledger.finish, self.session_id, call_id, receipt)
-        return result
+        self._remember_identical_receipt(name, args, revision, receipt, identity=identity)
+        self._log_tool_result(name, receipt)
+        return result, receipt
+
+    def _tool_call_identity(self, name: str, args: dict) -> str | None:
+        """Stable identity of a call, or None when the call must stay fresh."""
+        call = self._replay_call(name, args)
+        if call is None:
+            return None
+        resolved, resolved_args = call
+        if resolved in _IDENTITY_REPLAY_EXCLUDED or resolved in _SCREEN_TOOLS:
+            return None
+        return json.dumps([resolved, resolved_args], sort_keys=True, default=str)
+
+    def _identical_sequential_cap(self, name: str, args: dict) -> int:
+        """How many sequential waves of this identity may be answered."""
+        if self._reads_only(name, args):
+            return _IDENTICAL_READ_SEQUENTIAL_CAP
+        return _IDENTICAL_EFFECT_SEQUENTIAL_CAP
+
+    def _replay_identical_receipt(
+        self, name: str, args: dict, revision: int,
+    ) -> dict | None:
+        """Prior finished receipt for this exact call in this user turn, if any.
+
+        Kept as a narrow helper for tests that disable replay. Production
+        repeats go through ``_handle_identical_repeat`` (cap + withhold).
+        """
+        identity = self._tool_call_identity(name, args)
+        if identity is None:
+            return None
+        prior = self._finished_by_identity.get((revision, identity))
+        if prior is None:
+            return None
+        return self._as_identical_repeat(prior)
+
+    def _as_identical_repeat(
+        self, prior: dict, *, preserve_instructions: bool = False,
+    ) -> dict:
+        """A prior receipt handed back to an identical repeat, with speak-now."""
+        if prior.get("pending") or preserve_instructions:
+            return {
+                **prior,
+                "reused_receipt": True,
+                "repeat_of_identical_call": True,
+            }
+        # Gated actions must keep the approval instruction (F6).
+        preserve_next = bool(
+            prior.get("confirmation_required") or prior.get("approval_id")
+        )
+        preserved_next = prior.get("next_step") if preserve_next else None
+        out = {
+            **prior,
+            "reused_receipt": True,
+            "repeat_of_identical_call": True,
+            "next_step": preserved_next or _REPEAT_SPEAK_NOW,
+        }
+        if preserve_next and preserved_next:
+            return annotate_failed_tool_result(out)
+        # Failures keep their speak-failure mandate; successes need an
+        # explicit speak-now cue so the model stops chaining tools.
+        if out.get("success") is not False:
+            notice = str(out.get("notice") or "").strip()
+            out["notice"] = (
+                f"{notice} {_REPEAT_SPEAK_NOW}".strip() if notice else _REPEAT_SPEAK_NOW
+            )
+        else:
+            error = str(out.get("error") or "").strip()
+            if _REPEAT_SPEAK_NOW not in error:
+                out["error"] = f"{error} {_REPEAT_SPEAK_NOW}".strip()
+        return annotate_failed_tool_result(out)
+
+    def _withhold_identical_receipt(self, prior: dict | None) -> dict:
+        """Terminal receipt: session must not send a function response (F10)."""
+        out: dict[str, Any] = {
+            "success": False,
+            "executed": False,
+            "withhold_tool_response": True,
+            "end_tool_round": True,
+            "repeat_of_identical_call": True,
+            "error": _REPEAT_STORM_ENDED,
+            "next_step": _REPEAT_STORM_ENDED,
+        }
+        if isinstance(prior, dict):
+            out["prior_success"] = prior.get("success")
+            notice = prior.get("notice")
+            if notice:
+                out["prior_notice"] = notice
+        return annotate_failed_tool_result(out)
+
+    def _remember_identical_receipt(
+        self,
+        name: str,
+        args: dict,
+        revision: int,
+        receipt: dict,
+        *,
+        identity: str | None = None,
+    ) -> None:
+        if identity is None:
+            identity = self._tool_call_identity(name, args)
+        if identity is None:
+            return
+        if self._should_cache_identical_receipt(name, args, receipt):
+            self._finished_by_identity[(revision, identity)] = dict(receipt)
+            return
+        # Effectful completion (or hard failure of a non-read) changes the
+        # world; cached reads from before that action are stale (F3).
+        if (
+            not self._reads_only(name, args)
+            and not receipt.get("pending")
+            and not receipt.get("confirmation_required")
+        ):
+            self._finished_by_identity.clear()
+
+    def _should_cache_identical_receipt(
+        self, name: str, args: dict, receipt: dict,
+    ) -> bool:
+        """Cache successful reads and approval gates only (F2/F5/F6)."""
+        if receipt.get("pending") or receipt.get("withhold_tool_response"):
+            return False
+        if receipt.get("confirmation_required"):
+            return True
+        if receipt.get("success") is False:
+            return False
+        return self._reads_only(name, args)
+
+    def _log_tool_call(self, name: str, args: dict) -> None:
+        """Args preview for diagnosis; redacted and length-capped (no secrets)."""
+        from jarvis.core.redact import safe_preview
+
+        log.info(
+            "Live tool call %s args=%s",
+            name,
+            safe_preview(args, max_chars=_ARGS_LOG_CHARS),
+        )
+
+    def _log_tool_result(self, name: str, result: dict) -> None:
+        """Outcome summary: success, short error, payload size, reuse flag."""
+        from jarvis.core.redact import safe_preview
+
+        try:
+            payload_bytes = len(json.dumps(result, default=str))
+        except Exception:  # noqa: BLE001 — logging must never break the call
+            log.warning("Live tool result size encoding failed for %s", name, exc_info=True)
+            payload_bytes = -1
+        log.info(
+            "Live tool result %s success=%s error=%s bytes=%s reused=%s",
+            name,
+            result.get("success"),
+            safe_preview(result.get("error") or "", max_chars=_ERROR_LOG_CHARS),
+            payload_bytes,
+            bool(result.get("reused_receipt") or result.get("repeat_of_identical_call")),
+        )
 
     async def _execute(
         self, name: str, args: dict, revision: int, *, call_id: str = "",

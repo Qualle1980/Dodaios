@@ -2024,6 +2024,14 @@ def test_router_tools_is_pure_dispatcher_set() -> None:
             # worker set. See ADR-0011 amendment "Every app action".
             "find-app-action",
             "run-app-action",
+            # Personal memory vault read tools (ADR-0044): three read-only
+            # lookups over one SQLite file, no model call - what is known
+            # about a topic, how it changed, which topics exist. Never a
+            # spawn, never in a worker set (AP-5/AP-14). See ADR-0011
+            # amendment "Personal memory vault read tools".
+            "memory-search",
+            "memory-history",
+            "memory-topics",
         }
     )
     assert ROUTER_TOOLS == expected, (
@@ -2705,20 +2713,20 @@ def test_system_prompt_omits_profile_directive_when_tool_absent() -> None:
 
 
 def test_system_prompt_contains_no_invent_tools_rule() -> None:
-    """The system prompt must carry the hard anti-invention rule in DE and EN.
+    """The system prompt must carry the hard anti-invention rule once (EN).
 
     Wording changed with PR-05 (2026-08-18): the rule is now scoped to tool
     NAMES and to CLAIMS, because the old "never an action that is not in the
     list above" sat under a list that did not contain the tools it named.
+    The bilingual DE+EN duplicate was trimmed 2026-11-17 (~75 tokens/call);
+    the English sentence remains the single source.
     """
     manager, _executor = _manager_with_spawn()
     prompt = manager._build_system_prompt()
-    assert "erfinde niemals einen Werkzeugnamen" in prompt, (
-        "System prompt must contain the DE 'do not invent a tool name' rule"
-    )
     assert "never invent a tool name" in prompt, (
         "System prompt must contain the EN 'do not invent a tool name' rule"
     )
+    assert "Call ONLY tools from the list above" in prompt
 
 
 # ---------------------------------------------------------------------------

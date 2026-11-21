@@ -8602,6 +8602,20 @@
     "paid_usage": "Kostenpflichtiger Lauf auf {provider} / {model}: tatsächlich {cost} (geschätzt {estimate}, Grenze {cap}).",
     "paid_usage_automatic": "Automatischer kostenpflichtiger Lauf auf {provider} / {model}: tatsächlich {cost} (geschätzt {estimate}, Grenze {cap})."
   },
+  "subagents": {
+    "requested": "{count} parallele Helfer angefragt.",
+    "approved": "{count} Helfer freigegeben.",
+    "refused": {
+      "single_helper": "Helfer abgelehnt: ein Helfer ist keine Parallelarbeit.",
+      "duplicate_tasks": "Helfer abgelehnt: zwei hatten dieselbe Aufgabe.",
+      "budget_spent": "Helfer abgelehnt: dieser Auftrag hat keine mehr.",
+      "over_budget": "Helfer abgelehnt: mehr angefragt als übrig sind.",
+      "repeat_batch": "Helfer abgelehnt: dieselbe Runde lief schon.",
+      "empty_task": "Helfer abgelehnt: eine Aufgabe war leer.",
+      "no_task": "Helfer abgelehnt: es wurde keine Aufgabe genannt.",
+      "other": "Helfer abgelehnt."
+    }
+  },
   "ide_projects": {
     "connect_failed": "Dieser Ordner konnte nicht verbunden werden. Versuch es noch einmal.",
     "choose_folder_error": "Wähle einen Ordner, um fortzufahren.",

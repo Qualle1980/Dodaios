@@ -43,7 +43,28 @@ def _identity(config: Any) -> str:
     except Exception:  # noqa: BLE001 — never block a call on the identity block
         log.warning("live voice: identity block unavailable", exc_info=True)
         return ""
-    return identity + _instructions(config) + _memory()
+    return identity + _instructions(config) + _memory() + _standing_memory(config)
+
+
+def _standing_memory(config: Any) -> str:
+    """What is standingly known about the person (ADR-0044); ``""`` on a fault.
+
+    The typed brain has carried this block since the identity card existed; a
+    live call never did, so the model could not use a standing fact about the
+    person it was speaking to, and the person heard it ask for something it
+    already knew. Same class of gap as the vault search tool before #123.
+
+    Compact: a live session pays its instructions again on every turn because
+    the provider holds the context, so the voice budget is half the typed one.
+    """
+    try:
+        from jarvis.brain.identity_card import identity_card_block
+
+        block = identity_card_block(config, compact=True)
+    except Exception:  # noqa: BLE001 — never block a call on ambient knowledge
+        log.warning("live voice: standing memory unavailable", exc_info=True)
+        return ""
+    return "\n\n" + block if block else ""
 
 
 #: Same cap as the realtime engines' preferences block: a pathological file
@@ -193,6 +214,9 @@ class LiveVoiceSession:
         self._task_report_told: BackgroundTask | None = None
         self._resampler = StreamingPcm16Resampler(48000, 24000)
         self._captions = {"user": "", "assistant": ""}
+        # Tool names that returned success=False this spoken turn. Feeds the
+        # success-over-failure measure in ``_report_capability_denial``.
+        self._turn_failed_tools: set[str] = set()
         from jarvis.live.transcript import LiveTranscript
 
         self._transcript = LiveTranscript()
@@ -205,6 +229,17 @@ class LiveVoiceSession:
         self._reasoning_parts: dict[str, dict[int, str]] = {}
         self._reasoning_published_at: dict[str, float] = {}
         self._voice_seconds = 0.0
+        # A Live session reports its context size, which grows every
+        # turn; only the growth is new. The high-water mark is what the
+        # growth is measured against, and the spend is the running sum
+        # the closing VoiceTurnCompleted reports (see
+        # jarvis.live.native.split_new_input_tokens).
+        self._live_input_high_water = 0
+        self._live_spend: dict[str, float] = {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "cost_usd": 0.0,
+        }
         self.playback_active = False
         self._speaking = False
         self._thinking = False
@@ -619,7 +654,74 @@ class LiveVoiceSession:
         self._thinking = self._has_pending_work()
         if ended_speech:
             await self._emit_indicator({"type": "tts_end"})
+        self._report_capability_denial()
+        self._turn_failed_tools.clear()
         await self._emit_indicator({"type": "turn_complete"})
+
+    def _report_capability_denial(self) -> None:
+        """Record a spoken "I can't do that" the attached tools contradict.
+
+        The live model speaks audio directly, so by the time the sentence is
+        in the transcript the user has already heard it -- there is nothing
+        left to rewrite, which is why this only measures. The count decides
+        whether the intrusive remedies (an immediate self-correction, or
+        making the capability visible in the declared surface) are worth
+        their cost. GT-16's own ``live_surface_covers`` is the judge, so a
+        denial and a canned refusal are held to one standard.
+        """
+        # Imported here: the brain package must not join the live
+        # module's import graph for a diagnostic (AP-26).
+        from jarvis.brain.action_honesty import capability_denial_terms
+        from jarvis.brain.evidence_gate import live_surface_covers
+
+        spoken = self._captions.get("assistant") or ""
+        if not spoken:
+            return
+        self._report_success_over_tool_failure(spoken)
+        terms = capability_denial_terms(spoken)
+        if not terms:
+            return
+        try:
+            names = [str(getattr(d, "name", "")) for d in self._tools.catalog()]
+        except Exception:
+            # A gateway that cannot list its catalog is a different defect,
+            # already logged where it happens; measuring must never be the
+            # reason a turn ends badly (AP-30: said, not swallowed).
+            log.debug("capability-denial check could not read the catalog", exc_info=True)
+            return
+        if not live_surface_covers(terms, names):
+            return
+        log.warning(
+            "capability denied over voice while %d tools were attached: terms=%s",
+            len(names),
+            ",".join(terms),
+        )
+
+    def _report_success_over_tool_failure(self, spoken: str) -> None:
+        """Measure a success claim spoken after a failed tool this turn.
+
+        Failed receipts already carry a speak-failure mandate for the model.
+        When captions still narrate success without naming the failure, log
+        it — native audio cannot be rewritten after the fact (same constraint
+        as capability-denial measurement).
+        """
+        failed = getattr(self, "_turn_failed_tools", None) or ()
+        if not failed:
+            return
+        from jarvis.brain.action_honesty import (
+            acknowledges_tool_failure,
+            claimed_result_families,
+            has_false_completion_claim,
+        )
+
+        if acknowledges_tool_failure(spoken):
+            return
+        if not (claimed_result_families(spoken) or has_false_completion_claim(spoken)):
+            return
+        log.warning(
+            "success claimed over voice after failed tools: tools=%s",
+            ",".join(sorted(str(name) for name in failed)),
+        )
 
     async def wait_finished(self) -> None:
         await self._closed.wait()
@@ -726,6 +828,20 @@ class LiveVoiceSession:
         if levels.playback_active:
             level_tap.publish(levels.output_level)
             level_tap.note_playing(0.3)
+            # Live plays in the browser, so AudioPlayer never records the
+            # envelope. Feed the process-local echo reference from the page's
+            # own output meter (~100 ms cadence) so the native path can arm
+            # its speaker-echo judgment the way desktop barge-in does.
+            #
+            # UNIT WARNING: this is the page's 0..1 output METER, not an RMS
+            # like the outbound-PCM samples beside it. The envelope therefore
+            # mixes two scales, and a reader may only ask it "were we audible
+            # recently" -- never compare its level against a microphone RMS.
+            # A mic gate built on that ratio held a real barge-in at
+            # mic_rms=0.1253 against threshold=0.4788 (measured 2026-11-15).
+            from jarvis.audio import echo_reference
+
+            echo_reference.record(float(levels.output_level), 0.1)
         elif previous_playback:
             level_tap.reset_playing()
         if meter_owned:
@@ -753,6 +869,34 @@ class LiveVoiceSession:
                 from jarvis.realtime.offer_broker import validate_webrtc_offer_sdp
 
                 self._offer_future.set_result(validate_webrtc_offer_sdp(message.get("sdp")))
+            return
+        if kind == "playback_overrun":
+            # See ``playback_diag`` below. The browser's playback ring is
+            # bounded (ten seconds) and drops the OLDEST samples when a
+            # provider outruns playback, which is audible as the answer
+            # jumping forward mid-word.
+            log.info(
+                "live[%s] browser playback OVERRUN: dropped=%s total=%s rate=%s",
+                self.session_id,
+                message.get("dropped"),
+                message.get("total"),
+                message.get("rate"),
+            )
+            return
+        if kind == "playback_diag":
+            # Diagnosis only (2026-11-13): a long spoken answer was heard with
+            # words running over each other while the backend log proved a
+            # single generation produced them, and no client-side signal
+            # existed to say whether the browser had joined the ordered
+            # timeline (``handleUntimedAudio``) or was playing every arriving
+            # frame at once. The client reports that once per connection.
+            log.info(
+                "live[%s] browser playback: ordered=%s timed_output=%s detail=%s",
+                self.session_id,
+                message.get("ordered"),
+                message.get("timed_output"),
+                str(message.get("detail", ""))[:120],
+            )
             return
         if kind == "playback_state":
             if type(message.get("active")) is bool:
@@ -1650,6 +1794,18 @@ class LiveVoiceSession:
                     result = {"success": False, "error": "Invalid function arguments."}
                 if self._closing:
                     return
+                from jarvis.live.tools import annotate_failed_tool_result
+
+                result = annotate_failed_tool_result(result)
+                if result.get("withhold_tool_response"):
+                    log.warning(
+                        "Live session withholding tool response for %s "
+                        "(identical-call storm ended)",
+                        item.get("name"),
+                    )
+                    continue
+                if result.get("success") is False or result.get("speak_failure"):
+                    self._turn_failed_tools.add(str(item.get("name") or ""))
                 image_inputs.extend(take_images(result))
                 await self._connection.send(
                     {
@@ -1929,6 +2085,10 @@ class LiveVoiceSession:
         # Marked before the wire: the model's answer can arrive while the
         # send is still being awaited, and must count as this report's.
         self._report_sent()
+        # Application events skip a revision bump; drop stale read receipts (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send(
                 {
@@ -2067,6 +2227,14 @@ class LiveVoiceSession:
                             provider=self.active_provider,
                             model=self._active_model,
                             tier="realtime",
+                            # The session's own totals. Left at the field
+                            # defaults these read 0 while the brain turns
+                            # underneath them reported five figures, so the
+                            # Costs view had nothing true to show for voice
+                            # (2026-11-07).
+                            tokens_in=int(self._live_spend["tokens_in"]),
+                            tokens_out=int(self._live_spend["tokens_out"]),
+                            cost_usd=float(self._live_spend["cost_usd"]),
                         )
                     )
                 await self._bus.publish(

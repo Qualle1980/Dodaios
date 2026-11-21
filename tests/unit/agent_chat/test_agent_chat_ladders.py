@@ -517,14 +517,16 @@ def test_read_codex_models_uses_the_executing_cli_not_a_foreign_cache(monkeypatc
     monkeypatch.setattr(runner_cli, "codex_argv_prefix", lambda: ["codex-test"])
     calls = []
 
-    def discover(argv, env, cwd):
-        calls.append((argv, env))
+    def discover(argv, env, cwd, timeout_s=8.0):
+        calls.append((argv, env, timeout_s))
         return [{"id": "future-supported-model", "label": "Future", "efforts": ["high"]}]
 
     monkeypatch.setattr(runner_cli, "discover_codex_models", discover)
     rows = runner_cli.read_codex_models()
     assert [row["id"] for row in rows] == ["future-supported-model"]
-    assert calls == [(["codex-test"], {"CODEX_HOME": str(home)})]
+    from jarvis.agentic_ide.model_lists import CODEX_LIST_TIMEOUT_S
+
+    assert calls == [(["codex-test"], {"CODEX_HOME": str(home)}, CODEX_LIST_TIMEOUT_S)]
     assert runner_cli.read_codex_models() == rows
     # Society discovery is scoped for exec isolation. The read-only app-server
     # must still receive only flags that its own subcommand accepts.

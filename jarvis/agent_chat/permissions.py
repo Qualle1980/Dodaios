@@ -365,6 +365,18 @@ def ladder_key(surface: str, runner: str) -> str:
     return kit_for(surface).ladder or runner
 
 
+#: The top-rung ids every ladder uses for "ask nothing": Dodaios' own word and
+#: each vendor's (Claude Code, Codex, Gemini/Grok). Exact ids, not a stance
+#: number: ``stance_of("auto")`` is 3, yet Claude Code's and Codex's "auto"
+#: still ask before risky actions.
+BYPASS_MODES = frozenset({"bypass", "bypassPermissions", "full-access", "skip-permissions"})
+
+
+def is_bypass(mode: str | None) -> bool:
+    """Whether ``mode`` is a top-rung "ask nothing" mode on any ladder."""
+    return (mode or "").strip() in BYPASS_MODES
+
+
 def stance_of(mode: str) -> int:
     """The runner-independent stance of a mode: 0 reads only, 1 ask first,
     2 edits yes / commands ask, 3 everything. Unknown words count as "ask"."""
@@ -440,9 +452,11 @@ def normalize_permission(runner: str, mode: str | None) -> str:
 
 
 __all__ = [
+    "BYPASS_MODES",
     "JARVIS_LADDER",
     "PermissionMode",
     "default_permission",
+    "is_bypass",
     "is_permission_mode",
     "ladder_key",
     "normalize_permission",

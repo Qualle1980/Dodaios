@@ -166,6 +166,24 @@ class TurnHandle:
     control_service: Any = None
     #: A continuation keeps the turn's already resolved language and identity.
     continuation: bool = False
+    #: Set for the wave that answers an unverified coding completion: this
+    #: turn may not claim the delegated work is good without reading the diff
+    #: and running the tests itself
+    #: (:class:`jarvis.agent_chat.delegation_acceptance.AcceptanceGate`).
+    acceptance_gate: Any = None
+    #: Correction waves this turn may still spend when the gate rejects an
+    #: answer about work that was handed back
+    #: (:mod:`jarvis.agent_chat.delegation_correction`). Zero means the
+    #: rejection is final, and the honest answer is shown now.
+    corrections_left: int = 0
+    #: Shared ``IterationBudget`` for every wave of this chat turn (Instant
+    #: coding via ``run_with_delegates``). ``None`` on ordinary single-wave
+    #: turns; the dispatcher then allocates its own budget.
+    iteration_budget: Any = None
+    #: Continuation wave briefing (delegate reports). Carried as a user
+    #: history message so the cached instruction prefix stays byte-stable;
+    #: empty on the first wave.
+    continuation_briefing: str = ""
 
 
 # ------------------------------------------------------------ history

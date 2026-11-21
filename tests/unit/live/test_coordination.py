@@ -19,13 +19,22 @@ from jarvis.live.coordination import (
 _RULES = WORK_STATUS_RULE + ON_SCREEN_RULE + TEAM_TALK_RULE + conversation_rules("your tools")
 # Hyphenated or underscored words in the rules that are plain English, not tools.
 _NOT_TOOLS = {"multi-step", "trade-offs", "mission_id"}
+# Session built-ins: always declared with the call, never part of NAMED_TOOLS.
+_SESSION_BUILTINS = {"discover_tools", "call_tool"}
 
 
 def test_every_tool_the_rules_name_is_listed_and_every_listed_tool_is_named():
-    named_in_text = set(re.findall(r"\b[a-z]+(?:[-_][a-z]+)+\b", _RULES)) - _NOT_TOOLS
+    named_in_text = (
+        set(re.findall(r"\b[a-z]+(?:[-_][a-z]+)+\b", _RULES))
+        - _NOT_TOOLS
+        - _SESSION_BUILTINS
+    )
     assert named_in_text <= set(NAMED_TOOLS)
     for name in NAMED_TOOLS:
         assert re.search(rf"\b{re.escape(name)}\b", _RULES), name
+    # F-2 names the discovery path for account-level GitHub questions.
+    assert "discover_tools" in WORK_STATUS_RULE
+    assert "call_tool" in WORK_STATUS_RULE
 
 
 def test_the_rules_spell_out_the_argument_a_small_model_has_to_pass():

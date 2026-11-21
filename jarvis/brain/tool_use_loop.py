@@ -67,6 +67,8 @@ from .tool_shortlist import FIND_TOOLS_NAME
 # Maintainer mandate 2026-08-24: context caps are not a cost lever; the bound
 # exists only so one runaway result cannot exceed a provider window outright.
 _MAX_TOOL_RESULT_CHARS = 100_000
+#: Instant (chatgpt-plan) path only. Other surfaces keep the 100k backstop.
+_CHAT_TOOL_RESULT_CHARS = 20_000
 
 # Directive appended for the deadline-forced final round (see ``deadline_s``).
 # English on purpose: it is model-facing prompt text, never spoken to the user.
@@ -87,8 +89,8 @@ _DEADLINE_FINAL_DIRECTIVE = (
 _BUDGET_FINAL_DIRECTIVE = (
     "[round budget exhausted] Answer the user NOW in one or two spoken "
     "sentences using ONLY the tool evidence gathered above. If the evidence "
-    "is incomplete, say honestly what you could and could not verify. Do "
-    "not call any more tools."
+    "is incomplete, name the open gaps and say honestly what you could and "
+    "could not verify. Do not call any more tools. Do not start another round."
 )
 
 # What a message the person sent DURING the turn looks like when it reaches the
@@ -116,15 +118,18 @@ _DUPLICATE_CALL_FINAL_DIRECTIVE = (
 )
 
 
-def _cap_tool_result_json(serialized: str) -> str:
+def _cap_tool_result_json(
+    serialized: str, *, limit: int | None = None
+) -> str:
     """Truncate an over-long serialized tool result, leaving an honest marker so
     the model knows the payload was clipped (rather than silently ending)."""
-    if len(serialized) <= _MAX_TOOL_RESULT_CHARS:
+    cap = _MAX_TOOL_RESULT_CHARS if limit is None else max(1, int(limit))
+    if len(serialized) <= cap:
         return serialized
-    kept = serialized[:_MAX_TOOL_RESULT_CHARS]
+    kept = serialized[:cap]
     return (
         f"{kept}… [truncated: tool output was {len(serialized)} chars, "
-        f"capped at {_MAX_TOOL_RESULT_CHARS}]"
+        f"capped at {cap}]"
     )
 
 
@@ -663,6 +668,19 @@ class ToolUseLoop:
         # A scheduled/background turn (BUG-212): an unknown tool name is fed
         # back and the loop continues — no listener to keep from silence.
         self._unattended = bool(self._tool_context.get("unattended"))
+        # Instant / chatgpt-plan may pass a tighter cap; others keep 100k.
+        raw_cap = self._tool_context.get("max_tool_result_chars")
+        if raw_cap is None:
+            self._max_tool_result_chars = _MAX_TOOL_RESULT_CHARS
+        else:
+            try:
+                self._max_tool_result_chars = max(1, int(raw_cap))
+            except (TypeError, ValueError):
+                log.warning(
+                    "tool_use_loop: ignoring invalid max_tool_result_chars=%r",
+                    raw_cap,
+                )
+                self._max_tool_result_chars = _MAX_TOOL_RESULT_CHARS
         # Canonical form → registered name, for hyphen/underscore-tolerant
         # lookup. A canonical collision (two registered tools differing only in
         # separator/case) maps to None: an inexact name must never guess
@@ -814,8 +832,12 @@ class ToolUseLoop:
             log.debug("guard-denied publish failed", exc_info=True)
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
-        """Schemas in Anthropic-compatible format (providers normalise)."""
-        return [
+        """Schemas in Anthropic-compatible format (providers normalise).
+
+        Sorted by name so a stable tool surface keeps a stable prompt-cache
+        prefix (OpenAI matches tool order in the rendered prefix).
+        """
+        rows = [
             {
                 "name": tool.name,
                 "description": getattr(tool, "description", ""),
@@ -824,6 +846,8 @@ class ToolUseLoop:
             for name, tool in self._tools.items()
             if name not in self._hidden
         ]
+        rows.sort(key=lambda row: str(row.get("name") or ""))
+        return rows
 
     def _tool_surface(self) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
         """``(schemas, allowed names)`` for this round.
@@ -1357,6 +1381,25 @@ class ToolUseLoop:
                         ),
                     }
                     unknown_tool_requested = True
+                elif tool_name in self._hidden:
+                    log.warning(
+                        "tool_use_loop: deferred tool '%s' requested before discovery",
+                        tool_name,
+                    )
+                    await self._publish_guard_denied(
+                        tool_name,
+                        "guard: deferred tool not revealed in this turn",
+                        tid,
+                    )
+                    tool_result_payload = {
+                        "success": False,
+                        "blocked": True,
+                        "output": None,
+                        "error": (
+                            f"Tool '{tool_name}' is not available in this turn. "
+                            "Discover it with the tool finder before requesting it."
+                        ),
+                    }
                 elif (
                     tool_name == "spawn_worker"
                     and _is_meta_debug_intent(user_utterance)
@@ -1626,6 +1669,8 @@ class ToolUseLoop:
                     # turn that only searched for the mail tool.
                     if result.success and not getattr(tool, "is_lookup_only", False):
                         final_agg.executed_tool_names.add(tool_name)
+                    elif not result.success:
+                        final_agg.failed_tool_names.add(tool_name)
                     # suppress_response=True: tool provides its own final response,
                     # the second brain iteration is skipped (fix for 1-3 s stall
                     # after fire-and-forget tool calls like spawn_worker).
@@ -1668,7 +1713,8 @@ class ToolUseLoop:
                             json.dumps(
                                 tool_result_payload, ensure_ascii=False,
                                 separators=(",", ":"), default=str,
-                            )
+                            ),
+                            limit=self._max_tool_result_chars,
                         ),
                     }],
                     tool_call_id=call_id,

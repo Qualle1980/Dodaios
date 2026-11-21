@@ -25,9 +25,13 @@ class _Brain:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.asked_with: list[str] = []
+        self.seats: list[tuple[str, str | None]] = []
 
-    async def render_surface_prompt(self, *, user_text: str) -> tuple[str, str]:
+    async def render_surface_prompt(
+        self, *, user_text: str, provider: str = "", model: str | None = None
+    ) -> tuple[str, str]:
         self.asked_with.append(user_text)
+        self.seats.append((provider, model))
         if self.fail:
             raise RuntimeError("layers unavailable")
         return "YOU ARE GEORGE. Soul, persona, profile.", "Date: today. Awareness: quiet."
@@ -61,6 +65,22 @@ async def test_identity_has_the_jarvis_layers_the_transcript_and_the_addendum(mo
     assert "Person: what did we decide?" in text and "You: To ship on Friday." in text
     assert text.endswith(jarvis_harness.SYSTEM_PREAMBLE)
     assert brain.asked_with == ["and now?"], "the wiki context is pulled for THIS turn's text"
+
+
+async def test_the_layers_are_built_for_the_seat_that_answers(monkeypatch):
+    brain = _Brain()
+    monkeypatch.setattr(jarvis_harness, "_brain", lambda: brain)
+    await jarvis_harness.build_identity(
+        session_id="sess-1",
+        turn_id="t1",
+        user_text="which model are you?",
+        history=[],
+        resume=None,
+        with_file=False,
+        provider="claude-api",
+        model="claude-opus-5",
+    )
+    assert brain.seats == [("claude-api", "claude-opus-5")]
 
 
 async def test_a_resumed_conversation_carries_no_transcript(monkeypatch):

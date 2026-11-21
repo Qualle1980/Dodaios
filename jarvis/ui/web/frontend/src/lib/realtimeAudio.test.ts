@@ -183,6 +183,138 @@ describe("realtime audio client", () => {
     await client.disconnect();
   });
 
+  it("queues untimed audio behind the timed stream instead of over it", async () => {
+    // A timed session does NOT get timed frames only. When a provider delta
+    // carries no interval the backend falls back to a raw binary frame
+    // (jarvis/live/session.py, "Older wires can omit timing; audio must still
+    // be heard"), so one session mixes both wires. The client used to hand
+    // those raw frames straight to the worklet with no interval, which plays
+    // them AT ONCE -- on top of whatever the scheduler had already placed --
+    // and left the overlap baseline untouched so the next timed frame was not
+    // trimmed against them either. Reported 2026-11-07 as words running over
+    // each other, worst at the start of a call, which is where untimed deltas
+    // cluster and the baseline is still unset.
+    installVoiceBrowserFakes();
+    vi.stubGlobal("Audio", class {
+      muted = false;
+      play = async () => undefined;
+      pause = () => undefined;
+    });
+    const client = new RealtimeAudioClient({}, { browserAudio: true, requiresWebRtcOffer: true });
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({ type: "audio_transport", webrtc_answer_sdp: "answer", output_transport: "timed_pcm" });
+    socket.receive({ type: "audio_ready", webrtc_answer_sdp: "answer", output_transport: "timed_pcm", output_sample_rate: 24000 });
+    await connecting;
+    const playback = FakeAudioNode.instances.find(node => node.name === "pcm-playback")!;
+    const pcmPackets = () =>
+      playback.port.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "pcm");
+
+    // One second of timed audio, ending at 2000 ms on the source timeline.
+    socket.receive({ type: "audio_timed", epoch: 0, start_ms: 1000, end_ms: 2000,
+      sample_rate: 24000, audio: Buffer.from(new Int16Array(24000).fill(1000).buffer).toString("base64") });
+    expect(pcmPackets()).toHaveLength(1);
+
+    // Half a second of the SAME speech arriving on the raw wire.
+    socket.receiveBinary(new Int16Array(12000).fill(500).buffer);
+    const packets = pcmPackets();
+    expect(packets).toHaveLength(2);
+    const raw = packets[1];
+    expect(raw.startMs).toBe(2000);
+    expect(raw.endMs).toBe(2500);
+
+    // And the baseline moved, so a later timed frame is trimmed against it.
+    socket.receive({ type: "audio_timed", epoch: 0, start_ms: 2000, end_ms: 2400,
+      sample_rate: 24000, audio: Buffer.from(new Int16Array(9600).buffer).toString("base64") });
+    expect(pcmPackets()).toHaveLength(2); // fully inside what was already queued
+
+    socket.receive({ type: "audio_closed" });
+    await client.disconnect();
+  });
+
+  it("orders the native path's untimed audio even with no WebRTC offer", async () => {
+    // The native live path (jarvis/live/native.py) negotiates no WebRTC at
+    // all: it answers ``requires_webrtc_answer: false`` and sends every PCM
+    // block as a raw binary frame, so the playback worklet is the only sink
+    // and there is no ``audio_transport`` message either. Reported 2026-11-13
+    // as words running over each other on every long answer, in two separate
+    // calls, while the backend log proved a single generation produced them.
+    // The ordered timeline from 2026-11-07 must therefore be reachable from
+    // the ``audio_ready`` announcement alone, on a client that was never
+    // asked for an offer.
+    installVoiceBrowserFakes();
+    vi.stubGlobal("Audio", class {
+      muted = false;
+      play = async () => undefined;
+      pause = () => undefined;
+    });
+    const client = new RealtimeAudioClient({}, { browserAudio: true, requiresWebRtcOffer: false });
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({
+      type: "audio_ready", requires_webrtc_answer: false,
+      output_transport: "timed_pcm", output_sample_rate: 24000,
+    });
+    await connecting;
+    const playback = FakeAudioNode.instances.find(node => node.name === "pcm-playback")!;
+    const pcmPackets = () =>
+      playback.port.postMessage.mock.calls.map(([m]) => m).filter(m => m.type === "pcm");
+
+    // Three half-second blocks of one answer, as the native wire delivers them.
+    socket.receiveBinary(new Int16Array(12000).fill(400).buffer);
+    socket.receiveBinary(new Int16Array(12000).fill(500).buffer);
+    socket.receiveBinary(new Int16Array(12000).fill(600).buffer);
+
+    const packets = pcmPackets();
+    expect(packets).toHaveLength(3);
+    // Each block must start where the previous one ended. Equal start times
+    // are the defect: the worklet then renders them on top of each other.
+    expect(packets.map(m => [m.startMs, m.endMs])).toEqual([
+      [0, 500], [500, 1000], [1000, 1500],
+    ]);
+
+    socket.receive({ type: "audio_closed" });
+    await client.disconnect();
+  });
+
+  it("flushes native playback on tts_cancel without an epoch so barge-in stays instant", async () => {
+    // Native interrupted edges emit tts_cancel with no epoch (see
+    // jarvis/live/native.py). The overlap fix must not break that flush:
+    // a real barge-in has to clear the ring, not keep speaking under the user.
+    installVoiceBrowserFakes();
+    vi.stubGlobal("Audio", class {
+      muted = false;
+      play = async () => undefined;
+      pause = () => undefined;
+    });
+    const client = new RealtimeAudioClient({}, { browserAudio: true, requiresWebRtcOffer: false });
+    const connecting = client.connect();
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    const socket = FakeWebSocket.instances[0];
+    socket.open();
+    socket.receive({
+      type: "audio_ready", requires_webrtc_answer: false,
+      output_transport: "timed_pcm", output_sample_rate: 24000,
+    });
+    await connecting;
+    const playback = FakeAudioNode.instances.find(node => node.name === "pcm-playback")!;
+    socket.receiveBinary(new Int16Array(12000).fill(400).buffer);
+    const before = playback.port.postMessage.mock.calls.length;
+    socket.receive({ type: "tts_cancel" });
+    const afterCancel = playback.port.postMessage.mock.calls.map(([m]) => m).slice(before);
+    expect(afterCancel.some((m) => m.type === "flush")).toBe(true);
+    socket.receiveBinary(new Int16Array(12000).fill(500).buffer);
+    const pcmAfter = playback.port.postMessage.mock.calls.map(([m]) => m)
+      .filter((m) => m.type === "pcm");
+    expect(pcmAfter.at(-1)?.startMs).toBe(0);
+    socket.receive({ type: "audio_closed" });
+    await client.disconnect();
+  });
+
   it("plays timed source audio once and highlights only at the device clock", async () => {
     installVoiceBrowserFakes();
     const speakers: { muted: boolean }[] = [];

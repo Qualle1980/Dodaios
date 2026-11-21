@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import json
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from uuid import uuid4
 
+from jarvis.audio import echo_reference
 from jarvis.brain.identity import name_directive
 from jarvis.core.agent_brief import AGENT_BRIEF_RULE
 from jarvis.core.paths import user_data_dir
@@ -30,11 +32,63 @@ from jarvis.live.runtime import claim, register, unregister
 from jarvis.live.session import LiveVoiceSession, _identity
 from jarvis.live.state import LiveLedger, TranscriptFragment
 from jarvis.live.tasks import BackgroundTask, report_prompt
-from jarvis.live.tools import LiveTools, take_images
+from jarvis.live.tools import LiveTools, compact_declaration, take_images
 from jarvis.realtime.audio import StreamingPcm16Resampler
 from jarvis.realtime.protocol import RealtimeSessionConfig, RealtimeUnavailableError
+from jarvis.speech.echo_guard import SelfEchoGuard
 
 log = logging.getLogger(__name__)
+
+_ECHO_REFERENCE_ACTIVE_RMS = 0.01
+_ECHO_REFERENCE_WINDOW_S = 2.0
+
+
+
+def _record_played_pcm(pcm: bytes, sample_rate: int) -> None:
+    """Append one outbound PCM block to the process-local echo envelope.
+
+    Live plays through the browser, not ``AudioPlayer``, so the player tap
+    never sees these bytes. Recording them here is what makes
+    ``echo_reference`` reachable on the native live path (BUG-101 shape).
+    """
+    if sample_rate <= 0 or len(pcm) < 2:
+        return
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return
+    mean_sq = sum(int(sample) * int(sample) for sample in samples) / len(samples)
+    rms = (mean_sq ** 0.5) / 32768.0
+    echo_reference.record(rms, len(samples) / float(sample_rate))
+
+
+def _echo_reference_recently_active(
+    *, window_s: float = _ECHO_REFERENCE_WINDOW_S
+) -> bool:
+    """True when the speakers recently emitted audible energy."""
+    try:
+        reference = echo_reference.snapshot(window_s)
+    except Exception:  # noqa: BLE001 — echo gate must never break the call
+        log.debug("live.native echo-reference snapshot failed", exc_info=True)
+        return False
+    return any(rms >= _ECHO_REFERENCE_ACTIVE_RMS for _ts, _dur, rms in reference)
+
+
+def _echo_reference_peak(*, window_s: float = _ECHO_REFERENCE_WINDOW_S) -> float:
+    """Loudest outbound RMS in the recent window, 0.0 when nothing played.
+
+    ``_echo_reference_recently_active`` answers yes or no against one
+    threshold, which cannot tell a faint tail from a speaker at full volume.
+    An abort needs the level: speaker echo and a deliberate barge-in look
+    identical in that boolean and differ here.
+    """
+    try:
+        reference = echo_reference.snapshot(window_s)
+    except Exception:  # noqa: BLE001 - a diagnostic must never break the call
+        log.debug("live.native echo-reference peak failed", exc_info=True)
+        return 0.0
+    return max((rms for _ts, _dur, rms in reference), default=0.0)
+
 
 # How long a provider's readiness probe may take before the call is refused
 # (release SLO: an honest refusal within one second, spoken and visible).
@@ -59,10 +113,19 @@ _SESSION_TOOLS = frozenset({
 # conversation rules call by name comes before them: a small model that does
 # not see a named tool declares it missing instead of discovering it.
 _DIRECT_TOOL_LIMIT = 12
-# How much of a named tool's description its short declaration keeps.
-_COMPACT_DESCRIPTION_CHARS = 240
 _DIRECT_TOOL_PREFERENCE = (
     *(name for name in NAMED_TOOLS if name not in _SESSION_TOOLS),
+    # The personal memory vault, read side (ADR-0044). First of the catalog
+    # tools because the budget cuts from the tail: with 12 direct slots and a
+    # byte budget that the mid-weight steering tools already fill (measured
+    # 15833 of 24000 B ahead of them), an unranked memory tool is declared on
+    # no live call at all, and "what do you know about me" is among the most
+    # frequent spoken turns. Their schema field was the 2026-11-09 loop
+    # (fixed in #142); being absent HERE is why a correct schema still never
+    # reached a live model.
+    "memory-search",
+    "memory-history",
+    "memory-topics",
     "find-app-action",
     "run-app-action",
     "search_web",
@@ -76,7 +139,23 @@ _DIRECT_TOOL_PREFERENCE = (
     "home_assistant",
     "wiki-recall",
     "product_help",
+    "runtime_location",
 )
+
+
+# How the browser must play this path's audio. The native path never
+# negotiates WebRTC (``requires_webrtc_answer`` is False above), so its PCM
+# travels as untimed binary frames and the playback worklet is the only sink.
+# Without this announcement the client leaves ``timedOutput`` false and plays
+# every arriving frame AT ONCE, over whatever is already scheduled — audible
+# as words running over each other, worst on a long answer (reported
+# 2026-11-13). #115 built the ordered timeline for exactly these untimed
+# frames (``handleUntimedAudio``: a frame starts where the queued audio ends),
+# but it only joins that timeline inside a timed session. ``source_timed_audio``
+# is NOT the switch to flip for it: that flag claims the provider hands us
+# intervals, which Gemini Live does not, and it would also start emitting
+# speech-timing frames in ``jarvis/live/session.py``.
+_OUTPUT_TRANSPORT = "timed_pcm"
 
 
 def _declared_name(declaration: dict) -> str:
@@ -119,63 +198,13 @@ def _fit_declarations(
         if _declared_name(declaration) in NAMED_TOOLS:
             # A tool the rules call by name is always declared, in short:
             # workspace-orchestrate alone outgrew a small model's whole budget.
-            declaration = _compact(declaration)
+            declaration = compact_declaration(declaration)
         size = len(json.dumps(declaration))
         if used + size > budget_chars:
             continue
         used += size
         direct.append(declaration)
     return (*session, *direct)
-
-
-def _compact(declaration: dict) -> dict:
-    """The same tool in short: its first sentences, and its arguments without prose.
-
-    Names, types, enums and required fields stay, so a call built from it is
-    valid; discover_tools still returns the full schema.
-    """
-    text = str(declaration.get("description", ""))
-    short = text[:_COMPACT_DESCRIPTION_CHARS]
-    if len(text) > len(short):
-        cut = short.rfind(". ")
-        short = (short[: cut + 1] if cut > 0 else short) + " Full schema: discover_tools."
-    return {
-        **declaration,
-        "description": short,
-        "parameters": _without_prose(declaration.get("parameters", {})),
-    }
-
-
-# Annotations and value limits a short declaration leaves out. The full schema
-# still validates every call, and a refused call names the accepted arguments.
-_SCHEMA_PROSE = frozenset({
-    "description", "examples", "title", "$comment", "default",
-    "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems", "pattern",
-    "format",
-})
-
-
-def _without_prose(schema: Any) -> Any:
-    """A JSON schema with its prose and value limits removed, structure kept.
-
-    Only annotations go: a ``properties`` map keeps every argument, also one
-    that is itself called description or title.
-    """
-    if isinstance(schema, list):
-        return [_without_prose(item) for item in schema]
-    if not isinstance(schema, dict):
-        return schema
-    kept: dict = {}
-    for key, value in schema.items():
-        if key in _SCHEMA_PROSE:
-            continue
-        if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(
-            value, dict
-        ):
-            kept[key] = {name: _without_prose(sub) for name, sub in value.items()}
-        else:
-            kept[key] = _without_prose(value)
-    return kept
 
 
 def _log_late_probe(task: asyncio.Future) -> None:
@@ -189,12 +218,55 @@ def _log_late_probe(task: asyncio.Future) -> None:
         log.info("Native voice readiness probe answered late: %s", task.result())
 
 
+
+def split_new_input_tokens(
+    usage: dict[str, int], previous_total: int
+) -> tuple[int, int, int]:
+    """What this Live turn ADDED to the context, split into text and audio.
+
+    A Live session holds its context on the server: the client never re-sends
+    the system prompt or the tool declarations. ``prompt_token_count`` still
+    reports everything the model attended to, so it grows with every turn, and
+    adding those readings together bills the same context over and over.
+    Measured 2026-11-07 against Google's own quota counter: 138 339 input
+    tokens out of 12 turns where Google recorded 12 370 for the whole day.
+
+    Growth, not the reading, is what the turn added. The user's speech is
+    always new, so it is taken out of the growth first and whatever remains is
+    new text. A total that SHRANK means the context was compacted and rebuilt,
+    and the model read all of it again, so that reading counts whole.
+
+    Returns ``(new_total, text_in, audio_in)``.
+    """
+    total = max(0, int(usage.get("input_total", 0) or 0))
+    audio = max(0, int(usage.get("input_audio", 0) or 0))
+    new_total = total if total < previous_total else total - previous_total
+    audio_in = min(audio, new_total)
+    return new_total, new_total - audio_in, audio_in
+
 class NativeLiveVoiceSession(LiveVoiceSession):
     """Reuse native turn mechanics, without the legacy heuristic delegate loop."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._native_turn_complete = True
+        # Same text backstop the realtime session uses (BUG-089): register
+        # every assistant transcript and drop provider-transcribed self-echo
+        # before it becomes a user turn. The acoustic envelope
+        # (``echo_reference``) arms the short-utterance judgment.
+        self._echo_guard = SelfEchoGuard()
+        # Abort forensics. A cut answer looks the same in the log whether the
+        # speaker echoed into the microphone, the owner spoke, or something on
+        # this machine stalled the audio path. These two stamps plus the
+        # envelope peak separate those three without a second live test.
+        self._audio_started_ns: int | None = None
+        self._last_user_final_ns: int | None = None
+
+    def _ms_since(self, stamp_ns: int | None) -> int:
+        """Milliseconds since ``stamp_ns``, or -1 when it never happened."""
+        if stamp_ns is None:
+            return -1
+        return max(0, int((time.time_ns() - stamp_ns) / 1_000_000))
 
     async def _start(self, message: dict) -> None:
         self._adopt_desktop_session()
@@ -321,6 +393,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                     "output_sample_rate": self._provider.output_sample_rate,
                     "language": self._language,
                     "requires_webrtc_answer": False,
+                    "output_transport": _OUTPUT_TRANSPORT,
                     "input_muted": self._input_muted,
                 }
             )
@@ -357,6 +430,14 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         ]
         budget = self._declaration_budget_tokens()
         if budget <= 0:
+            # AP-30 again, one level up: the early return skipped the only
+            # line the live path says about its tool surface, and an unbounded
+            # budget is the DEFAULT. So on a real install the call declared
+            # its tools in silence -- 2026-11-07 was spent inferring what a
+            # live call had offered while the text brain plainly logged
+            # "Tool surface for gemini: 23 of 89 tools shown". An unbounded
+            # surface is a fact worth the same line.
+            self._report_tool_surface(len(declarations), len(declarations), 0)
             return tuple(declarations)
         safe = frozenset(
             descriptor.name
@@ -364,16 +445,48 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             if str(getattr(descriptor, "risk_tier", "")) == "safe"
         )
         fitted = _fit_declarations(declarations, budget * 4, fillers=safe)
-        # AP-30: a trimmed tool set looks exactly like a complete one.
-        log.info(
-            "Native voice declares %d of %d tools under a %d-token budget for %s; "
-            "the rest stay reachable through discover_tools",
-            len(fitted),
-            len(declarations),
-            budget,
-            self.active_provider,
-        )
+        self._report_tool_surface(len(fitted), len(declarations), budget)
         return fitted
+
+    def _report_tool_surface(self, shown: int, total: int, budget: int) -> None:
+        """Say what the call offered — once per distinct surface, not per call.
+
+        AP-30: a trimmed tool set looks exactly like a complete one, and so
+        does an UNBOUNDED one. The budget-0 path used to return before the log
+        entirely, and 0 is the default, so on a real install the live call
+        declared its tools in silence: 2026-11-07 was spent inferring what a
+        live call had offered while the text brain plainly logged
+        "Tool surface for gemini: 23 of 89 tools shown".
+
+        Reporting only on change is not just tidiness. _tool_declarations runs
+        on every rebuild, and logging there on every call perturbed the timing
+        of an async subscription test enough to make it fail about one run in
+        three (5/5 green without it). Work in a hot path is never free.
+        """
+        state = (shown, total, budget, self.active_provider)
+        if getattr(self, "_tool_surface_reported", None) == state:
+            return
+        self._tool_surface_reported = state
+        if budget > 0:
+            log.info(
+                "Native voice declares %d of %d tools under a %d-token budget "
+                "for %s; the rest stay reachable through discover_tools",
+                shown, total, budget, self.active_provider,
+            )
+            return
+        # "nothing is behind discover_tools" was FALSE, and it cost two days.
+        # Both numbers here come from the SAME list -- what ``declarations()``
+        # already returned -- so with no budget of our own they are always
+        # equal and say nothing about the catalog. Underneath, the catalog's
+        # own byte budget had silently dropped 24 of 47 tools, and the line
+        # read as proof that it had not. The catalog reports its own trim now
+        # (``LiveTools._report_catalog_surface``); this line no longer claims
+        # anything about it.
+        log.info(
+            "Native voice declares all %d tools it was given, with no "
+            "declaration budget of its own for %s",
+            shown, self.active_provider,
+        )
 
     async def _refuse_unless_duplex_ready(self) -> None:
         """Refuse within a second, in the provider's own words, when it cannot talk.
@@ -432,6 +545,7 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         self.playback_active = False
         await self._emit_indicator({"type": "audio_clear"})
 
+
     async def handle_audio_frame(self, pcm: bytes) -> None:
         if (
             self._connection is not None
@@ -451,6 +565,36 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 except Exception:
                     log.debug("Native audio send failed; closing transport", exc_info=True)
                     await self._connection.close()
+
+    def _is_provider_self_echo(self, text: str) -> bool:
+        """True when a final input transcript is our own recent speech.
+
+        ``judge_short`` is armed only while the echo envelope (or the session's
+        speaking/playback flags) says we were just audible — that is the
+        truncated-echo window from BUG-101. Novel user words fail open.
+        """
+        probe = str(text or "").strip()
+        if not probe:
+            return False
+        judge_short = self._output_was_running() or _echo_reference_recently_active()
+        try:
+            return bool(self._echo_guard.is_echo(probe, judge_short=judge_short))
+        except Exception:  # noqa: BLE001 — echo guard must never break barge-in
+            log.debug("live.native self-echo judgment failed", exc_info=True)
+            return False
+
+    async def _drop_self_echo_transcript(self, text: str) -> None:
+        """Swallow a provider-transcribed echo and stop any auto-answer to it."""
+        log.info(
+            "live.native[%s] dropped provider-transcribed self-echo "
+            "before it became a turn: %r",
+            self.session_id,
+            text[:80],
+        )
+        # Gemini Live creates responses automatically: the server may already
+        # be answering its own echo. Interrupt that generation; a genuine
+        # later user turn opens a fresh one.
+        await self._interrupt_reply()
 
     async def _open_replacement(self, history: list[dict]) -> None:
         native_history = tuple(
@@ -472,9 +616,77 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 "input_sample_rate": self._provider.input_sample_rate,
                 "output_sample_rate": self._provider.output_sample_rate,
                 "requires_webrtc_answer": False,
+                "output_transport": _OUTPUT_TRANSPORT,
                 "reconnected": True,
             }
         )
+
+    async def _apply_planner_grounding(self, text: str) -> None:
+        """When the planner requires product_help, run it and inject the result.
+
+        Gemini Live cannot force a tool call (``required_tool`` is dropped on
+        ``request_response``), and the measured B2 failure was exactly
+        ``function_calls=0`` with a textbook answer. The app therefore owns the
+        lookup once per user turn and hands the trusted guide to the model as
+        context before it answers. Weather and empty plans leave the wire alone.
+        """
+        if self._tools is None or self._connection is None or self._closing:
+            return
+        try:
+            result = await self._tools.ground_self_knowledge_once(text)
+        except Exception:  # noqa: BLE001 — never end the call for a planner miss
+            log.warning(
+                "Native voice planner grounding failed; answering without it",
+                exc_info=True,
+            )
+            return
+        if result is None:
+            return
+        directive = (
+            "This turn needs the built-in product guide. A trusted product_help "
+            "result follows as application context; answer from it and do not "
+            "call product_help again for this turn."
+        )
+        update = getattr(self._connection, "update_session", None)
+        if callable(update):
+            try:
+                await update(turn_directive=directive)
+            except TypeError:
+                # Adapter predates turn_directive — context injection below still helps.
+                pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning(
+                    "Native voice turn_directive for product_help failed; "
+                    "injecting guide context anyway",
+                    exc_info=True,
+                )
+        prompt = self._tools.format_self_knowledge_context(result)
+        try:
+            await self._connection.send_text(prompt)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning(
+                "Native voice could not inject product_help context",
+                exc_info=True,
+            )
+            return
+        log.info(
+            "Native voice injected planner product_help grounding (%d chars) "
+            "before the model answer",
+            len(prompt),
+        )
+
+    async def _ground_then_maybe_respond(self, language: str, text: str) -> None:
+        """Ground self-knowledge first; request a response only when the provider waits."""
+        await self._apply_planner_grounding(text)
+        if self._closing or self._connection is None:
+            return
+        if getattr(self._connection, "creates_responses_automatically", True):
+            return
+        await self._request_native_response(language)
 
     async def _request_native_response(self, language: str = "") -> None:
         # The turn's language is decided once (``turn_language``); a provider
@@ -533,6 +745,10 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             self._notify_ended()
             self._closed.set()
 
+    def _output_was_running(self) -> bool:
+        """Whether the assistant was audibly producing output right now."""
+        return bool(self._speaking or self.playback_active)
+
     async def _native_event(self, event: Any) -> None:
         assert self._tools is not None and self._ledger is not None
         if event.type in {
@@ -542,13 +758,49 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         if event.type == "audio_delta" and event.audio is not None:
             self._report_started()
             await self._note_speaking()
-            await self._send_binary(event.audio.pcm)
+            pcm = event.audio.pcm
+            rate = int(
+                getattr(event.audio, "sample_rate", 0)
+                or getattr(self._provider, "output_sample_rate", 0)
+                or 24_000
+            )
+            _record_played_pcm(pcm, rate)
+            if self._audio_started_ns is None:
+                self._audio_started_ns = time.time_ns()
+            # Date the text echo guard forward by this chunk's duration so
+            # short trailing echoes after the last transcript still match.
+            duration_s = (len(pcm) / 2) / float(rate) if rate > 0 else 0.0
+            if duration_s > 0.0:
+                self._echo_guard.touch(
+                    time.time_ns() + int(duration_s * 1e9)
+                )
+            await self._send_binary(pcm)
         elif event.type in {"input_transcript", "output_transcript_delta"}:
             role: Literal["user", "assistant"] = (
                 "user" if event.type == "input_transcript" else "assistant"
             )
             if role == "user":
-                self._tools.user_text = event.text or ""
+                # Diagnose speaker-echo turns from the log alone: previously
+                # these only appeared as chat "user" lines (e.g. garbled
+                # fragments of our own reply) with no matching log entry.
+                text = event.text or ""
+                log.info(
+                    "live.native[%s] input_transcript chars=%d final=%s "
+                    "output_running=%s speaking=%s playback_active=%s "
+                    "echo_ref_active=%s text=%r",
+                    self.session_id,
+                    len(text),
+                    bool(event.is_final),
+                    self._output_was_running(),
+                    bool(self._speaking),
+                    bool(self.playback_active),
+                    _echo_reference_recently_active(),
+                    text[:120],
+                )
+                if event.is_final and self._is_provider_self_echo(text):
+                    await self._drop_self_echo_transcript(text)
+                    return
+                self._tools.user_text = text
                 if event.is_final:
                     self._tools.revision += 1
                     if self._bus is not None:
@@ -571,12 +823,21 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                         conversation_language=self._language,
                     )
                     self._tools.language = self._language
-                    if not getattr(self._connection, "creates_responses_automatically", True):
-                        task = asyncio.create_task(self._request_native_response(self._language))
-                        self._control_tasks.add(task)
-                        task.add_done_callback(self._control_tasks.discard)
+                    # Plan the final transcript before the model answers: when
+                    # product_help is required, the app runs it once and injects
+                    # the guide (Gemini Live cannot be forced to call a tool).
+                    task = asyncio.create_task(
+                        self._ground_then_maybe_respond(
+                            self._language, event.text or ""
+                        )
+                    )
+                    self._control_tasks.add(task)
+                    task.add_done_callback(self._control_tasks.discard)
             if role == "assistant":
                 self._report_started()
+                assistant_text = event.text or ""
+                if assistant_text.strip():
+                    self._echo_guard.register(assistant_text, slot="assistant")
             if role == "assistant" or event.is_final:
                 stamp = time.monotonic_ns() // 1_000_000
                 await asyncio.to_thread(
@@ -604,9 +865,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 event_id=str(uuid4()), role=role, text=event.text or "",
                 start_ms=stamp, end_ms=stamp, snapshot=role == "user",
             )
+            # What the call said, where the rest of the session looks for it.
+            # ``LiveVoiceSession._event`` has always kept this; the native
+            # handler built the same caption and dropped it, so every reader
+            # of ``_captions`` saw an empty string on the path the app
+            # actually runs -- the honesty check among them.
+            self._captions[role] = caption.text
             if self._bus is not None:
                 await self._bus.publish(caption)
             if role == "user" and event.is_final:
+                self._last_user_final_ns = time.time_ns()
                 self._transcript.finish("user")
         elif event.type == "tool_call":
             # The model is answering the report, starting with a tool.
@@ -617,14 +885,47 @@ class NativeLiveVoiceSession(LiveVoiceSession):
         elif event.type in {"interrupted", "speech_started"}:
             # A barge-in into a report: the user heard its start and chose to
             # talk. The report is in the model's context for follow-ups.
+            superseded = bool(getattr(event, "superseded", False))
+            self_initiated = bool(getattr(event, "self_initiated", False))
+            output_running = self._output_was_running()
+            barge_in = event.type == "speech_started" and output_running
+            # Name the trigger so a chopped reply can be attributed from the
+            # log: provider barge-in, our own cancel, or a superseded regen.
+            if event.type == "interrupted":
+                if self_initiated:
+                    cause = "self_initiated_cancel"
+                elif superseded:
+                    cause = "provider_superseded_regen"
+                else:
+                    cause = "provider_interrupted"
+            else:
+                cause = "speech_started_barge_in" if barge_in else "speech_started_idle"
+            log.info(
+                "live.native[%s] abort cause=%s event=%s superseded=%s "
+                "self_initiated=%s output_running=%s speaking=%s "
+                "playback_active=%s echo_peak=%.3f spoken_ms=%d "
+                "since_user_final_ms=%d",
+                self.session_id,
+                cause,
+                event.type,
+                superseded,
+                self_initiated,
+                output_running,
+                bool(self._speaking),
+                bool(self.playback_active),
+                _echo_reference_peak(),
+                self._ms_since(self._audio_started_ns),
+                self._ms_since(self._last_user_final_ns),
+            )
+            self._audio_started_ns = None
             self._report_finished(delivered=True)
-            barge_in = event.type == "speech_started" and (self._speaking or self.playback_active)
             self._speaking = False
             self._thinking = False
             if barge_in:
                 await self._interrupt_reply()
             await self._emit_indicator({"type": "tts_cancel"})
         elif event.type == "turn_complete":
+            self._audio_started_ns = None
             self._native_turn_complete = True
             self._report_finished(delivered=True)
             self._transcript.finish("assistant")
@@ -643,20 +944,33 @@ class NativeLiveVoiceSession(LiveVoiceSession):
                 from jarvis.brain.cost import calculate_realtime_cost_usd
                 from jarvis.core.events import BrainTurnCompleted
 
+                new_in, text_in, audio_in = split_new_input_tokens(
+                    usage, self._live_input_high_water
+                )
+                self._live_input_high_water = max(
+                    0, int(usage.get("input_total", 0) or 0)
+                )
+                tokens_out = int(usage.get("output_total", 0) or 0)
+                turn_cost = calculate_realtime_cost_usd(
+                    self._active_model,
+                    text_in,
+                    usage.get("output_text", 0),
+                    audio_in,
+                    usage.get("output_audio", 0),
+                )
+                self._live_spend["tokens_in"] += new_in
+                self._live_spend["tokens_out"] += tokens_out
+                self._live_spend["cost_usd"] += turn_cost
                 await self._bus.publish(
                     BrainTurnCompleted(
                         provider=self.active_provider,
                         model=self._active_model,
-                        tokens_in=usage.get("input_total", 0),
-                        tokens_out=usage.get("output_total", 0),
+                        tokens_in=new_in,
+                        tokens_out=tokens_out,
                         tokens_cached=usage.get("input_cached", 0),
-                        cost_usd=calculate_realtime_cost_usd(
-                            self._active_model,
-                            usage.get("input_text", 0),
-                            usage.get("output_text", 0),
-                            usage.get("input_audio", 0),
-                            usage.get("output_audio", 0),
-                        ),
+                        tokens_in_audio=audio_in,
+                        tokens_out_audio=int(usage.get("output_audio", 0) or 0),
+                        cost_usd=turn_cost,
                         finish_reason="realtime_usage",
                     )
                 )
@@ -682,7 +996,22 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             )
             if self._closing:
                 return
+            # Past the identical-call sequential cap: withhold the function
+            # response so Gemini Live's auto-reply loop stops (F10). The
+            # transport cannot replace tools mid-session.
+            if result.get("withhold_tool_response"):
+                log.warning(
+                    "Native voice withholding tool response for %s "
+                    "(identical-call storm ended)",
+                    event.tool_name,
+                )
+                return
             result = await self._send_tool_images(result)
+            from jarvis.live.tools import annotate_failed_tool_result
+
+            result = annotate_failed_tool_result(result)
+            if result.get("success") is False or result.get("speak_failure"):
+                self._turn_failed_tools.add(str(event.tool_name or ""))
             self._native_turn_complete = False
             await self._connection.send_tool_result(event.call_id, event.tool_name, result)
             if self._tools.end_requested:
@@ -743,6 +1072,11 @@ class NativeLiveVoiceSession(LiveVoiceSession):
     async def _submit_report(self, prompt: str, kwargs: dict[str, Any]) -> bool:
         del kwargs  # a native model always holds its functions
         self._report_sent()
+        # Application events do not bump revision; drop stale read receipts
+        # so the model's next lookup sees the post-event world (F4).
+        invalidate = getattr(self._tools, "invalidate_identical_receipts", None)
+        if callable(invalidate):
+            invalidate(reset_waves=True)
         try:
             await self._connection.send_text(prompt)
         except BaseException:
@@ -756,14 +1090,16 @@ class NativeLiveVoiceSession(LiveVoiceSession):
             return
         if message.get("type") == "text_input" and self._connection is not None:
             self._native_turn_complete = False
+            text = str(message.get("text", ""))
             if self._tools is not None:
-                self._tools.user_text = str(message.get("text", ""))
+                self._tools.user_text = text
                 self._tools.revision += 1
                 if not self._recovering:
                     self._resume_needs_input = False
                     self._tools.accept_new_input()
                     self._reconnect_attempts = 0
-            await self._connection.send_text(str(message.get("text", "")))
+                await self._apply_planner_grounding(text)
+            await self._connection.send_text(text)
         else:
             await super().handle_control(message)
 

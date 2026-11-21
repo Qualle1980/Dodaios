@@ -17,12 +17,27 @@ from jarvis.core.config import BrainConfig, BrainProviderConfig, JarvisConfig
 
 @pytest.fixture(autouse=True)
 def _hermetic(monkeypatch):
-    """No real keys, no OAuth rescue, fresh resolver cache."""
+    """No real keys, no OAuth rescue, fresh resolver cache.
+
+    Force the keyless local entry-points into ``available()`` so the stage-6
+    assertions do not depend on which brain plugins this worktree installed.
+    """
     resolver._reset_for_tests()
     monkeypatch.setattr(cfg_mod, "get_provider_secret", lambda pid: None)
     import jarvis.brain.manager as manager
 
     monkeypatch.setattr(manager, "_keyless_provider_is_rescued_by_oauth", lambda pid: False)
+    real_registry = resolver._get_registry()
+    base_names = list(real_registry.available())
+    for name in ("ollama", "local-openai"):
+        if name not in base_names:
+            base_names.append(name)
+
+    class _Registry:
+        def available(self) -> list[str]:
+            return list(base_names)
+
+    monkeypatch.setattr(resolver, "_get_registry", lambda: _Registry())
     yield
     resolver._reset_for_tests()
 
@@ -43,13 +58,14 @@ def test_local_tail_closes_the_chain_after_keyed_families(monkeypatch) -> None:
     providers = [p for p, _ in chain]
 
     assert providers[0] == "gemini"
-    # Keyed family the user actually holds comes before any local provider.
-    assert providers.index("openrouter") < providers.index("ollama")
-    # Both local brains are present, in card order, at the tail.
-    assert providers[-2:] == ["ollama", "local-openai"]
+    # Keyed local-openai closes the chain; Ollama never joins it.
+    assert "local-openai" in providers
+    assert providers.index("gemini") < providers.index("local-openai")
+    assert "ollama" not in providers
 
 
 def test_local_provider_as_primary_is_not_duplicated_by_the_tail(monkeypatch) -> None:
+    """An explicit Ollama primary stays; the tail must not re-add it."""
     config = JarvisConfig(brain=BrainConfig(primary="ollama"))
 
     chain = resolver._resolve_chain(config)
@@ -62,23 +78,24 @@ def test_local_provider_as_primary_is_not_duplicated_by_the_tail(monkeypatch) ->
 
 def test_zero_key_install_still_resolves_onto_local(monkeypatch) -> None:
     """The AP-22 acceptance shape: no key anywhere → the chain still ends on
-    reachable local providers instead of only a dead keyless claude-api."""
+    reachable local providers instead of only a dead keyless claude-api.
+    Ollama is excluded from that automatic tail."""
     config = JarvisConfig()
 
     chain = resolver._resolve_chain(config)
     providers = [p for p, _ in chain]
 
-    assert "ollama" in providers
+    assert "ollama" not in providers
     assert "local-openai" in providers
 
 
 def test_local_tail_honors_user_picked_model(monkeypatch) -> None:
-    """The user's [brain.providers.ollama].model pick rides into the tail —
+    """The user's [brain.providers.local-openai].model pick rides into the tail —
     never overridden by a hardcoded default (AP-21)."""
     config = JarvisConfig(
         brain=BrainConfig(
             primary="gemini",
-            providers={"ollama": BrainProviderConfig(model="qwen3.5:9b")},
+            providers={"local-openai": BrainProviderConfig(model="qwen3.5:9b")},
         )
     )
     _keys(monkeypatch, "gemini")
@@ -86,7 +103,7 @@ def test_local_tail_honors_user_picked_model(monkeypatch) -> None:
     chain = resolver._resolve_chain(config)
     by_provider = dict(chain)
 
-    assert by_provider["ollama"] == "qwen3.5:9b"
+    assert by_provider["local-openai"] == "qwen3.5:9b"
 
 
 def test_local_fallback_default_is_unchanged() -> None:

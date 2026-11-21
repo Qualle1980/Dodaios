@@ -1295,7 +1295,8 @@ class Kontrollierer:
         worker executor runs ONE step through the ordinary worker + critic
         loop, so isolation, budgets, reviews and events stay what they are.
         """
-        from ..conductor.lanes import first_lane
+        from ..conductor.lanes import Executor, first_lane
+        from ..conductor.leads import may_write, resolve_executor, roster
         from ..conductor.lessons import _active as active_lessons
         from ..conductor.loop import Conductor, OrderHalted, as_single_prompt
         from ..conductor.requested import requested_executor
@@ -1315,16 +1316,33 @@ class Kontrollierer:
         # conductor's instruction: live 2026-10-24 a read order ran with write
         # access because the conductor phrased its step as "Run `wc -l` ...".
         read_order = is_read_task(clean_request_body(prompt))
+        # Who last changed files, so the Quality lead can be someone else.
+        builder: list[Executor] = []
 
-        async def _execute(executor: str, instruction: str) -> str:
+        async def _execute(name: str, instruction: str) -> str:
             if stop:
                 return f"Not run: the order already stopped ({stop[0]})."
+            executor = resolve_executor(
+                name, prompt, builder=builder[-1] if builder else None)
+            if executor is None:
+                # No stand-in and no silence: the conductor hears that this
+                # lead has nobody behind it, and its next progress record
+                # routes the step somewhere that exists.
+                logger.info("conductor: %s no executor serves %s", mission_id, name)
+                return (f"Not run: no executor is available for {name}. "
+                        "Give this step to another lead, or say what is missing.")
             if executor == "conductor":
                 return await ask([("user", as_single_prompt([
                     ("user", f"The user's request:\n{prompt}"),
                     ("user", f"Answer this directly and concisely:\n{instruction}"),
                 ]))])
-            if read_order and not instruction.lstrip().startswith(READ_ONLY_MARKER):
+            if may_write(name):
+                builder.append(executor)
+            # Write access follows the USER's words and the lead's remit, never
+            # the conductor's phrasing: live 2026-10-24 a read order ran with
+            # write access because a step was phrased as "Run `wc -l` ...".
+            if (read_order or not may_write(name)) and not instruction.lstrip().startswith(
+                    READ_ONLY_MARKER):
                 instruction = (
                     f"{READ_ONLY_MARKER} do not create, modify or delete any file.\n\n"
                     f"{instruction}"
@@ -1378,7 +1396,7 @@ class Kontrollierer:
         # — the spawn returns SETUP_FAILED or WAITING_CAPACITY and halts the
         # order honestly, rather than quietly routing to someone else.
         requested = requested_executor(clean_request_body(prompt))
-        team = {requested: TEAM[requested]} if requested in TEAM else TEAM
+        team = {requested: TEAM[requested]} if requested in TEAM else roster(prompt)
         if requested:
             logger.info("conductor: %s the user named %s, conducting over %s",
                         mission_id, requested, ", ".join(team))

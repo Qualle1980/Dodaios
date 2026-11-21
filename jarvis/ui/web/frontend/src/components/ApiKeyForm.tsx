@@ -146,6 +146,8 @@ export function ApiKeyForm({ secretKey, dashboardUrl, configured, credentialHelp
         detail: (e as Error).message,
         latency_ms: 0,
         integration_ok: false,
+        // The call never returned a verdict; nothing was proven.
+        proof: "nothing",
       };
     }
     window.dispatchEvent(

@@ -47,9 +47,38 @@ class TestGeminiUsageExtraction:
             "output_total": 300,
             "input_text": 400,
             "input_audio": 800,
+            "input_cached": 0,
             "output_text": 0,
             "output_audio": 300,
         }
+
+    def test_cached_context_is_reported_separately(self) -> None:
+        """A cached prompt must not be billed at the full input rate.
+
+        ``prompt_token_count`` INCLUDES the cached content (SDK docstring), so
+        a Live session that re-attends a large tool catalog every turn reports
+        the same tokens over and over. ``RealtimeVoiceSession`` already prices
+        ``input_cached`` at 10% -- it was simply never told. Measured
+        2026-11-07: our ledger summed 138 339 input tokens over 12 turns while
+        Google's own quota counter recorded 12 370 for the whole day.
+        """
+        md = SimpleNamespace(
+            prompt_token_count=12_000,
+            response_token_count=100,
+            cached_content_token_count=10_300,
+            prompt_tokens_details=[_modality("TEXT", 11_900), _modality("AUDIO", 100)],
+            response_tokens_details=[_modality("AUDIO", 100)],
+        )
+        usage = _usage_from_metadata(md)
+        assert usage["input_cached"] == 10_300
+        assert usage["input_total"] == 12_000
+
+    def test_cached_count_absent_is_zero_not_missing(self) -> None:
+        """Every provider mapper owes the same keys; a gap must read as 0."""
+        md = SimpleNamespace(prompt_token_count=50, response_token_count=5)
+        usage = _usage_from_metadata(md)
+        assert usage is not None
+        assert usage["input_cached"] == 0
 
     def test_empty_metadata_returns_none(self) -> None:
         md = SimpleNamespace(
@@ -206,6 +235,11 @@ class _FakeBus:
 def _bare_session(usage: dict[str, int], model: str) -> RealtimeVoiceSession:
     session = object.__new__(RealtimeVoiceSession)
     session._turn_usage = dict(usage)
+    # __init__ is bypassed here, so every field _publish_live_usage touches
+    # has to be set by hand. Leaving one out does not raise: the method's own
+    # "metering never breaks the call" guard swallows it and simply publishes
+    # nothing, which reads as a pricing bug (2026-11-07).
+    session._voice_turn_spend = {}
     session._bus = _FakeBus()
     session._active_model = model
     session._turn_trace_id = None
@@ -266,3 +300,58 @@ async def test_publish_live_usage_without_usage_is_silent() -> None:
     session = _bare_session({}, "gemini-3.1-flash-live-preview")
     await session._publish_live_usage()
     assert session._bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_voice_turn_spend_accumulates_across_model_turns() -> None:
+    """One spoken turn can cost several model turns; the voice turn owes their sum.
+
+    Measured 2026-11-07: a spoken session produced nine BrainTurnCompleted
+    events totalling 106k input tokens, while its VoiceTurnCompleted reported
+    tokens_in=0, tokens_out=0, cost_usd=0.0. The per-turn usage is cleared by
+    _publish_live_usage, so the voice turn has to be told as it goes.
+    """
+    session = _bare_session(
+        {"input_total": 10_000, "output_total": 100, "input_audio": 10_000},
+        "gemini-3.8-live",
+    )
+    await session._publish_live_usage()
+    session._turn_usage = {
+        "input_total": 2_000,
+        "output_total": 50,
+        "input_audio": 2_000,
+    }
+    await session._publish_live_usage()
+
+    spend = session._voice_turn_spend
+    assert spend["tokens_in"] == 12_000
+    assert spend["tokens_out"] == 150
+    # Both model turns were priced, so the spoken turn is not free.
+    assert spend["cost_usd"] > 0.0
+    # And it equals what the two published brain turns claimed.
+    assert spend["cost_usd"] == pytest.approx(
+        sum(e.cost_usd for e in session._bus.published)
+    )
+
+
+@pytest.mark.asyncio
+async def test_cached_input_is_discounted_not_billed_in_full() -> None:
+    """The cached tool catalog must cost a tenth, not the full input rate."""
+    full = _bare_session(
+        {"input_total": 12_000, "output_total": 100, "input_text": 12_000},
+        "gemini-3.8-live",
+    )
+    await full._publish_live_usage()
+
+    cached = _bare_session(
+        {
+            "input_total": 12_000,
+            "output_total": 100,
+            "input_text": 12_000,
+            "input_cached": 10_300,
+        },
+        "gemini-3.8-live",
+    )
+    await cached._publish_live_usage()
+
+    assert cached._bus.published[0].cost_usd < full._bus.published[0].cost_usd

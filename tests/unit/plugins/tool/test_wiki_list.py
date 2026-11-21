@@ -16,6 +16,8 @@ Hard-negatives:
   3. Meta/contract pages (``type: meta`` frontmatter) MUST be flagged so
      the model cannot mistake the schema contract for user content.
   4. An empty vault MUST produce an honest "empty" answer, not an error.
+  5. An absent vault MUST fail (success=False), distinct from empty, and
+     both states MUST name the vault root that was read (F-3).
 """
 from __future__ import annotations
 
@@ -67,6 +69,7 @@ async def test_wiki_list_lists_real_files_only(vault: Path) -> None:
     result = await tool.execute({}, ctx=None)
     assert result.success is True
     out = result.output
+    assert str(vault.resolve()) in out
     assert "entities/ruben.md" in out
     assert "projects/personal-jarvis.md" in out
     assert "log.md" in out
@@ -106,14 +109,20 @@ async def test_wiki_list_empty_vault_is_honest(tmp_path: Path) -> None:
     result = await tool.execute({}, ctx=None)
     assert result.success is True
     assert "empty" in result.output.lower()
+    assert str(tmp_path.resolve()) in result.output
+    assert "unavailable" not in (result.error or "").lower()
 
 
 @pytest.mark.asyncio
-async def test_wiki_list_missing_vault_is_honest(tmp_path: Path) -> None:
-    tool = WikiListTool(vault_root=tmp_path / "does-not-exist")
+async def test_wiki_list_missing_vault_is_absent_not_empty(tmp_path: Path) -> None:
+    missing = (tmp_path / "does-not-exist").resolve()
+    tool = WikiListTool(vault_root=missing)
     result = await tool.execute({}, ctx=None)
-    assert result.success is True
-    assert "empty" in result.output.lower() or "not" in result.output.lower()
+    assert result.success is False
+    assert "unavailable" in (result.error or "").lower()
+    assert str(missing) in (result.error or "")
+    assert "empty" not in (result.error or "").lower()
+    assert "empty" not in (result.output or "").lower()
 
 
 @pytest.mark.asyncio

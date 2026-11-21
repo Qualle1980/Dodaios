@@ -8602,6 +8602,20 @@
     "paid_usage": "在 {provider} / {model} 上的付费运行：实际 {cost}（预估 {estimate}，上限 {cap}）。",
     "paid_usage_automatic": "在 {provider} / {model} 上的自动付费运行：实际 {cost}（预估 {estimate}，上限 {cap}）。"
   },
+  "subagents": {
+    "requested": "已申请 {count} 个并行助手。",
+    "approved": "已批准 {count} 个助手。",
+    "refused": {
+      "single_helper": "助手被拒：一个助手不构成并行工作。",
+      "duplicate_tasks": "助手被拒：其中两个任务相同。",
+      "budget_spent": "助手被拒：本任务已无可用额度。",
+      "over_budget": "助手被拒：申请数量超过剩余数量。",
+      "repeat_batch": "助手被拒：同一批次已经运行过。",
+      "empty_task": "助手被拒：有一项任务为空。",
+      "no_task": "助手被拒：未指明任务。",
+      "other": "助手被拒。"
+    }
+  },
   "ide_projects": {
     "connect_failed": "无法连接此文件夹，请重试。",
     "choose_folder_error": "请选择一个文件夹以继续。",

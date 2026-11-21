@@ -72,24 +72,51 @@ describe("BoundedPcm16Queue", () => {
     expect(Array.from(rest)).toEqual(decoded([3_000, 4_000, 5_000, 6_000, 7_000]));
   });
 
-  it("drops the oldest samples on overrun and reports the drop", () => {
+  it("refuses the newest samples on overrun and keeps the playhead contiguous", () => {
+    // Measured 2026-11-13: Gemini Live can deliver ~6.8 s of PCM in <1 s of
+    // wall clock. Dropping the OLDEST samples to make room jumped the
+    // playhead mid-word; listeners heard that as words running over each
+    // other. Refusing what does not fit preserves the audio already queued.
     const queue = new BoundedPcm16Queue(4);
     queue.enqueue(pcm([1_000, 2_000, 3_000]));
 
     expect(queue.enqueue(pcm([4_000, 5_000, 6_000]))).toBe(2);
     const output = new Float32Array(4);
     queue.dequeueInto(output);
-    expect(Array.from(output)).toEqual(decoded([3_000, 4_000, 5_000, 6_000]));
+    expect(Array.from(output)).toEqual(decoded([1_000, 2_000, 3_000, 4_000]));
   });
 
-  it("retains only the newest tail of an oversized chunk", () => {
+  it("keeps the oldest prefix of an oversized chunk so playback stays contiguous", () => {
     const queue = new BoundedPcm16Queue(4);
     queue.enqueue(pcm([8_000, 9_000]));
 
     expect(queue.enqueue(pcm([1_000, 2_000, 3_000, 4_000, 5_000, 6_000]))).toBe(4);
     const output = new Float32Array(4);
     queue.dequeueInto(output);
-    expect(Array.from(output)).toEqual(decoded([3_000, 4_000, 5_000, 6_000]));
+    expect(Array.from(output)).toEqual(decoded([8_000, 9_000, 1_000, 2_000]));
+  });
+
+  it("a burst longer than the ring must not jump the playhead mid-stream", () => {
+    // Repro shape for the live overlap: play a little, then a burst that
+    // exceeds free space arrives. Advancing readIndex (drop-oldest) made the
+    // next quantum start hundreds of milliseconds later in the answer.
+    const capacity = 1_000;
+    const queue = new BoundedPcm16Queue(capacity);
+    queue.enqueue(pcm(Array.from({ length: capacity }, (_, i) => i + 1)));
+
+    const first = new Float32Array(100);
+    expect(queue.dequeueInto(first)).toBe(100);
+    expect(Array.from(first).map((value) => Math.round(value * 0x8000))).toEqual(
+      Array.from({ length: 100 }, (_, i) => i + 1),
+    );
+
+    expect(queue.enqueue(pcm(Array.from({ length: 500 }, (_, i) => i + 1_001)))).toBe(400);
+
+    const second = new Float32Array(100);
+    expect(queue.dequeueInto(second)).toBe(100);
+    expect(Array.from(second).map((value) => Math.round(value * 0x8000))).toEqual(
+      Array.from({ length: 100 }, (_, i) => i + 101),
+    );
   });
 
   it("flushes queued audio and writes silence on underrun", () => {
@@ -103,7 +130,7 @@ describe("BoundedPcm16Queue", () => {
     expect(queue.length).toBe(0);
   });
 
-  it("bounds a 48 kHz queue to ten seconds of PCM16", () => {
-    expect(playbackBufferSampleCount(48_000)).toBe(480_000);
+  it("bounds a 48 kHz queue to sixty seconds of PCM16", () => {
+    expect(playbackBufferSampleCount(48_000)).toBe(2_880_000);
   });
 });

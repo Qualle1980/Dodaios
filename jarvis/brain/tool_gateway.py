@@ -72,6 +72,41 @@ class BrainSupervisorToolGateway:
         self._lock = threading.Lock()
         self._fingerprint: tuple[tuple[str, int], ...] = ()
         self._catalog_version = 0
+        # Built on first use and then kept. A fresh VaultSearch pays the
+        # per-source index build -- 430.8 ms over the six configured sources,
+        # measured 2026-11-07 -- and ``_voice_tools()`` runs on every catalog
+        # read AND every execute, so building it per call would hand back the
+        # cost #119 moved to a boot warm-up.
+        self._voice_recall: Any | None = None
+        self._voice_recall_failed = False
+
+    def _voice_recall_tool(self) -> Any | None:
+        """The vault-search tool for a live call, built once per gateway.
+
+        ``None`` when the vault cannot be resolved: a call then loses this one
+        capability instead of its whole catalog, and the model is free to say
+        so honestly. The search is warmed on a background thread, never on the
+        caller's path (AP-26), the same way the router's injector is.
+        """
+        if self._voice_recall is not None or self._voice_recall_failed:
+            return self._voice_recall
+        try:
+            from jarvis.plugins.tool.wiki_recall import WikiRecallTool, _build_search_instance
+
+            search = _build_search_instance()
+            threading.Thread(
+                target=search.warm_up,
+                name="wiki-voice-warmup",
+                daemon=True,
+            ).start()
+            self._voice_recall = WikiRecallTool(search=search)
+        except Exception as exc:  # noqa: BLE001
+            # Said, not swallowed (AP-30). One attempt per gateway: a vault
+            # that cannot be resolved will not resolve on the next turn
+            # either, and retrying would re-pay the failure every call.
+            self._voice_recall_failed = True
+            log.warning("voice catalog: vault search unavailable — %s", exc)
+        return self._voice_recall
 
     def _live_tools(self) -> dict[str, Any]:
         tools = getattr(self._manager, "_tools", None)
@@ -171,10 +206,38 @@ class BrainSupervisorToolGateway:
         # The live prompt carries only a short product brief; exact how-to
         # answers come from the built-in guide on demand.
         tools["product_help"] = ProductHelpTool()
+        # Deployment identity for "are you on the server?" — same facts as
+        # /api/health; voice-only so the model cannot invent a host.
+        from jarvis.plugins.tool.runtime_location import RuntimeLocationTool
+
+        tools[RuntimeLocationTool.name] = RuntimeLocationTool()
         # A spoken "remember this" in a live call is saved while the call
         # runs, into the MEMORY.md every later conversation reads. Voice-only
         # like the tools above: the router stays a pure dispatcher (ADR-0011).
         tools["remember"] = RememberTool()
+        # ``remember`` writes the short-term MEMORY.md; this reads the
+        # long-term vault, including the read-only external sources where the
+        # workers' lessons live. Asked over a call whether it could reach the
+        # owner's Obsidian, the model said no (live 2026-11-07 21:22) -- and
+        # it was right: the tool is in the router list and was in no voice
+        # catalog, so the text brain could search the vault and a call could
+        # not. Read-only and safe-tier, like product_help.
+        recall = self._voice_recall_tool()
+        if recall is not None:
+            tools[recall.name] = recall
+        # ADR-0044: the personal memory vault's read side. Named here for the
+        # same reason as the wiki recall above - this catalog is hand-curated,
+        # so a tool the text brain gets from the entry points does not reach a
+        # call unless it is listed. "What do you know about me?" has to be
+        # answerable in a call, not only in the chat.
+        from jarvis.plugins.tool.memory_recall import (
+            MemoryHistoryTool,
+            MemorySearchTool,
+            MemoryTopicsTool,
+        )
+
+        for memory_tool in (MemorySearchTool(), MemoryHistoryTool(), MemoryTopicsTool()):
+            tools[memory_tool.name] = memory_tool
         # A voice carries a takeaway, not a table: exact content goes on screen.
         from jarvis.plugins.tool.show_on_screen import ShowOnScreenTool
 

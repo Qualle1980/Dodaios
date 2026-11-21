@@ -21,6 +21,17 @@ An install that never connected a subscription is unaffected: its keys stay
 usable for background work, so a single-key download keeps a working product
 (AGENTS.md "any single key must work").
 
+The rule had one cost its author did not intend. On an install that HAS
+connected a subscription but whose working credentials are free-tier API keys,
+background work waits for ever: the subscription is remembered, the keys are
+refused, and nothing is left. Measured 2026-11-10 — a full day of use and zero
+new memories, because the memory learning loop is background work. The owner can
+therefore state that an API key of theirs may do that work
+(``[brain] background_may_use_api_key``, :func:`api_keys_allowed`). That switch
+widens WHO may be billed; it names no provider and no model, and it is not a
+capability gate, because whether an account sits on a free tier is not
+observable from here. It is off by default (AP-23).
+
 Provider membership comes from the provider cards' billing mode, never a name
 list (AP-21), so a new subscription CLI or local runtime joins by shipping a
 card.
@@ -127,6 +138,9 @@ def subscription_capable(provider: str) -> bool:
 
 
 def keyless_local(provider: str) -> bool:
+    # Ollama is never an automatic successor of a plan seat (Ahmad 2026-11-17).
+    if provider == "ollama":
+        return False
     return _billing(provider) == "local"
 
 
@@ -220,6 +234,27 @@ def subscription_mode(candidates: Iterable[str] = ()) -> bool:
     return any(ts >= cutoff for ts in _read_markers().values())
 
 
+def api_keys_allowed() -> bool:
+    """Whether the owner has said an API key of theirs may do background work.
+
+    ``[brain] background_may_use_api_key``. This is not a capability probe and
+    names no provider: whether an API account sits on a free tier, or a Google
+    Cloud project has billing enabled, is not observable from here — only the
+    account holder knows. Default false, so an arbitrary downloader keeps the
+    protection (AP-23).
+
+    An unreadable configuration answers *false*: the safe direction is to wait
+    rather than to bill.
+    """
+    try:
+        from jarvis.core.config import load_config
+
+        return bool(getattr(load_config().brain, "background_may_use_api_key", False))
+    except Exception:  # noqa: BLE001 — an unreadable config must not open the purse
+        log.debug("background policy: config unreadable, API keys stay disallowed", exc_info=True)
+        return False
+
+
 def background_providers(
     candidates: Iterable[str], *, primary: str | None = None
 ) -> BackgroundProviders:
@@ -235,6 +270,7 @@ def background_providers(
     ordered = seat_successors(primary, ordered)
     if not subscription_mode(ordered):
         return BackgroundProviders(False, tuple(ordered), "no subscription connected")
+    api_ok = api_keys_allowed()
     allowed: list[str] = []
     for name in ordered:
         billing = _billing(name)
@@ -244,8 +280,57 @@ def background_providers(
             allowed.append(name)
         elif billing == "subscription_or_api" and login_state(name) is True:
             allowed.append(name)
-    reason = "subscriptions and local models only" if allowed else (
-        "subscription connected but not usable right now; waiting instead of using an API key"
+        elif billing == "api" and api_ok:
+            # The owner has said an API key of theirs may do background work.
+            # Without this, an install whose only credentials are free-tier API
+            # keys has no background worker at all: the learning loop defers for
+            # ever and the assistant never learns about its user again (measured
+            # 2026-11-10 — a full day of use, zero new memories).
+            allowed.append(name)
+    if allowed:
+        reason = (
+            "subscriptions, local models and the API keys you allowed"
+            if api_ok
+            else "subscriptions and local models only"
+        )
+    elif api_ok:
+        reason = "no subscription, local model or allowed API key is usable right now"
+    else:
+        reason = (
+            "subscription connected but not usable right now; waiting instead of using an API key"
+        )
+    return BackgroundProviders(True, tuple(allowed), reason)
+
+
+def chat_fallback_providers(
+    candidates: Iterable[str], *, primary: str
+) -> BackgroundProviders:
+    """Providers that may stand in for a failed person-started chat pick.
+
+    A typed turn is work the person started, so every seat-allowed candidate
+    may answer — including API-key cards from the resolver chain. Known-
+    disconnected subscription logins (``login_state`` is ``False``) are
+    skipped instead of being called into a certain failure. Keyless local
+    runtimes stay after every cloud stand-in. A plan seat keeps the stricter
+    :func:`seat_successors` rule from PR #4. Background work keeps the
+    separate :func:`background_providers` gate and never inherits this list.
+    """
+    ordered = seat_successors(primary, dict.fromkeys(name for name in candidates if name))
+    cloud: list[str] = []
+    local: list[str] = []
+    for name in ordered:
+        billing = _billing(name)
+        if billing.startswith("subscription") and login_state(name) is False:
+            continue
+        if billing == "local":
+            local.append(name)
+        else:
+            cloud.append(name)
+    allowed = cloud + local
+    reason = (
+        "every reachable seat-allowed stand-in, cloud before local"
+        if allowed
+        else "no reachable stand-in is usable right now"
     )
     return BackgroundProviders(True, tuple(allowed), reason)
 
@@ -262,6 +347,7 @@ __all__ = [
     "BackgroundDeferred",
     "BackgroundProviders",
     "background_providers",
+    "chat_fallback_providers",
     "forget",
     "keyless_local",
     "seat_bound",

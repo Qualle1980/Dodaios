@@ -6,10 +6,12 @@ import pytest
 
 from jarvis.brain.action_honesty import (
     action_not_started_phrase,
+    claimed_result_families,
     has_deferred_action_claim,
     has_false_completion_claim,
     has_unbacked_action_claim,
     replace_unbacked_action_claim,
+    unbacked_result_families,
 )
 from jarvis.brain.manager import BrainManager
 from jarvis.core.bus import EventBus
@@ -343,3 +345,131 @@ def test_a_send_off_alone_does_not_rescue_a_false_completion() -> None:
         )
         is True
     )
+
+
+def test_wiki_ingest_does_not_license_a_documents_claim() -> None:
+    """Live 2026-11-11 E1: wiki_ingest success must not clear a docs claim.
+
+    The unfixed guard returned the spoken lie unchanged whenever ANY tool
+    had run. This assertion is red on origin/main and green with
+    claim-scoped evidence (uses only the pre-existing public API so the
+    base run can collect the test).
+    """
+    text = "Your full name was successfully entered into the documents."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"jarvis_wiki_ingest"},
+        language="en",
+    )
+    assert honest != text
+
+
+def test_matching_repo_tools_ground_a_documents_claim() -> None:
+    text = "Your full name was successfully entered into the documents."
+    assert (
+        replace_unbacked_action_claim(
+            text,
+            executed_tools={"workspace-git"},
+            language="en",
+        )
+        == text
+    )
+
+
+def test_ui_navigation_does_not_license_an_acceptance_claim() -> None:
+    """Live 2026-11-11 E2: finding an app action is not acceptance evidence."""
+    text = "The result has been accepted."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"wiki_list", "find_app_action", "run_app_action"},
+        language="en",
+    )
+    assert honest != text
+
+
+def test_failed_tool_forces_an_honest_failure_clause() -> None:
+    """A success narration while any tool failed must not reach the user.
+
+    Live 2026-11-11 E1/E2 showed "A tool action failed" in the UI while the
+    spoken answer claimed success. Matching evidence for the claim is not
+    enough when the turn also recorded a failure.
+    """
+    text = "I'm playing you a playlist of 2010s hits."
+    honest = replace_unbacked_action_claim(
+        text,
+        executed_tools={"youtube_music"},
+        failed_tools={"screen_snapshot"},
+        language="en",
+    )
+    assert honest != text
+    assert "failed" in honest.lower()
+
+
+def test_failed_tool_keeps_a_reply_that_already_names_the_failure() -> None:
+    text = "YouTube Music failed; I could not start the playlist."
+    assert (
+        replace_unbacked_action_claim(
+            text,
+            executed_tools=(),
+            failed_tools={"youtube_music"},
+            language="en",
+        )
+        == text
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Declined and singular German forms, and both word orders. Each of
+        # these escaped the single "in (die|den|das) dokumente" form and was  # i18n-allow: quoted DE pattern
+        # measured as an unnoticed pass on 2026-11-13.
+        "Ich habe die Zeile in docs hinzugefügt.",  # i18n-allow: German runtime fixture
+        "Die Zeile wurde erfolgreich in das Dokument eingefügt.",  # i18n-allow: German runtime fixture
+        "Die Testmarke steht jetzt in den Dokumenten.",  # i18n-allow: German runtime fixture
+        "Ich habe das in den Unterlagen ergänzt.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_german_write_claim_is_unbacked_after_only_a_vault_note(text: str) -> None:
+    """A wiki note never licenses "it is in the documents", whatever the case.
+
+    The family matched only one spelling, so three natural German phrasings
+    reported success with no document write behind them.
+    """
+    assert claimed_result_families(text) == ("documents_written",)
+    assert unbacked_result_families(text, {"wiki_ingest", "remember"}) == (
+        "documents_written",
+    )
+    assert unbacked_result_families(text, {"workspace-orchestrate"}) == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # "hat die Abnahme bestanden" carries the claim in a noun: the
+        # "(wurde|ist) bestanden" form never saw it.  # i18n-allow: quoted DE pattern
+        "Das Ergebnis hat die Abnahme bestanden.",  # i18n-allow: German runtime fixture
+        "Die Abnahme ist erfolgreich.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_german_acceptance_claim_needs_acceptance_evidence(text: str) -> None:
+    assert claimed_result_families(text) == ("accepted",)
+    assert unbacked_result_families(text, {"wiki_list"}) == ("accepted",)
+    assert unbacked_result_families(text, {"workspace-git", "pytest"}) == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Reading, asking and denying are not write claims. Requiring a write
+        # verb (or "steht in") is what keeps the widened family honest.
+        "Ich habe in den Dokumenten gesucht und nichts gefunden.",  # i18n-allow: German runtime fixture
+        "Soll ich das in die Dokumente schreiben?",  # i18n-allow: German runtime fixture
+        "In den Dokumenten steht dazu nichts.",  # i18n-allow: German runtime fixture
+        "Ich kann docs nicht bearbeiten; ich habe nichts geschrieben.",  # i18n-allow: German runtime fixture
+        "Die Abnahme steht noch aus.",  # i18n-allow: German runtime fixture
+        "Das ist nur eine Notiz im Gedächtnis, nicht die Dokumente.",  # i18n-allow: German runtime fixture
+    ],
+)
+def test_reading_or_refusing_is_not_a_result_claim(text: str) -> None:
+    assert claimed_result_families(text) == ()

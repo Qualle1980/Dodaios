@@ -280,12 +280,13 @@ POLISH_FAMILIES: Final[tuple[PolishFamily, ...]] = (
             "google_aistudio_api_key",
             "google_api_key",
         ),
-        # Verified 2026-08-20 against the live AI Studio catalog. The formatter
-        # stays on the lite tier, where it belongs, but on the CURRENT
-        # generation of it — the 3.1 build that used to sit here is two
-        # generations behind a list that already serves 3.5, 3.6 and 3.7.
+        # Re-checked 2026-11-06 against the live AI Studio catalog. The
+        # formatter stays on the lite tier, where it belongs. The translator
+        # moved off ``gemini-3.7-flash``: that id is no longer in Google's
+        # model list, so every translation it was asked for would have failed.
+        # Re-check on sight - a model id verified once decays silently.
         default_model="gemini-3.5-flash-lite",
-        translate_model="gemini-3.7-flash",
+        translate_model="gemini-3.8-flash",
         default_timeout_ms=1500,
     ),
     PolishFamily(

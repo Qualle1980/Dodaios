@@ -191,3 +191,48 @@ def test_schema_offers_window_and_screen_and_nothing_wider() -> None:
     assert schema["additionalProperties"] is False
     assert schema["properties"]["scope"]["enum"] == ["window", "screen"]
     assert "scope" not in schema.get("required", []), "the window stays the default"
+
+
+async def test_a_capture_the_user_asked_to_see_opens_the_gallery(wired) -> None:
+    """``show_me`` puts the picture in front of them, not only in the record.
+
+    Live 2026-11-14: asked in German to show the window on screen, the call took
+    the appshot and answered that it was "available". The user saw nothing until
+    they asked where it was, and the model then opened the same gallery through
+    ``navigate`` -- so the destination was right and only the step was missing.
+    """
+    # Failed on: "Zeig mal das Fenster auf dem Bildschirm."  # i18n-allow: the utterance
+    _service, bus, _state = wired
+
+    result = await AppshotTool().execute({"show_me": True}, _ctx())
+
+    assert result.success
+    assert result.output["shown_to_user"] is True
+    sections = [
+        event.section for event in bus.events if type(event).__name__ == "NavigateSidebar"
+    ]
+    assert sections == ["appshots"], "the gallery that holds it is the one that opens"
+
+
+async def test_a_capture_for_the_model_alone_leaves_the_screen_alone(wired) -> None:
+    """Looking at the window is not a request to be shown anything."""
+    _service, bus, _state = wired
+
+    result = await AppshotTool().execute({}, _ctx())
+
+    assert result.success
+    assert result.output["shown_to_user"] is False
+    assert [e for e in bus.events if type(e).__name__ == "NavigateSidebar"] == []
+
+
+async def test_the_whole_screen_can_be_shown_too(wired) -> None:
+    _service, bus, _state = wired
+
+    result = await AppshotTool().execute({"scope": "screen", "show_me": True}, _ctx())
+
+    assert result.success
+    assert result.output["shown_to_user"] is True
+    sections = [
+        event.section for event in bus.events if type(event).__name__ == "NavigateSidebar"
+    ]
+    assert sections == ["appshots"]

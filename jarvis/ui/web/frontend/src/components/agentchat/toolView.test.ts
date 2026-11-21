@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentToolView,
+  cachedTokens,
   formatTokens,
   inputSummary,
+  inputTokens,
   outputTokens,
   shortenPath,
 } from "@/components/agentchat/toolView";
@@ -106,6 +108,39 @@ describe("token formatting", () => {
     expect(outputTokens({ output: 7 })).toBe(7);
     expect(outputTokens(null)).toBeNull();
     expect(outputTokens({})).toBeNull();
+  });
+
+  /*
+   * Input is the bill, and it was the one number no receipt showed.
+   *
+   * Measured live 2026-10-31: twelve chat turns on a plan seat ran
+   * 16_356-17_156 input tokens against 68-179 output, and later turns reached
+   * 32_956 input. The receipt printed the output alone and no price, because a
+   * plan seat prices at $0 and the old receipt was gated on costUsd > 0. So the
+   * surface spending the plan window was the only one that never said so.
+   */
+  it("reads the input side, in every shape a brain sends", () => {
+    expect(inputTokens({ input_tokens: 16356 })).toBe(16356);
+    expect(inputTokens({ input: 12 })).toBe(12);
+    expect(inputTokens({ prompt_tokens: 9 })).toBe(9);
+    expect(inputTokens(null)).toBeNull();
+    expect(inputTokens({})).toBeNull();
+    expect(inputTokens({ output_tokens: 104 })).toBeNull();
+  });
+
+  it("reads the cached share, so a cache that stopped working is visible", () => {
+    expect(cachedTokens({ cache_hit_tokens: 33536 })).toBe(33536);
+    expect(cachedTokens({ cached_tokens: 1 })).toBe(1);
+    expect(cachedTokens({ cache_read_input_tokens: 2 })).toBe(2);
+    expect(cachedTokens({ input_tokens: 500 })).toBeNull();
+    expect(cachedTokens(null)).toBeNull();
+  });
+
+  it("the live turn shape: input dwarfs output", () => {
+    const usage = { input_tokens: 16356, output_tokens: 179, cache_hit_tokens: 0 };
+    expect(inputTokens(usage)).toBe(16356);
+    expect(outputTokens(usage)).toBe(179);
+    expect(formatTokens(inputTokens(usage)!)).toBe("16.4k");
   });
 });
 

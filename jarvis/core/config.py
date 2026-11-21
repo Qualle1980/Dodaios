@@ -1646,6 +1646,25 @@ class BrainConfig(BaseModel):
     local_fallback_model: str = "claude-haiku-4-5-20251001"
     providers: dict[str, BrainProviderConfig] = Field(default_factory=dict)
     policy: BrainPolicyConfig = Field(default_factory=BrainPolicyConfig)
+    # Background work (memory curation, anything a timer starts) normally runs
+    # on subscriptions and free local models only, and WAITS rather than touch a
+    # per-token API key — the rule that stopped ~5 EUR vanishing overnight
+    # (jarvis/brain/background_policy.py). On an install whose only credentials
+    # are free-tier API keys that rule has a cost the maintainer did not intend:
+    # the learning loop never runs at all, so the assistant stops learning about
+    # its user. Measured 2026-11-10: zero new memories in a full day of use.
+    #
+    # Setting this to true says "an API key of mine may do background work". It
+    # is the owner's statement about their own billing, which no probe can
+    # observe: whether a Google Cloud project has billing enabled, or an API
+    # account sits on a free tier, is not visible from here. It is NOT a
+    # capability gate and deliberately names no provider and no model (AP-21) —
+    # it widens WHO may be billed, not WHAT may be chosen.
+    #
+    # Default false, because the arbitrary downloader must keep the protection
+    # (AP-23). Turning it on is a decision about money, so it belongs to the
+    # person paying.
+    background_may_use_api_key: bool = False
     # Per-response output ceiling (tokens) for every spoken/chat reply. This is
     # a SAFETY CEILING, not a target: the model still stops on its own
     # (``finish_reason == "stop"``), so a short question keeps its short answer.
@@ -1954,6 +1973,17 @@ class JarvisLearningConfig(BaseModel):
     timeout_s: float = Field(default=90.0, ge=5.0, le=600.0)
 
 
+class VaultMemoryConfig(BaseModel):
+    """The personal memory vault (ADR-0044).
+
+    ``enabled`` is the off switch: with it false nothing is written to
+    ``data/memory/vault.db`` and no memory reaches a prompt. It is read by
+    :func:`jarvis.memory.vault.runtime.vault_enabled`.
+    """
+
+    enabled: bool = True
+
+
 class MemoryConfig(BaseModel):
     recall_store: str = "sqlite"
     # chromadb was removed (2026-06-28); there is no chroma backend in
@@ -1963,6 +1993,7 @@ class MemoryConfig(BaseModel):
     retention_days_recall: int = 90
     data_dir: str = "./data"
     wiki: WikiMemoryConfig = Field(default_factory=WikiMemoryConfig)
+    vault: VaultMemoryConfig = Field(default_factory=VaultMemoryConfig)
     legacy_curator: LegacyCuratorConfig = Field(default_factory=LegacyCuratorConfig)
     learning: JarvisLearningConfig = Field(default_factory=JarvisLearningConfig)
 
@@ -3231,6 +3262,7 @@ class WikiIntegrationConfig(BaseModel):
     # Read-only folders recall searches next to vault_root: path strings or
     # { name, path } tables. Never written — see memory/wiki/external_sources.
     external_sources: list[Any] = Field(default_factory=list)
+    verified_only: bool = False
     subscribe_idle: bool = True  # listen for IdleEntered
     fallback_to_direct_ingest: bool = True  # when scheduler is missing
 

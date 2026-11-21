@@ -716,6 +716,11 @@ class ActionExecuted(Event):
     # ToolExecutor before publish (``jarvis.core.redact.safe_preview``) so no
     # raw secret reaches the bus / session DB / local diary.
     output_preview: str = ""
+    # Who authorized this run ("user", "bypass", "explicit-intent", a scoped
+    # authorizer id, …). Default empty so older constructions keep working;
+    # decision 0002 requires the field so an audit can say who approved a
+    # deletion.
+    approved_by: str = ""
 
 
 # ----------------------------------------------------------------------
@@ -1914,6 +1919,13 @@ class BrainTurnCompleted(Event):
     #: share) so the ledger can price a voice session honestly — one that
     #: re-sends its whole context every turn is mostly cache hits.
     tokens_cached: int = 0
+    #: Of ``tokens_in`` / the output, the part that was AUDIO. A realtime
+    #: provider bills audio at roughly four times its own text rate, so this
+    #: split is what sets the price -- and without it a recorded turn cannot
+    #: be re-derived, nor checked against the provider's own token counter.
+    #: Zero for every text provider.
+    tokens_in_audio: int = 0
+    tokens_out_audio: int = 0
     cost_usd: float = 0.0
     text_len: int = 0
     finish_reason: str = ""

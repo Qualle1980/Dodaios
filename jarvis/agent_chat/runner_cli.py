@@ -81,7 +81,7 @@ from jarvis.agent_chat.effort import (
     snap_to_ladder,
 )
 from jarvis.agent_chat.events import make_event
-from jarvis.agent_chat.permissions import default_permission, normalize_permission
+from jarvis.agent_chat.permissions import default_permission, is_bypass, normalize_permission
 from jarvis.agent_chat.questions import (
     CANCELLED,
     UNATTENDED,
@@ -979,13 +979,17 @@ def read_codex_models(*, required_model: str = "") -> list[dict[str, Any]] | Non
 
     Config-isolation flags belong to ``codex exec`` and are not accepted by
     ``codex app-server``. Discovery only reads model/list; it starts no turn.
+    Uses the 15 s listing budget (research 2026-11-17: the prior 8 s default
+    timed out on this PC and refused every model via a cached ``None``).
     """
+    from jarvis.agentic_ide.model_lists import CODEX_LIST_TIMEOUT_S
+
     env = _account_env("codex")
     argv = codex_argv_prefix()
     cwd = _catalog_cwd()
     rows = _CODEX_CATALOG.read(
         catalog_key(argv, env, cwd),
-        lambda: discover_codex_models(argv, env, cwd),
+        lambda: discover_codex_models(argv, env, cwd, timeout_s=CODEX_LIST_TIMEOUT_S),
         required_model=required_model,
     )
     _remember_models("codex-cli", rows)
@@ -3240,6 +3244,8 @@ async def run_cli_turn(
             resume=resume,
             with_file=(runner in _CLAUDE_CODE_RUNNERS),
             prompt_override=prompt_override,
+            provider=getattr(session, "provider", ""),
+            model=getattr(session, "model", None),
         )
         if bridge is not None:
             from jarvis.agent_chat.approval_bridge import ChatGrant
@@ -3301,6 +3307,8 @@ async def run_cli_turn(
                     resume=None,
                     with_file=(runner in _CLAUDE_CODE_RUNNERS),
                     prompt_override=prompt_override,
+                    provider=getattr(session, "provider", ""),
+                    model=getattr(session, "model", None),
                 )
             outcome = await _run_cli_once(
                 handle, user_text, runner, None, identity=ident, bridge=bridge
@@ -3916,6 +3924,24 @@ async def _drive_cli(
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:
             log.debug("agent chat %s: stdin write failed: %s", handle.turn_id, exc)
 
+    def _cli_bypasses(tool_name: str, tool_input: dict[str, Any]) -> bool:
+        """Whether this session's mode answers a CLI permission prompt itself.
+
+        Read from the mode the CLI was planned with (a plain chat runs
+        read-only whatever the session says). A society session's
+        explicit-approval rules still ask, as the approval bridge does.
+        """
+        from jarvis.agent_chat import plain_chat
+
+        mode = plain_chat.permission_mode(handle, runner, session.permission_mode)
+        if not is_bypass(mode):
+            return False
+        if session.surface == "society":
+            from jarvis.society.surface import requires_explicit_approval
+
+            return not requires_explicit_approval(session.session_id, tool_name, tool_input)
+        return True
+
     async def _answer_control_request(obj: dict[str, Any]) -> None:
         """A Claude Code ``control_request`` — a permission prompt — answered
         from the chat's approval card. Anything that is not ``can_use_tool``
@@ -3954,7 +3980,16 @@ async def _drive_cli(
                     )
                 )
                 summary = "Plan ready — approve to start building"
-            decision = await handle.request_approval(call_id, tool_name, tool_input, summary)
+            if tool_name != "ExitPlanMode" and _cli_bypasses(tool_name, tool_input):
+                # Bypass asks nothing (AGENTS.md §2). The CLI was launched with
+                # bypassPermissions yet still sent a prompt; a card here would
+                # stall the CLI on a question the person already answered by
+                # picking Bypass. A plan's approval is not a permission prompt.
+                decision = "allow"
+            else:
+                decision = await handle.request_approval(
+                    call_id, tool_name, tool_input, summary
+                )
             message = (
                 "The person declined this action."
                 if decision == "deny"

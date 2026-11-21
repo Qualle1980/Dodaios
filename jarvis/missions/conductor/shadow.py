@@ -25,12 +25,15 @@ from typing import Any, Final
 from ..events import EventEnvelope, MissionDispatched, WorkerSpawned
 from ..stream_evidence import clean_request_body
 from .lanes import first_lane
+from .leads import resolve_executor, roster
 from .lessons import LessonStore
 from .loop import Ask, Conductor
 
 logger = logging.getLogger(__name__)
 
-#: The executors the conductor may name, and what each is for (ADR-0043 lanes).
+#: The one executor the conductor may name when the USER named it: a worker
+#: the user delegated to is conducted alone, outside the lead roster
+#: (:mod:`.requested`, :mod:`.leads`).
 TEAM: Final[dict[str, str]] = {
     "conductor": "you yourself: answer knowledge questions, summaries and plans "
                  "without any worker (cheapest, fastest)",
@@ -84,7 +87,7 @@ def bind_conductor_shadow(
             if ask is None:
                 logger.info("conductor shadow: no subscription seat, %s not previewed", mission_id)
                 return
-            conductor = Conductor(ask, TEAM, lessons=lessons.render(lane))
+            conductor = Conductor(ask, roster(request), lessons=lessons.render(lane))
             preview = await conductor.preview(request)
         except Exception:  # noqa: BLE001 - shadow mode must never cost the order
             logger.warning("conductor shadow: preview failed for %s", mission_id, exc_info=True)
@@ -93,13 +96,15 @@ def bind_conductor_shadow(
         await asyncio.to_thread(log.write, {
             "kind": "preview", "mission_id": mission_id, "request": request[:500],
             "lane": lane,
-            "conductor_executor": first.next_executor.answer if first else None,
+            "conductor_lead": first.next_executor.answer if first else None,
+            "conductor_executor": (
+                resolve_executor(first.next_executor.answer, request) if first else None),
             "conductor_instruction": first.instruction.answer[:500] if first else None,
             "satisfied_without_work": bool(first and first.is_request_satisfied.answer),
             "plan": preview.plan[:1500],
             "seconds": round(time.monotonic() - started, 1),
         })
-        logger.info("conductor shadow: %s lane=%s conductor would start with %s",
+        logger.info("conductor shadow: %s lane=%s conductor would start with lead %s",
                     mission_id, lane, first.next_executor.answer if first else "nothing")
 
     async def _handler(env: EventEnvelope) -> None:

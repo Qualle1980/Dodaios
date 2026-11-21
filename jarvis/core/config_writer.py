@@ -24,12 +24,15 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import tomlkit
 from tomlkit import TOMLDocument
 
+from . import file_lock
 from .config import (
     DEFAULT_CONFIG_FILE,
     OLLAMA_MODEL_OPTION_KEYS,
@@ -59,7 +62,73 @@ class WriteReceipt:
     baseline_path: str
 
 
-_WRITE_LOCK = threading.Lock()
+class _WriteGuard:
+    """Serialise a read-modify-write of a config file against every other writer.
+
+    Two layers, because one does not reach the other's writers:
+
+    * ``threading.Lock`` keeps the writers of THIS interpreter apart. It is one
+      reentrant lock, so one thread may guard two files at once — a
+      ``jarvis.toml`` write that also syncs the drift baseline.
+    * :func:`jarvis.core.file_lock.locked` keeps OTHER PROCESSES out. The
+      desktop app, the ``jarvis`` CLI, agent sessions and mission workers each
+      run their own interpreter; before this lock existed, two of them writing
+      at once silently lost each other's keys — each wrote back a whole
+      document it had read before the other's rename, and both reported
+      success. ``_assert_no_top_level_loss`` did not catch it, because no
+      top-level section disappeared: the losses were inside them.
+
+    Use ``with _WRITE_LOCK(path):`` around read AND write. The bare
+    ``with _WRITE_LOCK:`` form guards the resolved default config file.
+
+    Reentrant per thread and path, so a setter holding the guard may call
+    another writer that takes it again for the same file. The file lock is
+    taken once, at the outermost entry: an OS lock is not reentrant.
+    """
+
+    def __init__(self) -> None:
+        # Reentrant so one thread can guard two different files at once (a
+        # jarvis.toml write that also syncs the drift baseline).
+        self._thread_lock = threading.RLock()
+        self._depth = threading.local()
+
+    def _depths(self) -> dict[str, int]:
+        held = getattr(self._depth, "held", None)
+        if held is None:
+            held = {}
+            self._depth.held = held
+        return held
+
+    @contextmanager
+    def __call__(self, path: Path) -> Iterator[None]:
+        key = _snapshot_key(Path(path))
+        depths = self._depths()
+        if depths.get(key):
+            # Already ours: the file lock is held by the outer entry.
+            depths[key] += 1
+            try:
+                yield
+            finally:
+                depths[key] -= 1
+            return
+        with self._thread_lock, file_lock.locked(Path(path)):
+            depths[key] = 1
+            try:
+                yield
+            finally:
+                depths[key] = 0
+
+    def __enter__(self) -> None:
+        from .config import resolve_config_path  # noqa: PLC0415 - avoids an import cycle
+
+        self._fallback = self(resolve_config_path())
+        self._fallback.__enter__()
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._fallback.__exit__(*exc_info)  # type: ignore[arg-type]
+
+
+_WRITE_LOCK = _WriteGuard()
 _ATOMIC_REPLACE_RETRY_DELAYS_S = (0.0, 0.025, 0.05, 0.1, 0.2, 0.4)
 _BOM = "﻿"
 
@@ -139,6 +208,35 @@ def set_brain_primary(name: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     _patch_table(path, "brain", "primary", name)
     # Layers 2 + 3 — best-effort, never raise.
     _sync_brain_primary_drift_soll(name)  # i18n-allow
+
+
+def set_background_may_use_api_key(
+    allowed: bool, *, path: Path = DEFAULT_CONFIG_FILE
+) -> None:
+    """Set ``[brain] background_may_use_api_key``: may an API key of the owner's
+    do work nobody asked for.
+
+    Background work normally runs on subscriptions and free local models only
+    and WAITS rather than touch a per-token key
+    (:mod:`jarvis.brain.background_policy`). On an install whose only usable
+    credentials are free-tier API keys that leaves nothing at all, so the memory
+    learning loop defers for ever and the assistant stops learning about its
+    user.
+
+    This is the AUTHORITATIVE writer for that choice, so nobody has to hand-edit
+    ``jarvis.toml`` for it (AGENTS.md §2, AP-7). Only layer 1 is written: unlike
+    the provider choice, this key has no drift-guard desired-state entry and no
+    ``JARVIS__``-prefixed environment override, so writing the other two layers
+    would invent state nothing reads. If either is ever added for this field,
+    mirror :func:`set_brain_primary` here.
+
+    An absent config file is CREATED empty, with a warning naming the path —
+    the shared behaviour of ``_ensure_writable_config_path`` for a first run on
+    a fresh machine. Verified rather than assumed: the sibling writers'
+    docstrings claim a ``FileNotFoundError`` here, and that is no longer what
+    happens.
+    """
+    _patch_table(path, "brain", "background_may_use_api_key", bool(allowed))
 
 
 def set_worker_provider(
@@ -238,7 +336,7 @@ def set_tool_model_selection(
         raise ValueError("An automatic Tool Model selection cannot pin a model.")
 
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -362,7 +460,7 @@ def migrate_worker_tier_table(*, path: Path = DEFAULT_CONFIG_FILE) -> bool:
             path = resolve_config_path()
         if not path.exists():
             return False
-        with _WRITE_LOCK:
+        with _WRITE_LOCK(path):
             raw = path.read_text(encoding="utf-8")
             had_bom = raw.startswith(_BOM)
             if had_bom:
@@ -570,7 +668,7 @@ def set_stt_provider_model(
     value = str(model or "").strip()
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -632,7 +730,7 @@ def set_tts_cartesia_model(model: str, *, path: Path = DEFAULT_CONFIG_FILE) -> N
     in config-soll, so a plain atomic TOML write suffices (no drift-guard revert).  # i18n-allow
     """
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -755,7 +853,7 @@ def migrate_dictation_hotkey_defaults(*, path: Path = DEFAULT_CONFIG_FILE) -> bo
             # gets the code defaults, and the marker is written the first time
             # anything else touches the file.
             return False
-        with _WRITE_LOCK:
+        with _WRITE_LOCK(path):
             raw = path.read_text(encoding="utf-8")
             had_bom = raw.startswith(_BOM)
             if had_bom:
@@ -979,7 +1077,7 @@ def set_screen_context_settings(
     if not values:
         return
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1019,7 +1117,7 @@ def set_appshot_settings(
     if not values:
         return
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1072,7 +1170,7 @@ def set_jarvisx_settings(
     if not values:
         return
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1310,6 +1408,26 @@ def set_wiki_vault_root(vault_root: str, *, path: Path = DEFAULT_CONFIG_FILE) ->
     _patch_table(path, "wiki_integration", "vault_root", vault_root)
 
 
+def set_wiki_verified_only(
+    enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE
+) -> None:
+    """Persist ``[wiki_integration] verified_only`` in jarvis.toml (AP-7).
+
+    The reader half of the vault governance gate (#157): when enabled, a
+    recall hit from the Agent-Learnings source must carry ``status:
+    verified``. The only writer of this key — editing jarvis.toml by hand
+    is what AP-7 forbids.
+
+    Same TOML-only rationale as :func:`set_wiki_vault_root`:
+    ``wiki_integration`` is not tracked in ``config-soll.json``, so  # i18n-allow
+    the drift-guard never reverts it. Takes effect on the next app restart —
+    a ``VaultSearch`` built at boot keeps the flag it was constructed with.
+    """
+    if not isinstance(enabled, bool):
+        raise TypeError("verified_only must be a bool")
+    _patch_table(path, "wiki_integration", "verified_only", enabled)
+
+
 def set_overlay_style(style: str, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     """Persist the on-screen overlay style to ``[ui] orb_style`` in jarvis.toml.
 
@@ -1391,7 +1509,7 @@ def set_realtime_voice_selection(
     if normalized_mode not in {"pipeline", "realtime"}:
         raise ValueError("Voice mode must be 'pipeline' or 'realtime'.")
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1442,7 +1560,7 @@ def migrate_removed_codex_realtime_provider(*, path: Path = DEFAULT_CONFIG_FILE)
         return False
 
     removed = "codex-subscription-realtime"
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1771,7 +1889,7 @@ def set_telegram_enabled(enabled: bool, *, path: Path = DEFAULT_CONFIG_FILE) -> 
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1803,7 +1921,7 @@ def add_telegram_allowed_user_id(user_id: int, *, path: Path = DEFAULT_CONFIG_FI
     path = _ensure_writable_config_path(path)
 
     uid = int(user_id)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1841,7 +1959,7 @@ def add_discord_allowed_user_id(user_id: int, *, path: Path = DEFAULT_CONFIG_FIL
     path = _ensure_writable_config_path(path)
 
     uid = int(user_id)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1881,7 +1999,7 @@ def _set_integration_value(
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -1953,7 +2071,7 @@ def set_brain_provider_defaults(
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2190,7 +2308,7 @@ def _patch_tts_block(path: Path, provider: str, defaults: dict[str, str]) -> dic
     whitelist = _VOICES_FOR_PROVIDER.get(provider.lower())
     applied: dict[str, str] = {"provider": provider}
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2292,7 +2410,7 @@ def set_brain_provider_model(
     ):
         return WriteReceipt(toml_ok=True, baseline_ok=True, baseline_path=str(baseline_path))
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2420,7 +2538,7 @@ def set_provider_base_url(
     path = _ensure_writable_config_path(path)
     cleaned = (base_url or "").strip()
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2488,12 +2606,59 @@ def _provider_block(doc: TOMLDocument, provider: str) -> tomlkit.items.Table:
     return block
 
 
+class StaleConfigWriteError(RuntimeError):
+    """The file changed under us between the read and the write, so nothing was written.
+
+    Our own writers cannot cause this: :class:`_WriteGuard` keeps them apart
+    across processes. What can is an editor outside Dodaios — someone saving
+    ``jarvis.toml`` in VS Code while a write is in flight. Clobbering their save
+    would lose a hand-edit silently, so the write is refused and the caller
+    retries on the new content.
+    """
+
+
+#: What :func:`_read_doc` last read per file, so :func:`_atomic_write` can tell
+#: whether the file is still the one the caller modified. Keyed by resolved path.
+_READ_SNAPSHOTS: dict[str, str] = {}
+
+
+def _snapshot_key(path: Path) -> str:
+    try:
+        return str(Path(path).resolve())
+    except OSError:  # a path we cannot resolve is one we cannot compare
+        return str(path)
+
+
 def _read_doc(path: Path) -> tuple[TOMLDocument, bool]:
     raw = path.read_text(encoding="utf-8")
+    _READ_SNAPSHOTS[_snapshot_key(path)] = raw
     had_bom = raw.startswith(_BOM)
     if had_bom:
         raw = raw[len(_BOM) :]
     return tomlkit.parse(raw), had_bom
+
+
+def _assert_not_stale(path: Path) -> None:
+    """Refuse the write if the file is no longer what :func:`_read_doc` read.
+
+    Only checks a file this process actually read in this write: without a
+    snapshot there is nothing to compare, and the write goes ahead.
+    """
+    key = _snapshot_key(path)
+    expected = _READ_SNAPSHOTS.pop(key, None)
+    if expected is None:
+        return
+    try:
+        current = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Nothing to clobber: a first write creates the file, and a vanished one
+        # is the caller's own concern (the write below recreates it).
+        return
+    if current != expected:
+        raise StaleConfigWriteError(
+            f"{path} changed outside Dodaios since it was read; nothing was written"
+        )
+
 
 
 def set_live_profile(values: dict, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
@@ -2505,7 +2670,7 @@ def set_live_profile(values: dict, *, path: Path = DEFAULT_CONFIG_FILE) -> None:
     if not profile.configured or not effective.backend_model.strip():
         raise ValueError("Select a thinking model before enabling GPT-Live.")
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         doc, bom = _read_doc(path)
         backup = path.with_name(path.name + ".pre-live.bak")
         if not backup.exists():
@@ -2574,7 +2739,7 @@ def set_ollama_model_options(
         return {}
 
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         doc, had_bom = _read_doc(path)
         block = _provider_block(doc, provider)
         models = block.get("models")
@@ -2605,7 +2770,7 @@ def clear_ollama_model_options(
     if not tag:
         raise ValueError("model tag must not be empty")
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         doc, had_bom = _read_doc(path)
         models = (doc.get("brain") or {}).get("providers", {}).get(provider, {}).get("models")
         if models is None or tag not in models:
@@ -2630,7 +2795,7 @@ def set_provider_flag(
             f"unknown provider flag {key!r} (allowed: {', '.join(PROVIDER_FLAG_KEYS)})"
         )
     path = _ensure_writable_config_path(path)
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         doc, had_bom = _read_doc(path)
         block = _provider_block(doc, provider)
         block[key] = bool(value)
@@ -2671,7 +2836,7 @@ def set_local_realtime_launch_command(
     path = _ensure_writable_config_path(path)
     cleaned = (launch_command or "").strip()
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2742,7 +2907,7 @@ def update_local_realtime_launch_model(
     if not cleaned:
         return False
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2787,7 +2952,7 @@ def clear_local_realtime_launch_command(
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2833,7 +2998,7 @@ def set_telephony_config(values: dict[str, object], *, path: Path = DEFAULT_CONF
     if not values:
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2883,7 +3048,7 @@ def _patch_table(
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2939,7 +3104,7 @@ def _patch_worker_provider_toml(
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -2988,7 +3153,7 @@ def _patch_realtime_provider_toml(path: Path, name: str, *, key: str = "provider
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -3022,7 +3187,7 @@ def _patch_computer_use_provider_toml(path: Path, name: str) -> None:
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -3058,7 +3223,7 @@ def _patch_worker_key_toml(path: Path, key: str, value: object) -> None:
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -3090,7 +3255,7 @@ def _patch_wake_word_toml(path: Path, values: dict[str, object]) -> None:
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -3125,7 +3290,7 @@ def _strip_persona_name(path: Path) -> None:
     if not path.exists():
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:
@@ -3217,9 +3382,12 @@ def _atomic_write(path: Path, content: str) -> None:
 
     Before anything touches the file, :func:`_assert_no_top_level_loss` rejects
     a document that would delete top-level entries — the failure mode that
-    silently took a provider pin (and everything else) off this machine.
+    silently took a provider pin (and everything else) off this machine — and
+    :func:`_assert_not_stale` rejects one built from content an editor outside
+    Dodaios has since replaced.
     """
     _assert_no_top_level_loss(path, content)
+    _assert_not_stale(path)
     tmp = _write_unique_temp(path, content)
 
     was_read_only = False
@@ -3520,7 +3688,7 @@ def _update_config_soll_section(top: str, values: dict[str, object]) -> None:  #
         )
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(soll_path):  # i18n-allow: "config-soll" is the real filename, not prose
         raw = soll_path.read_text(encoding="utf-8")  # i18n-allow
         data = json.loads(raw)
         section = data.get(top)
@@ -3550,7 +3718,7 @@ def _update_config_soll_brain_primary(name: str) -> None:  # i18n-allow
         )
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(soll_path):  # i18n-allow: "config-soll" is the real filename, not prose
         raw = soll_path.read_text(encoding="utf-8")  # i18n-allow
         data = json.loads(raw)
         brain = data.get("brain")
@@ -3585,7 +3753,7 @@ def _update_config_soll_worker_provider(name: str) -> None:  # i18n-allow
         )
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(soll_path):  # i18n-allow: "config-soll" is the real filename, not prose
         raw = soll_path.read_text(encoding="utf-8")  # i18n-allow
         data = json.loads(raw)
         block = data.get("brain.worker")
@@ -3615,7 +3783,7 @@ def _update_config_soll_computer_use_provider(name: str) -> None:  # i18n-allow
         log.debug("config-soll.json absent (%s) — skip drift-soll sync", soll_path)  # i18n-allow
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(soll_path):  # i18n-allow: "config-soll" is the real filename, not prose
         raw = soll_path.read_text(encoding="utf-8")  # i18n-allow
         data = json.loads(raw)
         block = data.get("brain.computer_use")
@@ -3648,7 +3816,7 @@ def _update_config_soll_worker_key(key: str, value: str) -> None:  # i18n-allow
         )
         return
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(soll_path):  # i18n-allow: "config-soll" is the real filename, not prose
         raw = soll_path.read_text(encoding="utf-8")  # i18n-allow
         data = json.loads(raw)
         block = data.get("brain.worker")
@@ -3753,7 +3921,7 @@ def _patch_wiki_curator_toml(path: Path, values: dict[str, object]) -> None:
     """
     path = _ensure_writable_config_path(path)
 
-    with _WRITE_LOCK:
+    with _WRITE_LOCK(path):
         raw = path.read_text(encoding="utf-8")
         had_bom = raw.startswith(_BOM)
         if had_bom:

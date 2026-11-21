@@ -17,6 +17,10 @@ Runaway protection, all deterministic (control flow, not prompts):
   budget instead of multiplying. The budget rises only when the USER's own
   words named a bigger number next to agent vocabulary, and never beyond
   :data:`ABSOLUTE_FANOUT_CEILING`.
+* **Requested, not taken** — every batch is asked for and answered before
+  anything spawns (``jarvis.missions.subagent_approval``), and both the
+  request and the answer land on the mission record. A refusal comes back as
+  an instruction to carry on alone, so a worker cannot loop on it.
 * **Origin gate** — executes only for broker-brokered mission-worker calls
   (``tool_origin == "mission_worker"``); the router/realtime surfaces never
   see the tool at all (it lives on the gateway's worker-only catalog).
@@ -147,6 +151,10 @@ class SpawnSubagentsTool:
         # is correct here: the runner lives in the same process, and a fresh
         # app start means fresh missions.
         self._spawned_per_mission: dict[str, int] = {}
+        # Task sets already granted per mission — the loop guard for a worker
+        # that asks for the very same fan-out twice. Process-local for the
+        # same reason as the counter above.
+        self._granted_per_mission: dict[str, list[frozenset[str]]] = {}
 
     def _resolve_runner(self) -> Any | None:
         if self._runner is not None:
@@ -158,6 +166,7 @@ class SpawnSubagentsTool:
     async def execute(
         self, args: dict[str, Any], ctx: ExecutionContext
     ) -> ToolResult:
+        from jarvis.missions.subagent_approval import HelperRequest, decide
         from jarvis.missions.subagent_fanout import (
             DEFAULT_CHILD_TIMEOUT_S,
             MAX_CHILD_TIMEOUT_S,
@@ -207,19 +216,6 @@ class SpawnSubagentsTool:
         budget = user_authorized_fanout(ctx.user_utterance)
         already = self._spawned_per_mission.get(mission_id, 0)
         remaining = budget - already
-        if len(prompts) > remaining:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=(
-                    f"Fan-out budget exceeded: this mission may start "
-                    f"{budget} sub-agents in total ({already} already used, "
-                    f"{max(remaining, 0)} left), and only an explicit user "
-                    f"request for a larger number raises the limit. Reduce "
-                    f"the batch or consolidate prompts — do not retry in a "
-                    f"loop."
-                ),
-            )
 
         runner = self._resolve_runner()
         if runner is None:
@@ -228,6 +224,28 @@ class SpawnSubagentsTool:
                 output=None,
                 error="sub-agent fan-out is not available in this session",
             )
+
+        # Helpers are requested and answered, never simply taken. The answer
+        # is deterministic (no model call, no spend) and both hops are written
+        # to the mission record, refusal included.
+        request = HelperRequest(
+            mission_id=mission_id,
+            worker_id=worker_id,
+            prompts=prompts,
+            budget_left=max(remaining, 0),
+        )
+        decision = decide(
+            request, earlier=self._granted_per_mission.get(mission_id, ())
+        )
+        if not decision.approved:
+            log.info(
+                "Mission %s: helpers refused for %s (%s)",
+                mission_id,
+                worker_id or "?",
+                decision.reason,
+            )
+            await runner.record_request(request, decision)
+            return ToolResult(success=False, output=None, error=decision.reason)
 
         try:
             raw_timeout = int(args.get("timeout_s") or DEFAULT_CHILD_TIMEOUT_S)
@@ -239,6 +257,10 @@ class SpawnSubagentsTool:
         # from one worker cannot both pass the check (same synchronous-arm
         # discipline as the spawn_worker cooldown gate).
         self._spawned_per_mission[mission_id] = already + len(prompts)
+        self._granted_per_mission.setdefault(mission_id, []).append(
+            frozenset(t.strip().casefold() for t in request.tasks)
+        )
+        await runner.record_request(request, decision)
         log.info(
             "Mission %s: fanning out %d sub-agent(s) (budget %d, used %d)",
             mission_id,

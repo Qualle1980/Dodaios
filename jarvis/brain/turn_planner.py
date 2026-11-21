@@ -38,6 +38,7 @@ class TurnReason(StrEnum):
     PRIVATE_DATA = "private_data"
     PUBLIC_FACT = "public_fact"
     SCREEN_CONTEXT = "screen_context"
+    SELF_KNOWLEDGE = "self_knowledge"
     SKILL = "skill"
     SOCIETY = "society"
     UNCERTAIN = "uncertain"
@@ -52,6 +53,8 @@ class GroundingFailurePolicy(StrEnum):
 
 PUBLIC_FACT_GROUNDING_CAPABILITY = "search_web"
 PUBLIC_FACT_GROUNDING_TIMEOUT_S = 2.5
+# Docs about this app itself — not machine ops, not public web facts.
+SELF_KNOWLEDGE_CAPABILITY = "product_help"
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,54 @@ _PUBLIC_FACT_REQUEST_RE = re.compile(
     r"sag mir|nenne mir|such\w*|pruef\w*|find\w*|"
     r"dime|busca|revisa|encuentra"
     r")\b"  # i18n-allow: multilingual speech-input matching data
+)
+
+# Topics that live in docs/product. A bare "our server" without one of these
+# must not force product_help onto ordinary ops questions (F-1 RISK).
+_SELF_KNOWLEDGE_TOPIC_RE = re.compile(
+    r"\b(?:"
+    r"control\s+key|assistant(?:'s)?\s+key|"
+    r"web[\s-]?socket[\s-]?tickets?|ws[\s-]?tickets?|"
+    r"wake[\s-]?word|api[\s-]?keys?|"
+    r"(?:claude|chatgpt|openai)\s+subscription|"
+    r"chatgpt\s+plan|provider(?:s)?|"
+    r"voice\s+mode|dictation|browser\s+lock|"
+    r"agentic\s+ide|computer\s+use|"
+    r"mcp\s+connection|built[\s-]?in\s+guide|"
+    r"docs?\s+(?:view|guide)|product\s+guide|"
+    r"loopback|non[\s-]?loopback|"
+    r"steuerungs?schluessel|"  # i18n-allow: speech input
+    r"weckwort\w*|browser[\s-]?sperre"  # i18n-allow: speech input
+    r")\b"
+)
+_SELF_KNOWLEDGE_PRODUCT_RE = re.compile(
+    r"\b(?:"
+    r"dodaios|personal\s+jarvis|"
+    r"this\s+(?:app|program|product|installation)|"
+    r"our\s+(?:server|app|installation)|"
+    r"the\s+(?:dodaios\s+)?(?:server|desktop\s+app)|"
+    r"diese(?:s|r)?\s+(?:app|programm|produkt|installation)|"  # i18n-allow
+    r"unser(?:e|em|en)?\s+(?:server|app|installation)"  # i18n-allow
+    r")\b"
+)
+# Capability overviews stay on the PRODUCT_BRIEF path (native), not product_help.
+_SELF_KNOWLEDGE_OVERVIEW_RE = re.compile(
+    r"\b(?:"
+    r"what\s+can\s+(?:you|jarvis|dodaios)\b|"
+    r"what\s+(?:you|jarvis|dodaios)\s+can\s+do\b|"
+    r"what\s+are\s+(?:your|jarvis(?:'s)?|dodaios(?:'s)?)\s+capabilities\b|"
+    r"was\s+kannst\s+du\b|was\s+kann\s+(?:jarvis|dodaios)\b|"  # i18n-allow
+    r"welche\s+faehigkeiten\b|"  # i18n-allow
+    r"que\s+puedes\s+hacer\b|que\s+puede\s+hacer\s+(?:jarvis|dodaios)\b"  # i18n-allow
+    r")"
+)
+_SELF_KNOWLEDGE_SETUP_RE = re.compile(
+    r"\b(?:"
+    r"where|setting|config(?:uration)?|setup|install|"
+    r"einricht\w*|einstellung\w*|konfiguration\w*|"  # i18n-allow
+    r"dokumentation|docs?\b|guide\b|"
+    r"donde|ajuste\w*|configuracion\w*"  # i18n-allow
+    r")"
 )
 
 # Concrete local-world evidence that can look like a public fact request.
@@ -835,6 +886,45 @@ def is_public_fact_question(text: str) -> bool:
     )
 
 
+def is_self_knowledge_question(text: str) -> bool:
+    """Return whether ``text`` asks for Dodaios product documentation.
+
+    Self-knowledge is the docs/product path (``product_help``), not machine
+    ops and not a public web fact. Capability overviews stay on the always-on
+    PRODUCT_BRIEF and must not force a guide read.
+    """
+    normalized = _normalize(text).strip()
+    if not normalized or _SELF_KNOWLEDGE_OVERVIEW_RE.search(normalized):
+        return False
+    # Machine health stays LOCAL_STATE-only; product_help cannot answer it.
+    if _MACHINE_SYMPTOM_RE.search(normalized):
+        return False
+    if _MACHINE_STATE_RE.search(normalized) and not (
+        _SELF_KNOWLEDGE_TOPIC_RE.search(normalized)
+        or _SELF_KNOWLEDGE_PRODUCT_RE.search(normalized)
+    ):
+        return False
+
+    has_topic = bool(_SELF_KNOWLEDGE_TOPIC_RE.search(normalized))
+    has_product = bool(_SELF_KNOWLEDGE_PRODUCT_RE.search(normalized))
+    if not (has_topic or has_product):
+        return False
+
+    instructional = bool(_INSTRUCTIONAL_RE.search(normalized))
+    why_question = bool(_WHY_RE.search(normalized))
+    lookup = bool(_LOOKUP_SHAPE_RE.search(normalized))
+    setup = bool(_SELF_KNOWLEDGE_SETUP_RE.search(normalized))
+    if not (instructional or why_question or lookup or setup or normalized.endswith("?")):
+        return False
+
+    # A concrete product topic is enough with a question shape.
+    if has_topic:
+        return True
+    # Product identity alone: only clear setup/docs shapes. Bare
+    # "why is our server slow" must stay an ops question (F-1 RISK).
+    return bool(instructional or setup)
+
+
 def plan_turn(
     text: str,
     *,
@@ -924,6 +1014,10 @@ def plan_turn(
         reasons.add(TurnReason.WORKSPACE)
     definition = bool(_DEFINITION_RE.search(normalized))
     instructional = bool(_INSTRUCTIONAL_RE.search(normalized))
+    # Docs about this app itself must reach product_help even when the
+    # utterance is instructional ("how do I connect a Claude subscription")
+    # or also matches LOCAL_STATE ("where is the wake word setting").
+    self_knowledge = is_self_knowledge_question(text)
     # An instructional form asks for an explanation, even when the sentence
     # also contains words that resemble an action, private ownership, or a
     # current-time marker. For example, "How would you help me use ...?" must
@@ -933,7 +1027,9 @@ def plan_turn(
     #
     # A named pane is the exception: "how do I get Dana to run the tests" asks
     # about THIS workspace, and only the orchestrator can see what Dana is.
-    if instructional and not workspace_turn:
+    # Self-knowledge is the other exception: exact product steps live in the
+    # built-in guide, and the native brief alone is not enough (live B2).
+    if instructional and not workspace_turn and not self_knowledge:
         return TurnPlan(path=TurnPath.NATIVE_REALTIME)
     required = () if definition or instructional else _matched_capabilities(
         text,
@@ -942,6 +1038,9 @@ def plan_turn(
     )
     if required:
         reasons.add(TurnReason.CAPABILITY)
+    if self_knowledge:
+        reasons.add(TurnReason.SELF_KNOWLEDGE)
+        required = tuple(sorted({*required, SELF_KNOWLEDGE_CAPABILITY}))
 
     # Weak conversational suppressors: see the block comment above their
     # vocabularies. Each one dampens ONLY the weak signals computed below;
@@ -1146,7 +1245,13 @@ def plan_turn(
 
     # A lookup that names a live capability/tool but no stronger category is
     # still connected evidence. This catches arbitrary future MCP objects.
-    if required and lookup and not definition:
+    # product_help is self-knowledge (docs), not a connected MCP object.
+    if (
+        required
+        and lookup
+        and not definition
+        and any(item != SELF_KNOWLEDGE_CAPABILITY for item in required)
+    ):
         reasons.add(TurnReason.CONNECTED_DATA)
 
     # Questions that clearly request fresh or private evidence but are phrased
@@ -1173,6 +1278,7 @@ def plan_turn(
         TurnReason.MISSION,
         TurnReason.PRIVATE_DATA,
         TurnReason.SCREEN_CONTEXT,
+        TurnReason.SELF_KNOWLEDGE,
         TurnReason.SKILL,
         TurnReason.WORKSPACE,
     }
@@ -1226,6 +1332,7 @@ def plan_turn(
                 TurnReason.PRIVATE_DATA,
                 TurnReason.PUBLIC_FACT,
                 TurnReason.SCREEN_CONTEXT,
+                TurnReason.SELF_KNOWLEDGE,
                 # What the pane actually printed is evidence the live model
                 # never holds; answering "what has Dana done" without it is
                 # exactly the guess this whole path exists to prevent.
@@ -1249,6 +1356,7 @@ __all__ = [
     "GroundingFailurePolicy",
     "PUBLIC_FACT_GROUNDING_CAPABILITY",
     "PUBLIC_FACT_GROUNDING_TIMEOUT_S",
+    "SELF_KNOWLEDGE_CAPABILITY",
     "TurnPath",
     "TurnPlan",
     "TurnReason",
@@ -1256,5 +1364,6 @@ __all__ = [
     "is_assistant_tasking",
     "is_contextual_follow_up",
     "is_public_fact_question",
+    "is_self_knowledge_question",
     "plan_turn",
 ]

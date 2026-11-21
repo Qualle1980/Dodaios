@@ -8602,6 +8602,20 @@
     "paid_usage": "Execução paga em {provider} / {model}: real {cost} (estimado {estimate}, limite {cap}).",
     "paid_usage_automatic": "Execução paga automática em {provider} / {model}: real {cost} (estimado {estimate}, limite {cap})."
   },
+  "subagents": {
+    "requested": "{count} auxiliares paralelos solicitados.",
+    "approved": "{count} auxiliares aprovados.",
+    "refused": {
+      "single_helper": "Auxiliar recusado: um só não é trabalho paralelo.",
+      "duplicate_tasks": "Auxiliares recusados: dois tinham a mesma tarefa.",
+      "budget_spent": "Auxiliares recusados: esta missão não tem mais.",
+      "over_budget": "Auxiliares recusados: pediram-se mais do que restam.",
+      "repeat_batch": "Auxiliares recusados: a mesma rodada já foi executada.",
+      "empty_task": "Auxiliares recusados: uma tarefa estava vazia.",
+      "no_task": "Auxiliares recusados: nenhuma tarefa foi indicada.",
+      "other": "Auxiliares recusados."
+    }
+  },
   "ide_projects": {
     "connect_failed": "Não foi possível ligar esta pasta. Tenta outra vez.",
     "choose_folder_error": "Escolhe uma pasta para continuar.",

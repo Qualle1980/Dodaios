@@ -79,6 +79,35 @@ OUTPUT_SHAPE_DIRECTIVE: Final[str] = (
 )
 
 
+# Prepended to every worker prompt. AGENTS.md section 0 ("Look before you
+# build") is the repo's first rule for every coding agent, and until now no code
+# path put it in front of a worker: it lived in a file the worker may never
+# open. The cost is measured twice. On 2026-11-07 an agent began rebuilding a
+# memory-vault subsystem by hand that already sat complete in the upstream tree
+# (ADR-0044). On 2026-11-09 three tools were declared to a live call with an
+# empty schema; the model sent empty arguments to one of them 177 times in a
+# single turn and the app was unusable. That exact failure shape had been
+# recorded two days earlier and the note was never opened. Both were search
+# failures, not reasoning failures. Kept ASCII / provider- and
+# language-agnostic: the habit must hold whichever worker CLI runs.
+LOOK_BEFORE_YOU_BUILD_DIRECTIVE: Final[str] = (
+    "LOOK BEFORE YOU BUILD - SEARCH FIRST, EVERY TASK. The first step of your "
+    "task is not the task: it is finding out whether it already exists. Do this "
+    "for every fix and every feature, not only when you are stuck. Search in "
+    "this order, cheapest first: (1) the diagnostics already emitted - logs, "
+    "events, recorded output; a theory formed before reading our own output is "
+    "a guess. (2) This repository - search for the CAPABILITY, not for the file "
+    "name you expect. (3) Recorded lessons and earlier results available "
+    "through your tools. When you find it, read it, keep the reasoning, and "
+    "adapt it to our names and paths; a file pasted in unchanged is worse than "
+    "none. SEARCH THE FAILURE, NOT ONLY THE FEATURE: before changing something, "
+    "ask who has hit this bug in this code before and how it was solved. AN "
+    "EMPTY SEARCH IS A RESULT - state in one line what you took, what you "
+    "adapted, or why nothing fit. Reporting that nothing existed is required; "
+    "silence about it is not."
+)
+
+
 SUPERVISOR_BOUNDARY_DIRECTIVE: Final[str] = (
     "SUPERVISOR BOUNDARY - USE ONLY EXPLICITLY GRANTED DODAIOS TOOLS. You may "
     "use the worker's own sandboxed shell and file tools inside the assigned "
@@ -120,11 +149,13 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
     task instruction for this step (verbatim user utterance or a decomposed
     sub-task).
     """
+    from ..conductor.lessons import lessons_block
     from ..stream_evidence import clean_request_body
     from ..task_kind import is_read_task
 
     head = (
-        f"{ARTIFACT_LANGUAGE_DIRECTIVE}\n\n{OUTPUT_SHAPE_DIRECTIVE}\n\n"
+        f"{ARTIFACT_LANGUAGE_DIRECTIVE}\n\n{LOOK_BEFORE_YOU_BUILD_DIRECTIVE}\n\n"
+        f"{OUTPUT_SHAPE_DIRECTIVE}\n\n"
         f"{SUPERVISOR_BOUNDARY_DIRECTIVE}\n\n{FINAL_REPORT_DIRECTIVE}"
     )
     # Classified HERE, on the request alone: the directives above would read
@@ -133,6 +164,16 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
         clean_request_body(step_prompt)
     ):
         head = f"{READ_ONLY_MARKER} do not create, modify or delete any file.\n\n{head}"
+    # Rules the app has already LEARNED from earlier failures of this kind.
+    # ``lessons_block`` existed with a single caller - the delegation retry path
+    # - so a worker and every fan-out child started each mission without them:
+    # the app learned, stored, and then never handed the lesson to the agent
+    # doing the work. It reads a process-wide store and returns "" when no store
+    # is active or nothing was learned, so this adds nothing when there is
+    # nothing to add.
+    learned = lessons_block(step_prompt)
+    if learned.strip():
+        head = f"{head}\n\n{learned}"
     body = (
         f"{head}\n\n{prior_block}\n\n{step_prompt}"
         if prior_block and prior_block.strip()
@@ -148,6 +189,7 @@ def compose_worker_prompt(prior_block: str, step_prompt: str) -> str:
 
 __all__ = [
     "ARTIFACT_LANGUAGE_DIRECTIVE",
+    "LOOK_BEFORE_YOU_BUILD_DIRECTIVE",
     "READ_ONLY_MARKER",
     "OUTPUT_SHAPE_DIRECTIVE",
     "FINAL_REPORT_DIRECTIVE",

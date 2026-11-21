@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from jarvis.core.protocols import BrainMessage, BrainRequest
 
@@ -48,6 +48,23 @@ _PROBE_REQUEST = BrainRequest(
     temperature=1.0,
     stream=True,
 )
+
+
+#: Finish reasons that mean "your own ``max_tokens`` stopped me", whatever the
+#: provider calls it. Discriminated by the value, never by a provider name
+#: (AP-21/AP-28): OpenAI-compatible transports send ``length``, the Gemini SDK
+#: hands over an enum whose ``str()`` is ``FinishReason.MAX_TOKENS``. Measured
+#: 2026-11-06 on both, through our own adapters.
+_BUDGET_CUTOFFS: Final[frozenset[str]] = frozenset({"length", "max_tokens"})
+
+
+def _cut_off_by_our_own_budget(finish_reason: object) -> bool:
+    """Whether this finish reason says the probe's token cap ended the stream."""
+    if not finish_reason:
+        return False
+    raw = str(finish_reason).strip().casefold()
+    # ``FinishReason.MAX_TOKENS`` -> ``max_tokens``; a bare ``length`` is kept.
+    return raw.rsplit(".", maxsplit=1)[-1] in _BUDGET_CUTOFFS
 
 
 class BrainHealthChecker:
@@ -84,7 +101,7 @@ class BrainHealthChecker:
             )
 
         try:
-            await asyncio.wait_for(
+            answered = await asyncio.wait_for(
                 self._drain_first_delta(brain),
                 timeout=timeout_s,
             )
@@ -108,6 +125,20 @@ class BrainHealthChecker:
             )
 
         duration_ms = (time.perf_counter() - start) * 1000.0
+        if not answered:
+            # A stream that ended without ever carrying text or a tool call is
+            # not a working provider. This used to read as success: the drain
+            # broke on the first delta, so zero deltas raised nothing and fell
+            # through to ok=True. The browser bridge answered "ok" that way on
+            # 2026-10-30 while losing every real turn, and the status badge
+            # repeated it. Silence is now reported as what it is.
+            return HealthResult(
+                provider=provider,
+                model=model,
+                ok=False,
+                error="the provider closed the stream without answering",
+                duration_ms=duration_ms,
+            )
         return HealthResult(
             provider=provider,
             model=model,
@@ -130,8 +161,30 @@ class BrainHealthChecker:
         return results
 
     @staticmethod
-    async def _drain_first_delta(brain: object) -> None:
-        """Fetches the first BrainDelta from the stream and discards the rest."""
+    async def _drain_first_delta(brain: object) -> bool:
+        """Whether the stream carried an ANSWER; stops at the first one.
+
+        Returns ``False`` for a stream that ends without ever producing text or
+        a tool call — silence, or nothing but empty acknowledgement chunks.
+
+        It drains to the first delta that carries something rather than the
+        first delta of any kind. Several providers open with an empty role or
+        keep-alive chunk before any text, so "first delta" and "first answer"
+        are not the same event, and only the second one proves a turn ran.
+
+        One more shape counts as an answer: a stream this probe's own
+        ``max_tokens`` cut short. A reasoning model spends its budget thinking
+        before it emits a single visible token, so at eight tokens it is
+        truncated mid-thought and never reaches content. That is our cap
+        talking, not the provider's silence, and reporting it as a dead
+        provider costs the install a working brain. Silence itself is
+        unchanged: a stream that closes on ``stop`` with nothing in it still
+        fails (2026-10-30).
+        """
         stream = brain.complete(_PROBE_REQUEST)  # type: ignore[attr-defined]
-        async for _delta in stream:
-            break
+        async for delta in stream:
+            if getattr(delta, "content", None) or getattr(delta, "tool_call", None):
+                return True
+            if _cut_off_by_our_own_budget(getattr(delta, "finish_reason", None)):
+                return True
+        return False

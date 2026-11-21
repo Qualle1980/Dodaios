@@ -23,6 +23,12 @@ import unicodedata
 from collections.abc import Collection
 from typing import NamedTuple
 
+from jarvis.core.result_scope import (
+    annotate_command_sample,
+    format_sample_annotation,
+    sample_limit_from_command,
+)
+
 
 def _normalize(text: str) -> str:
     folded = unicodedata.normalize("NFKD", str(text or "").casefold())
@@ -429,16 +435,407 @@ def action_not_started_phrase(language: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Claim families that need a tool ABOUT that claim (live 2026-11-11 E1/E2).
+#
+# Adapted from upstream Dodaios/Dodaios ``agent_chat/turn_verify.py`` (action
+# receipts / lead claim check): a successful tool of the wrong kind must not
+# clear a result claim. This tree already has ``action_honesty`` wired into
+# the brain path; we extend it instead of porting the trust-receipt stack.
+# ---------------------------------------------------------------------------
+
+_CLAIM_FAMILIES: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
+    # Live E2: "the result has been accepted" after UI navigation / wiki reads.
+    "accepted": (
+        re.compile(
+            r"(?:"
+            r"\b(?:has\s+been|was|is|got)\s+accepted\b|"
+            r"\bacceptance\s+(?:passed|confirmed|complete|done)\b|"
+            r"\b(?:result|change|work|job|pr|patch)\s+(?:has\s+been|was|is)\s+"
+            r"(?:accepted|approved|verified)\b|"
+            r"\b(?:wurde|ist)\s+(?:akzeptiert|angenommen|abgenommen|"  # i18n-allow: DE
+            r"freigegeben|bestanden)\b|"  # i18n-allow: DE
+            r"\b(?:akzeptiert|angenommen|abgenommen)\b|"  # i18n-allow: DE
+            # "hat die Abnahme bestanden" carries the claim in a noun plus
+            # "hat ... bestanden", which the "(wurde|ist) bestanden" form  # i18n-allow: quoted DE pattern
+            # above never saw (measured on the live E2 wording, 13 Nov).
+            r"\babnahme\b[^.\n]{0,40}\b(?:bestanden|erfolgreich|durch)\b|"  # i18n-allow: DE
+            r"\bhat\b[^.\n]{0,40}\b(?:abnahme|abnahmetest|pruefung)\b"  # i18n-allow: DE
+            r"[^.\n]{0,20}\bbestanden\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-git", "workspace_git", "git", "pytest", "test",
+            "acceptance", "delegation_acceptance",
+        ),
+    ),
+    # A coding / agent handoff that never called the delegation tools.
+    "delegated": (
+        re.compile(
+            r"(?:"
+            r"\b(?:i(?:'ve|\s+have)?|i\s+just)\s+"
+            r"(?:delegated|dispatched|handed\s+off|spawned|assigned)\b|"
+            r"\b(?:delegated|dispatched|handed\s+off)\s+(?:the\s+)?(?:task|job|work)\b|"
+            r"\b(?:coding\s+)?(?:agent|worker|mission)\s+(?:is\s+|was\s+|has\s+been\s+)?"
+            r"(?:started|running|spawned)\b|"
+            r"\bich\s+habe\b[^.\n]{0,80}\b(?:delegiert|beauftragt|ubergeben|"  # i18n-allow: DE
+            r"gestartet)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-orchestrate", "workspace_orchestrate", "orchestrate",
+            "ask_agent", "ask-agent", "delegate", "dispatch", "spawn",
+            "mission", "worker", "message_agent", "message-agent",
+            "delegate_to_agent", "delegate-to-agent",
+        ),
+    ),
+    # Live E1: wiki_ingest wrote a vault note; speech said "the documents".
+    # Wiki / memory tools deliberately do NOT satisfy this family.
+    "documents_written": (
+        re.compile(
+            r"(?:"
+            r"\b(?:entered|written|saved|added)\s+(?:it\s+|them\s+|your\s+\w+\s+)?"
+            r"(?:into|in|to)\s+(?:the\s+)?(?:documents?|docs|documentation)\b|"
+            r"\b(?:documents?|docs|documentation)\s+(?:were|was|is|have\s+been)\s+"
+            r"(?:updated|written|saved|changed)\b|"
+            r"\b(?:full\s+name|line)\s+was\s+successfully\s+entered\b|"
+            # German needs the declined and singular forms and both word
+            # orders. Measured 13 Nov: "in docs hinzugefuegt", "steht jetzt in
+            # den Dokumenten" and "in das Dokument eingefuegt" all escaped the  # i18n-allow: quoted DE pattern
+            # single "in (die|den|das) dokumente" form. A write verb, or  # i18n-allow: quoted DE pattern
+            # "steht in", stays required, so READING "in den Dokumenten" is
+            # still not a write claim.
+            r"\bin\s+(?:die|den|das|dem|der)?\s*"  # i18n-allow: DE
+            r"(?:dokumenten|dokumente|dokument|unterlagen|unterlage|docs)\b"  # i18n-allow: DE
+            r"[^.\n]{0,40}\b(?:eingetragen|eingefugt|hinzugefugt|"  # i18n-allow: DE
+            r"geschrieben|gespeichert|erganzt|aktualisiert)\b|"  # i18n-allow: DE
+            r"\b(?:eingetragen|eingefugt|hinzugefugt|geschrieben|"  # i18n-allow: DE
+            r"gespeichert|erganzt|aktualisiert)\b[^.\n]{0,40}"  # i18n-allow: DE
+            r"\bin\s+(?:die|den|das|dem|der)?\s*"  # i18n-allow: DE
+            r"(?:dokumenten|dokumente|dokument|unterlagen|unterlage|docs)\b|"  # i18n-allow: DE
+            r"\b(?:steht|stehen)\s+(?:jetzt\s+|nun\s+)?"  # i18n-allow: DE
+            r"in\s+(?:die|den|das|dem|der)?\s*"  # i18n-allow: DE
+            r"(?:dokumenten|dokumente|dokument|unterlagen|unterlage|docs)\b|"  # i18n-allow: DE
+            r"\b(?:dokumente|dokumenten|dokument|unterlagen)\s+"  # i18n-allow: DE
+            r"(?:wurden|wurde|sind|ist)\s+"  # i18n-allow: DE
+            r"(?:aktualisiert|geschrieben|gespeichert|erganzt)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "workspace-git", "workspace_git", "workspace-orchestrate",
+            "workspace_orchestrate", "git", "shell", "bash", "run_shell",
+            "run-shell", "write", "edit", "patch", "apply_patch", "apply-patch",
+            "str_replace", "str-replace",
+        ),
+    ),
+    "sent": (
+        re.compile(
+            r"(?:"
+            r"\b(?:i(?:'ve|\s+have)?|i\s+just)\s+"
+            r"(?:sent|emailed|messaged|replied|posted)\b|"
+            r"\bich\s+habe\b[^.\n]{0,80}\b(?:gesendet|geschickt|verschickt|"  # i18n-allow: DE
+            r"gepostet|beantwortet)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "send", "mail", "gmail", "email", "message", "reply", "post",
+            "slack", "chat", "notify", "whatsapp", "telegram",
+        ),
+    ),
+    "played": (
+        re.compile(
+            r"(?:"
+            r"\bi(?:'m|\s+am)\s+playing\s+(?:you\s+)?(?:a|the|your)\b|"
+            r"\bi(?:'ve|\s+have)\s+(?:just\s+)?(?:played|started)\s+"
+            r"(?:you\s+)?(?:a|the|your)\b|"
+            r"\bplaying\s+you\s+(?:a|the)\b|"
+            r"\b(?:is|are)\s+(?:playing|running)\s+(?:now|already)\b|"
+            r"\bich\s+(?:spiele?|habe\s+(?:dir|fur\s+dich)\s+"  # i18n-allow: DE
+            r"(?:gerade\s+)?.{0,48}(?:gespielt|abgespielt|angemacht|"  # i18n-allow: DE
+            r"aufgelegt))\b|"  # i18n-allow: DE
+            r"\b(?:laufen|lauft|spielt)\s+(?:jetzt|gerade|nun)\b"  # i18n-allow: DE
+            r")",
+            re.I,
+        ),
+        (
+            "youtube_music", "youtube-music", "spotify", "music", "play",
+            "media", "sonos",
+        ),
+    ),
+}
+
+_UNBACKED_RESULT_PHRASES: dict[str, str] = {
+    "de": (
+        "Ich kann das Ergebnis nicht bestätigen: für diese Behauptung "  # i18n-allow
+        "fehlt ein passendes Werkzeug-Ergebnis in diesem Turn."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": (
+        "I cannot confirm that result: this turn has no matching tool "
+        "evidence for that claim."
+    ),
+    "es": (
+        "No puedo confirmar ese resultado: en este turno no hay evidencia "
+        "de herramienta que respalde esa afirmación."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Não posso confirmar esse resultado: neste turno não há evidência "
+        "de ferramenta que suporte essa afirmação."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+_TOOL_FAILURE_PHRASES: dict[str, str] = {
+    "de": (
+        "Eine Werkzeug-Aktion ist fehlgeschlagen; ich melde keinen Erfolg."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": "A tool action failed; I am not reporting success.",
+    "es": (
+        "Una acción de herramienta falló; no estoy informando éxito."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Uma ação de ferramenta falhou; não estou a reportar sucesso."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+_FAILURE_ACK_RE = re.compile(
+    r"(?:"
+    r"\b(?:failed|failure|error|unsuccessful|did\s+not\s+(?:work|succeed)|"
+    r"could\s+not|couldn't|cannot\s+confirm|not\s+accepted|"
+    r"was\s+not\s+(?:accepted|saved|written|delegated))\b|"
+    r"\b(?:fehlgeschlagen|fehler|nicht\s+(?:geklappt|gelungen|"  # i18n-allow: DE
+    r"akzeptiert|gespeichert|geschrieben|delegiert)|"  # i18n-allow: DE
+    r"kann\s+(?:das\s+)?nicht\s+bestatigen)\b"  # i18n-allow: DE
+    r")",
+    re.I,
+)
+
+
+def claimed_result_families(text: str) -> tuple[str, ...]:
+    """Result families the reply claims, in stable order."""
+    normalized = _normalize(text or "")
+    if not normalized.strip():
+        return ()
+    return tuple(
+        name for name, (pattern, _) in _CLAIM_FAMILIES.items()
+        if pattern.search(normalized)
+    )
+
+
+def _tool_tokens(name: str) -> str:
+    return _normalize(str(name or "")).replace("-", "_")
+
+
+def tools_satisfy_family(family: str, executed_tools: Collection[str]) -> bool:
+    """True when a successful tool name carries a word for ``family``."""
+    words = _CLAIM_FAMILIES[family][1]
+    haystacks = [_tool_tokens(name) for name in executed_tools if name]
+    if not haystacks:
+        return False
+    for word in words:
+        needle = _tool_tokens(word)
+        if not needle:
+            continue
+        for hay in haystacks:
+            if needle in hay:
+                return True
+    return False
+
+
+def unbacked_result_families(
+    text: str,
+    executed_tools: Collection[str],
+) -> tuple[str, ...]:
+    """Claim families present in ``text`` with no matching successful tool."""
+    return tuple(
+        family
+        for family in claimed_result_families(text)
+        if not tools_satisfy_family(family, executed_tools)
+    )
+
+
+def unbacked_result_phrase(language: str) -> str:
+    """Honest fallback when a result claim has no domain-matching tool."""
+    return _UNBACKED_RESULT_PHRASES.get(
+        str(language or "").strip().lower(),
+        _UNBACKED_RESULT_PHRASES["en"],
+    )
+
+
+def tool_failure_phrase(language: str) -> str:
+    """Honest clause when a tool failed and the reply still claims success."""
+    return _TOOL_FAILURE_PHRASES.get(
+        str(language or "").strip().lower(),
+        _TOOL_FAILURE_PHRASES["en"],
+    )
+
+
+def acknowledges_tool_failure(text: str) -> bool:
+    """Whether the reply already names a failure or withheld confirmation."""
+    return _FAILURE_ACK_RE.search(_normalize(text or "")) is not None
+
+
+# ---------------------------------------------------------------------------
+# Universal inventory claims over a limited sample (measured 2026-11-15).
+#
+# ``gh pr list --limit 3`` returned three merged rows; speech said there were
+# no open PRs while thirteen drafts were open. A successful tool of any kind
+# used to clear the rewrite; the hole is a universal claim grounded only in a
+# deliberate sample or a truncated tool payload. Pure regex (AP-11).
+# ---------------------------------------------------------------------------
+
+_SAMPLE_MARKER_RE = re.compile(
+    r"(?:"
+    r"\(sample\s+of\s+\d+\b|"
+    r"not\s+the\s+complete\s+set|"
+    r"…\[truncated,|"
+    r"\.\.\.\[truncated,|"
+    r"…stopped\s+at\s+\d+|"
+    r"\.\.\.stopped\s+at\s+\d+"
+    r")",
+    re.I,
+)
+
+# Universal "all / none / every" inventory claims. DE and EN are equal; a
+# match alone is not enough — only a sample-backed match is rewritten.
+_UNIVERSAL_CLAIM_RE = re.compile(
+    r"(?:"
+    r"\bgibt\s+es\b[^.\n]{0,48}\b(?:keine|keinen|kein|nicht)\b|"  # i18n-allow: DE
+    r"\b(?:keine|keinen|kein)\b[^.\n]{0,48}\bgibt\s+es\b|"  # i18n-allow: DE
+    r"\b(?:es\s+)?gibt\s+(?:im\s+moment\s+|gerade\s+|derzeit\s+|momentan\s+)?"  # i18n-allow: DE
+    r"(?:keine|keinen|kein)\b|"  # i18n-allow: DE
+    r"\bnirgends\b|"  # i18n-allow: DE
+    r"\bim\s+gesamten?\b[^.\n]{0,40}\b(?:kein|keine|keinen|nirgends)\b|"  # i18n-allow: DE
+    r"\b(?:alle|samtliche)\s+(?:\w+\s+){0,3}"  # i18n-allow: DE (NFKD folds ä→a)
+    r"(?:sind|waren|ist|war|wurden|wurde)\b|"  # i18n-allow: DE
+    r"\bthere\s+(?:are|is)\s+(?:no|none)\b|"
+    r"\bno\s+open\b|"
+    r"\b(?:none|nothing)\s+(?:left|remaining|open|found)\b|"
+    r"\bevery\s+\w+\s+(?:was|were|is|are|has|have)\b|"
+    r"\ball\s+(?:\w+\s+){0,3}(?:was|were|is|are|have|has)\b|"
+    r"\bnothing\s+(?:was|is)\s+found\b|"
+    r"\bnothing\s+left\b|"
+    r"\bnowhere\b"
+    r")",
+    re.I,
+)
+
+_SAMPLE_OVERCLAIM_PHRASES: dict[str, str] = {
+    "de": (
+        "Ich habe nur eine begrenzte Stichprobe gesehen und bestätige "  # i18n-allow
+        "daraus kein vollständiges Inventar."  # i18n-allow
+    ),  # i18n-allow: German runtime voice/chat output
+    "en": (
+        "I only saw a limited sample, so I cannot claim completeness of "
+        "the full set."
+    ),
+    "es": (
+        "Solo vi una muestra limitada; no puedo afirmar que cubra el "
+        "conjunto completo."  # i18n-allow
+    ),  # i18n-allow: Spanish runtime voice/chat output
+    "pt": (
+        "Só vi uma amostra limitada; não posso afirmar que cubra o "
+        "conjunto completo."  # i18n-allow
+    ),  # i18n-allow: Portuguese runtime voice/chat output
+}
+
+
+
+
+
+def tool_evidence_is_sample(
+    *,
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
+) -> bool:
+    """True when a supporting command or result is marked as a limited sample."""
+    for command in tool_commands:
+        if sample_limit_from_command(command) is not None:
+            return True
+    for result in tool_results:
+        if _SAMPLE_MARKER_RE.search(str(result or "")):
+            return True
+    return False
+
+
+def has_universal_inventory_claim(text: str) -> bool:
+    """Whether ``text`` asserts an all/none inventory conclusion."""
+    normalized = _normalize(text or "")
+    if not normalized.strip():
+        return False
+    return _UNIVERSAL_CLAIM_RE.search(normalized) is not None
+
+
+def has_universal_claim_over_sample(
+    text: str,
+    *,
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
+) -> bool:
+    """Universal inventory claim whose only support is a limited sample."""
+    if not has_universal_inventory_claim(text):
+        return False
+    return tool_evidence_is_sample(
+        tool_commands=tool_commands,
+        tool_results=tool_results,
+    )
+
+
+def sample_overclaim_phrase(language: str) -> str:
+    """Honest fallback when a universal claim rests on a limited sample."""
+    return _SAMPLE_OVERCLAIM_PHRASES.get(
+        str(language or "").strip().lower(),
+        _SAMPLE_OVERCLAIM_PHRASES["en"],
+    )
+
+
 def replace_unbacked_action_claim(
     text: str,
     *,
     executed_tools: Collection[str],
     language: str,
+    failed_tools: Collection[str] = (),
+    tool_commands: Collection[str] = (),
+    tool_results: Collection[str] = (),
 ) -> str:
-    """Drop an unbacked promise without ever dropping a delivered answer."""
+    """Drop an unbacked promise or wrong-domain success claim.
+
+    A successful tool clears only claims it can evidence. Wiki ingest must
+    not license "the documents were updated"; UI navigation must not license
+    "accepted". When tools failed and the reply still narrates success
+    without acknowledging the failure, the failure clause wins.
+
+    A universal inventory claim ("none open", "every match") over a command
+    or result marked as a limited sample is rewritten the same way: the tool
+    ran, but the sample does not license completeness.
+    """
+    missing = unbacked_result_families(text, executed_tools)
+    # Wrong-domain success (wiki_ingest vs "the documents") is the live hole:
+    # any successful tool used to clear the rewrite. Only a matching tool
+    # clears a result family. When nothing ran at all, the legacy
+    # not-started phrase below still owns the zero-tool path.
+    if missing and executed_tools:
+        return unbacked_result_phrase(language)
+
+    if (
+        failed_tools
+        and (claimed_result_families(text) or has_false_completion_claim(text))
+        and not acknowledges_tool_failure(text)
+    ):
+        return tool_failure_phrase(language)
+
+    if has_universal_claim_over_sample(
+        text,
+        tool_commands=tool_commands,
+        tool_results=tool_results,
+    ):
+        return sample_overclaim_phrase(language)
+
     if executed_tools:
         return text
-    if has_false_completion_claim(text):
+    if has_false_completion_claim(text) or missing:
         return action_not_started_phrase(language)
     analysis = _analyse(text)
     if analysis.kind == "bare":
@@ -448,10 +845,115 @@ def replace_unbacked_action_claim(
     return text
 
 
+# A denial of JARVIS'S OWN REACH, as opposed to a statement about the world
+# ("the concert is sold out") or a plain answer that happens to name a system
+# ("your calendar says nine"). Only the first person counts: the subject of
+# the inability has to be the assistant.
+_CAPABILITY_DENIAL_RE = re.compile(
+    r"(?:"
+    r"\bich\s+kann\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
+    r"\bkann\s+ich\b(?=[^.?!]*\bnicht\b)|"  # i18n-allow: German output matcher
+    r"\bkomme\s+ich\s+nicht\b|"  # i18n-allow: German output matcher
+    # The model inserts an adverb inside the denial and an adjective before
+    # the noun ("no DIRECT access at the MOMENT"); the fixed form missed both
+    # and logged nothing over a turn that carried two denials (live
+    # 2026-11-07 20:35). Up to two filler words on each side, which is what
+    # the natural phrasings use. The phrasings themselves are in
+    # tests/unit/brain/test_capability_denial.py.
+    r"\bich\s+habe\s+(?:\w+\s+){0,2}kein(?:en|e)?\s+(?:\w+\s+){0,2}zugriff\b|"  # i18n-allow: DE
+    r"\bhabe\s+ich\s+(?:\w+\s+){0,2}kein(?:en|e)?\s+(?:\w+\s+){0,2}zugriff\b|"  # i18n-allow: DE
+    r"\bich\s+habe\s+keinen?\s+(?:zugang|moglichkeit)\b|"  # i18n-allow: DE
+    r"\bi\s+can\s*(?:no|not)\b|"
+    r"\bi\s+can['’]?t\b|"
+    r"\bi\s+cannot\b|"
+    r"\bi\s+(?:do\s+not|don['’]?t)\s+have\s+(?:\w+\s+){0,2}access\b|"
+    r"\bi\s+have\s+no\s+access\b"
+    r")"
+)
+
+# "...without your approval", "...until you connect it" names a PRECONDITION
+# the user can satisfy, not a tool Jarvis lacks. Flagging those would turn
+# every correct consent prompt into a false alarm.
+_DENIAL_CONDITION_RE = re.compile(
+    r"\b(?:ohne|solange|bis\s+du|erst\s+wenn|nur\s+wenn|"  # i18n-allow: DE
+    r"without|unless|until\s+you|only\s+if)\b"
+)
+
+# The denial's own vocabulary plus the generic verbs of reaching for
+# something. What is left is the SYSTEM being denied, which is the only part
+# a tool name can be compared against.
+_DENIAL_NOISE: frozenset[str] = frozenset({
+    "kann", "kannst", "nicht", "kein", "keine", "keinen", "zugriff", "zugang",  # i18n-allow: DE
+    "direkt", "direkten", "direkte", "direkter", "aktuell", "derzeit",  # i18n-allow: DE
+    "leider", "habe", "hab", "komme", "moglichkeit", "darauf",  # i18n-allow: DE
+    "suchen", "sehen", "schauen", "nachschauen", "zugreifen", "offnen",  # i18n-allow: DE
+    "andern", "lesen", "abrufen", "externen", "externe", "extern",  # i18n-allow: DE
+    "cant", "cannot", "not", "no", "access", "dont", "have", "search",
+    "see", "look", "open", "read", "change", "reach", "external", "directly",
+})
+
+# The one domain the shared ``_SYSTEM_SYNONYMS`` table does not cover: the
+# open web. It is kept here rather than added there because that table feeds
+# three gates that SPEAK refusals, and this detector only measures.
+_WEB_TERMS: frozenset[str] = frozenset({"web", "internet", "online", "browser"})
+
+# The long-term memory is called ``wiki-recall``; the user calls it Obsidian.
+# Live 2026-11-07 20:35 denied access to it while the tool sat in the catalog,
+# and this detector stayed silent because no tool NAME carries the word the
+# user said. "wiki" belongs in the set so the bridge reaches that name.
+_NOTE_TERMS: frozenset[str] = frozenset(
+    {"obsidian", "vault", "wiki", "notes", "notizen"}  # i18n-allow: DE input word
+)
+
+
+def capability_denial_terms(text: str) -> tuple[str, ...]:
+    """Systems a reply claims to be unable to reach, for a surface check.
+
+    The caller passes the result to
+    :func:`jarvis.brain.evidence_gate.live_surface_covers`; a non-empty
+    result that the live surface DOES cover is a denial the attached tools
+    contradict. Empty means the text carries no first-person capability
+    denial, or none whose object can be named.
+
+    Like ``live_surface_covers`` this is lexical on purpose and errs toward
+    reporting: here a false positive costs one log line.
+    """
+    found: set[str] = set()
+    for clause in _split_clauses(text):
+        normalized = _normalize(clause.body).strip()
+        if not _CAPABILITY_DENIAL_RE.search(normalized):
+            continue
+        if _DENIAL_CONDITION_RE.search(normalized):
+            continue
+        terms = {
+            token for token in _content_tokens(normalized)
+            if token not in _DENIAL_NOISE
+        }
+        for bridge in (_WEB_TERMS, _NOTE_TERMS):
+            if terms & bridge:
+                terms |= bridge
+        found |= terms
+    return tuple(sorted(found))
+
+
 __all__ = [
+    "acknowledges_tool_failure",
     "action_not_started_phrase",
+    "annotate_command_sample",
+    "capability_denial_terms",
+    "claimed_result_families",
+    "format_sample_annotation",
     "has_deferred_action_claim",
     "has_false_completion_claim",
     "has_unbacked_action_claim",
+    "has_universal_claim_over_sample",
+    "has_universal_inventory_claim",
     "replace_unbacked_action_claim",
+    "sample_limit_from_command",
+    "sample_overclaim_phrase",
+    "tool_evidence_is_sample",
+    "tool_failure_phrase",
+    "tools_satisfy_family",
+    "unbacked_result_families",
+    "unbacked_result_phrase",
 ]

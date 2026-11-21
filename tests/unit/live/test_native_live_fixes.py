@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +20,7 @@ from jarvis.live import native, runtime
 from jarvis.live.coordination import NAMED_TOOLS
 from jarvis.live.native import NativeLiveVoiceSession
 from jarvis.live.state import LiveLedger
-from jarvis.live.tools import LiveTools
+from jarvis.live.tools import LiveTools, compact_declaration
 from jarvis.realtime.protocol import RealtimeEvent, RealtimeUnavailableError
 from tests.fakes.fake_native_voice import (
     FakeNativeConnection,
@@ -272,6 +273,30 @@ async def test_speech_while_silent_does_not_interrupt(tmp_path, make_provider):
         await session._native_event(RealtimeEvent(type="interrupted"))
         assert "interrupt" not in connection.names()
         assert all(frame["type"] != "audio_clear" for frame in frames)
+    finally:
+        session._ledger.close()
+
+
+@both_providers
+@pytest.mark.asyncio
+async def test_provider_interrupted_while_speaking_still_flushes_browser_playback(
+    tmp_path, make_provider
+):
+    """Gemini's ``interrupted`` edge is not ``speech_started``.
+
+    Measured 2026-11-13: the adapter logged ``interrupted`` with 6.8 s of
+    audio already buffered. The native handler must still emit ``tts_cancel``
+    so the browser flushes; only ``speech_started`` takes the ``audio_clear``
+    barge-in path. Real user barge-in stays intact either way.
+    """
+    session, connection, frames = _in_call(make_provider(), tmp_path)
+    try:
+        session._speaking = True
+        await session._native_event(RealtimeEvent(type="interrupted"))
+        assert "interrupt" not in connection.names()
+        assert all(frame["type"] != "audio_clear" for frame in frames)
+        assert any(frame["type"] == "tts_cancel" for frame in frames)
+        assert not session._speaking
     finally:
         session._ledger.close()
 
@@ -667,7 +692,7 @@ def test_a_short_declaration_keeps_every_argument_and_drops_only_prose():
             "description": "Arguments.",
         },
     }
-    short = native._compact(declaration)
+    short = compact_declaration(declaration)
     params = short["parameters"]
     assert set(params["properties"]) == {"title", "description", "kind", "items"}
     assert params["required"] == ["title"] and params["properties"]["kind"]["enum"] == ["a", "b"]
@@ -679,7 +704,7 @@ def test_a_short_declaration_keeps_every_argument_and_drops_only_prose():
     assert len(short["description"]) < len(declaration["description"])
     # A short description stays as it is.
     tiny = {"name": "t", "description": "t: Does t.", "parameters": {"type": "object"}}
-    assert native._compact(tiny)["description"] == "t: Does t."
+    assert compact_declaration(tiny)["description"] == "t: Does t."
 
 
 @both_providers
@@ -752,3 +777,83 @@ async def test_turn_language_reaches_the_provider_before_the_response(tmp_path, 
             ]
     finally:
         session._ledger.close()
+
+
+class TestTheLiveToolSurfaceIsAlwaysReported:
+    """The one diagnostic the live path has must also fire in the default config.
+
+    `_tool_declarations` logs "Native voice declares N of M tools ..." with an
+    AP-30 note that a trimmed set looks exactly like a complete one -- but it
+    returns BEFORE that line when the budget is 0, and 0 (unbounded) is the
+    default. So the live call said nothing about its tool surface on any real
+    install, and a whole day of 2026-11-07 was spent guessing what a live call
+    had declared while the text brain happily logged
+    "Tool surface for gemini: 23 of 89 tools shown".
+
+    An unbounded surface is a fact worth one line too.
+    """
+
+    def _session(self, budget: int, tool_count: int, caplog):
+        session = object.__new__(NativeLiveVoiceSession)
+        declarations = [
+            {"type": "function", "name": f"tool_{i}", "description": "d", "parameters": {}}
+            for i in range(tool_count)
+        ]
+        session._tools = SimpleNamespace(
+            declarations=lambda: list(declarations),
+            catalog=lambda: (),
+        )
+        session._config = SimpleNamespace(
+            voice=SimpleNamespace(realtime_tool_declaration_budget_tokens=budget)
+        )
+        session._provider = SimpleNamespace(
+            name="gemini-live", tool_declaration_budget_tokens=0
+        )
+        return session
+
+    def test_an_unbounded_surface_is_still_reported(self, caplog) -> None:
+        session = self._session(0, 7, caplog)
+        with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
+            fitted = session._tool_declarations()
+        assert len(fitted) == 7
+        # Not "7 of 7" any more. Both numbers came from the same list, so the
+        # pair was equal by construction and said nothing about the catalog --
+        # while the catalog's own byte budget had dropped half of it. The
+        # count is still reported; the false comparison is gone.
+        assert any("all 7 tools" in record.getMessage() for record in caplog.records), (
+            "an unbounded tool surface must still say how many tools it declared"
+        )
+        assert not any(
+            "nothing is behind discover_tools" in record.getMessage()
+            for record in caplog.records
+        ), "this layer cannot know what the catalog left behind, and must not claim it"
+
+    def test_a_trimmed_surface_keeps_reporting(self, caplog) -> None:
+        session = self._session(4, 7, caplog)
+        with caplog.at_level(logging.INFO, logger="jarvis.live.native"):
+            session._tool_declarations()
+        assert any("of 7" in record.getMessage() for record in caplog.records)
+
+
+@both_providers
+@pytest.mark.asyncio
+async def test_audio_ready_announces_the_timed_playback_transport(call, make_provider):
+    """The browser must be told to queue this path's audio, not play it at once.
+
+    The native path negotiates no WebRTC, so its PCM arrives as untimed binary
+    frames and the playback worklet is the only sink. The client keeps
+    ``timedOutput`` false until a payload names the transport, and then plays
+    every frame the moment it arrives, on top of what is already scheduled.
+    On 2026-11-13 that was audible as words running over each other on every
+    long answer, in two separate calls, while the log proved a single
+    generation produced them.
+    """
+    live = call(make_provider())
+    await live.start()
+    try:
+        ready = live.sent("audio_ready")
+        assert len(ready) == 1
+        assert ready[0]["requires_webrtc_answer"] is False
+        assert ready[0]["output_transport"] == "timed_pcm"
+    finally:
+        await live.session.end()

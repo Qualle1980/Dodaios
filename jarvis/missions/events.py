@@ -273,6 +273,32 @@ class MissionPaidUsage(_PayloadBase):
     automatic: bool = False
 
 
+class SubagentsRequested(_PayloadBase):
+    """A worker asked for parallel helpers. Recorded BEFORE anything spawns,
+    so a fan-out that is refused is still visible on the mission record."""
+
+    event_type: Literal["SubagentsRequested"] = "SubagentsRequested"
+    worker_id: str
+    count: int = 0
+    budget_left: int = 0
+    #: Short, secret-free previews of the tasks asked for, in order.
+    tasks: list[str] = Field(default_factory=list)
+
+
+class SubagentsDecided(_PayloadBase):
+    """The answer to one :class:`SubagentsRequested`, with its reason. A
+    denial is the instruction the worker continues on, not an error."""
+
+    event_type: Literal["SubagentsDecided"] = "SubagentsDecided"
+    worker_id: str
+    approved: bool = False
+    count: int = 0
+    reason: str = ""
+    #: Machine-readable answer the board translates ("ok", "single_helper",
+    #: "duplicate_tasks", "budget_spent", "over_budget", "repeat_batch", ...).
+    code: str = "ok"
+
+
 class MissionCancelled(_PayloadBase):
     event_type: Literal["MissionCancelled"] = "MissionCancelled"
     cascade: bool = False
@@ -329,7 +355,9 @@ Payload = Annotated[
     | MissionBudgetWarning
     | MissionWaitingCapacity
     | MissionCapacityDecision
-    | MissionPaidUsage,
+    | MissionPaidUsage
+    | SubagentsRequested
+    | SubagentsDecided,
     Field(discriminator="event_type"),
 ]
 

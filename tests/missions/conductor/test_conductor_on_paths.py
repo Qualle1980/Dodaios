@@ -33,7 +33,7 @@ async def manager(tmp_missions_db: Path):
     await m.stop()
 
 
-def _ledger(*, done: bool, nxt: str = "codex", instruction: str = "") -> str:
+def _ledger(*, done: bool, nxt: str = "coding", instruction: str = "") -> str:
     return json.dumps({
         "is_request_satisfied": {"reason": "r", "answer": done},
         "is_in_loop": {"reason": "r", "answer": False},
@@ -58,7 +58,7 @@ class _Seat:
             return self.ledgers.pop(0)
         if "We worked on this request" in prompt:
             return "Final answer."
-        return "- codex: do it"
+        return "- coding: do it"
 
 
 class _Factory:
@@ -115,11 +115,43 @@ async def test_a_change_order_keeps_write_access(manager: MissionManager, tmp_pa
     assert not factory.workers[0].prompts[0].lstrip().startswith(READ_ONLY_MARKER)
 
 
-async def test_the_claude_code_executor_routes_to_the_claude_worker(
+async def test_a_read_only_lead_cannot_write_even_on_a_change_order(
     manager: MissionManager, tmp_path: Path
 ) -> None:
+    # The remit binds, not the order: Memory reads, so its step is read-only
+    # even while the order as a whole is allowed to change files.
     factory = _Factory()
-    seat = _Seat(_ledger(done=False, nxt="claude-code", instruction="Refactor the router"),
+    seat = _Seat(_ledger(done=False, nxt="memory", instruction="Create docs/a.md"),
+                 _ledger(done=True))
+    k = _kontrollierer(manager, tmp_path, factory, seat)
+    mid = await manager.dispatch(prompt="Create the file docs/a.md containing 'probe'.")
+
+    assert await k.run_mission(mid) == MissionState.APPROVED
+    assert factory.workers[0].prompts[0].lstrip().startswith(READ_ONLY_MARKER)
+
+
+async def test_quality_with_nothing_built_yet_is_reported_unavailable(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    # Independence is real or absent: with no builder there is nobody of
+    # another family to judge, so no worker runs and the conductor is told.
+    factory = _Factory()
+    seat = _Seat(_ledger(done=False, nxt="quality", instruction="Review the diff"),
+                 _ledger(done=True))
+    k = _kontrollierer(manager, tmp_path, factory, seat)
+    mid = await manager.dispatch(prompt="Review whatever is in the repository.")
+
+    assert await k.run_mission(mid) == MissionState.APPROVED
+    assert factory.steps == []
+
+
+async def test_the_coding_lead_on_a_deep_order_routes_to_the_claude_worker(
+    manager: MissionManager, tmp_path: Path
+) -> None:
+    # The lead names the role; the order's own lane decides the seat, so a
+    # refactor reaches the capable worker without the model naming a binary.
+    factory = _Factory()
+    seat = _Seat(_ledger(done=False, nxt="coding", instruction="Refactor the router"),
                  _ledger(done=True))
     k = _kontrollierer(manager, tmp_path, factory, seat)
     mid = await manager.dispatch(prompt="Refactor the router across the codebase")

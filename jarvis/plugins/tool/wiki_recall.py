@@ -116,7 +116,7 @@ class WikiRecallTool:
             return ToolResult(
                 success=False,
                 output="",
-                error="vault unavailable",
+                error=f"vault unavailable at {vault_root}",
             )
 
         hits = self._search.search(query, k=k)
@@ -130,7 +130,9 @@ class WikiRecallTool:
         if not hits:
             return ToolResult(
                 success=True,
-                output=f'No wiki matches found for "{query}".',
+                output=(
+                    f'No wiki matches found for "{query}" in {vault_root}.'
+                ),
             )
 
         lines: list[str] = [f'## Wiki hits for "{query}"']
@@ -142,10 +144,57 @@ class WikiRecallTool:
             except ValueError:
                 rel_path = hit.path
 
-            snippet_part = f" — {hit.snippet}" if hit.snippet else ""
-            lines.append(f"- **{hit.title}**{snippet_part} ({rel_path})")
+            # Filename / frontmatter / alias hits have an empty body snippet by
+            # contract (SearchHit.snippet). The injector already falls back to
+            # ``preview`` (leading prose); recall used to drop the hit to a
+            # bare title+path, so a live model that cannot call wiki-page-read
+            # answered "nothing found" while holding the right note
+            # (live 2026-11-14, Werkzeugschleife → live-loop-broken-and-proven).
+            body = (hit.snippet or getattr(hit, "preview", "") or "").strip()
+            if body:
+                content_part = f" — {body}"
+            else:
+                # AP-30: a hit with no prose is a visible fault, not "".
+                log.warning(
+                    "wiki-recall: hit %r has empty snippet and preview; "
+                    "emitting title/path only",
+                    getattr(hit, "title", rel_path),
+                )
+                content_part = " — [no excerpt available; open the note for content]"
+            lines.append(
+                f"- **{hit.title}**{content_part} "
+                f"[{_trust_label(hit)}] ({rel_path})"
+            )
 
         return ToolResult(success=True, output="\n".join(lines))
+
+
+_TRUST_MARKERS: tuple[tuple[str, str], ...] = (
+    ("__fm_status_verified__", "verified"),
+    ("__fm_status_proposed__", "unconfirmed"),
+    ("__fm_status_superseded__", "superseded"),
+)
+
+
+def _trust_label(hit: Any) -> str:
+    """How much weight this hit deserves, in words the model can repeat.
+
+    Recall reaches the whole vault on purpose: a lesson exists so a mistake is
+    not repeated, and a gate that hid every note without machine-confirmed
+    evidence hid 209 of 216 of them, which defeats the point. Honesty is
+    therefore carried per hit instead of by exclusion — the model is told what
+    it is reading and can say "an unconfirmed note from the vault says ...".
+
+    The marker strings come from ``jarvis/memory/wiki/fts_index.py``, which
+    indexes ``status: <value>`` as ``__fm_status_<value>__`` exactly so a
+    status cannot be confused with a field that merely contains the word.
+    A note with no status at all is reported as unknown, never as verified.
+    """
+    frontmatter = str(getattr(hit, "frontmatter", "") or "")
+    for marker, label in _TRUST_MARKERS:
+        if marker in frontmatter:
+            return label
+    return "status unknown"
 
 
 def _with_semantic_hits(hits: list[Any], query: str, vault_root: Path) -> list[Any]:
@@ -172,6 +221,7 @@ def _build_search_instance() -> VaultSearch:
 
     raw: str | Path | None = None
     sources: tuple = ()
+    verified_only = False
     try:
         from jarvis.core import config as cfg
 
@@ -181,6 +231,7 @@ def _build_search_instance() -> VaultSearch:
         wiki_cfg = getattr(loaded, "wiki_integration", None)
         if wiki_cfg is not None:
             raw = wiki_cfg.vault_root
+            verified_only = bool(getattr(wiki_cfg, "verified_only", False))
     except Exception as exc:  # noqa: BLE001
         log.debug("wiki-recall: config load skipped: %s", exc)
 
@@ -192,4 +243,8 @@ def _build_search_instance() -> VaultSearch:
             resolved,
         )
 
-    return VaultSearch(resolved, external_sources=sources)
+    return VaultSearch(
+        resolved,
+        external_sources=sources,
+        verified_only=verified_only,
+    )

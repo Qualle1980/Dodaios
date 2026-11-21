@@ -41,12 +41,15 @@ from typing import Any
 
 from .events import (
     EventEnvelope,
+    SubagentsDecided,
+    SubagentsRequested,
     WorkerDraftReady,
     WorkerKilled,
     WorkerSpawned,
     now_ms,
 )
 from .stream_evidence import extract_stream_evidence
+from .subagent_approval import Decision, HelperRequest
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,9 @@ DEFAULT_CHILD_TIMEOUT_S = 300
 MIN_CHILD_TIMEOUT_S = 60
 MAX_CHILD_TIMEOUT_S = 900
 _CHILD_TIMEOUT_GRACE_S = 120.0
+
+#: How much of one requested task is recorded on the mission record.
+_TASK_PREVIEW_CHARS = 200
 
 #: Cap for a single child's answer text inside the aggregated tool result.
 _MAX_CHILD_ANSWER_CHARS = 40_000
@@ -113,6 +119,35 @@ class SubagentFanoutRunner:
         self._isolation_root = Path(isolation_root)
         self._manager = manager
         self._child_inventory_builder = child_inventory_builder
+
+    async def record_request(
+        self, request: HelperRequest, decision: Decision
+    ) -> None:
+        """Put one helper request and its answer on the mission record.
+
+        Both events are written whether the answer was yes or no: a refused
+        fan-out is a decision someone may need to see, and a silent refusal
+        looks like a worker that never asked.
+        """
+        await self._publish(
+            request.mission_id,
+            SubagentsRequested(
+                worker_id=request.worker_id,
+                count=len(request.tasks),
+                budget_left=request.budget_left,
+                tasks=[t[:_TASK_PREVIEW_CHARS] for t in request.tasks],
+            ),
+        )
+        await self._publish(
+            request.mission_id,
+            SubagentsDecided(
+                worker_id=request.worker_id,
+                approved=decision.approved,
+                count=len(request.tasks),
+                reason=decision.reason,
+                code=decision.code,
+            ),
+        )
 
     async def run(
         self,

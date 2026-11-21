@@ -18,6 +18,57 @@ copy directly.
 
 ---
 
+## 0. Look before you build
+
+**The first step of every task is not the task. It is finding out whether
+someone already did it.** Every fix, every feature, every turn — not only when
+you are stuck, not only for large changes. When you find it, read it, keep the
+reasoning, and adapt it to our names and our paths. That is faster, more
+accurate and cheaper in tokens than inventing it, and it is how this repo is
+meant to be worked on.
+
+Look in this order, cheapest first:
+
+1. **The diagnostics we already emit.** Logs, events, the flight recorder.
+   A theory formed before reading our own output is a guess. On 2026-11-07 an
+   agent reasoned about a tool-declaration budget while the session's own log
+   line read `declares 20 of 20 tools … nothing is behind discover_tools` — the
+   answer was already printed.
+2. **This repo.** The costs view, the cached-token discount, the honesty
+   backstop, the per-source FTS index: each was proposed as new work while it
+   sat in the tree. Search for the capability, not for the file name you
+   expect.
+3. **Upstream `Dodaios/Dodaios`.** Its package is `dodaios`, NOT `jarvis`, so a
+   path lookup with `jarvis/` returns 404 and reads as "nothing there" when the
+   file is right in front of you. Search the commit subjects
+   (`git log upstream/main --grep=… -i`) and the issues; a closed issue often
+   carries the whole answer. On 2026-11-07 upstream turned out to hold a
+   complete memory-vault subsystem that an agent had just started rebuilding by
+   hand (ADR-0044).
+4. **Public projects**, per the licence rules below.
+
+**An empty search is a RESULT, and it belongs in the PR.** "Upstream has the
+same gap, nothing to adopt" is a finding that justifies building; silence
+about it is not. State in one line what you took, adapted, or why nothing fit.
+
+**Search the FAILURE, not only the feature.** Before changing something, ask
+who has had this bug in this code before and how it was solved — in your own
+agent memory as well as the repo. On 2026-11-09 three tools with a required
+`query` field were declared to the live call and the model sent `args: {}` to
+one of them 177 times. That exact shape was recorded on 2026-11-07, when
+`search_web` took a list in the same required field and the tool stripped it;
+the note was linked from the acting agent's own memory index and never opened.
+The search that would have found it took seconds — run it before, not after.
+
+**Adapting is not copying.** Module layout, config keys, test helpers and
+names differ between trees. A file pasted in unchanged is worse than none.
+Add attribution only where the licence requires it (an MIT/Apache notice on a
+substantial copy); check with `gh api repos/<owner>/<repo>/license` before
+copying code. Non-permissive or custom licences: take the idea, not the text.
+Competitor research stays out of tracked files (§2).
+
+---
+
 ## 1. Traps no one guesses
 
 These cost real bugs. Nothing catches them but you.
@@ -63,12 +114,15 @@ These cost real bugs. Nothing catches them but you.
   machine can connect for two minutes. Frontend goes through
   `lib/connectBudget.ts`; a poll reuses a client from `jarvis/core/http_pool.py`.
   (AP-33)
-- **No invisible browsers.** UI checks, screenshots and scraping run in a tab of
-  the user's real Chrome: never a headless/private Chrome, Playwright, Puppeteer
-  or Selenium launch. Hidden Chromes once pinned the CPU at 100 % for hours. If
-  the real browser is unreachable, report the visual check as unverified. Only
-  a render job whose output is a file (video, HTML→PNG) may run headless: one
-  at a time, and kill its whole process tree when it ends.
+- **No invisible browsers.** UI checks and screenshots run in a *visible* browser
+  window: the user's real Chrome, or the Playwright MCP server on the user's PC
+  (headed, never `--headless`). Playwright MCP is the approved route for
+  browser-driven checks of Dodaios on the developer's PC. Never a headless or
+  private Chrome, Puppeteer or Selenium launch, and no browser of any kind on the
+  VPS (no Chromium in the server image). Hidden Chromes once pinned the CPU at
+  100 % for hours. If no visible browser is reachable, report the visual check as
+  unverified. Only a render job whose output is a file (video, HTML→PNG) may run
+  headless: one at a time, and kill its whole process tree when it ends.
 - **No Windows Service** — SYSTEM has no microphone. (AP-17)
 - **Never gate a CI check on `isinstance` against an unpinned library.** Green
   locally, red in CI on the next release. Discriminate by capability. (AP-28)
@@ -93,6 +147,9 @@ the install base, and "works on my machine" is the defect. (AP-23)
   pick must not restore a vendor's ask-first default. Preserve explicitly
   selected restrictions and blocked actions. Questions for missing task
   information remain available; do not turn them into permission prompts.
+  Carve-out: a destructive action (``jarvis.safety.destructive.is_destructive``)
+  is never approved by bypass — a person or scoped authorizer must still say
+  yes (decision 0002).
 - **Nothing the user did not start may bill a key on its own.** Health dots
   come from real calls, never a paid probe. Once a subscription is connected,
   background work runs only on subscriptions or local models
@@ -122,6 +179,17 @@ attribution notices and factual dependency, integration and compatibility
 references; this rule never authorizes concealing code provenance. Competitor
 research stays out of the repo. `scripts/ci/check_design_references.py` checks
 staged lines at commit time and the whole tree in CI.
+
+**A new capability is RUN before it lands. Mandatory, not a tier.** Anything
+that changes what a model *does* — a tool declared to a surface, a prompt rule,
+a schema a model must fill — is exercised against a real turn before the PR
+merges. Passing unit tests are not that check. On 2026-11-09 two PRs landed
+with green tests that asserted exactly which tools a live call is given; the
+model then called one of them with `args: {}` 177 times at 3-4 calls a second,
+never spoke, and the app was unusable until both were reverted. No test in
+either PR executes a call, so none of them could see a loop. If the turn cannot
+be run, the PR stays a draft and says so. Never merge "correct by test" into
+the user's running app.
 
 **Proportionality.** You own the validation plan: the smallest set of checks
 that can detect a plausible regression from the diff. State the scope, what
@@ -269,3 +337,23 @@ voice-ready path.
 [`docs/os-parity.md`](docs/os-parity.md) ·
 [`docs/macos-permissions.md`](docs/macos-permissions.md) ·
 [`docs/jarvis-cli.md`](docs/jarvis-cli.md).
+
+## 6. Agent context (`.agent-context/`)
+
+Shared working context for every agent; the rules stay in this file.
+
+- Read `.agent-context/CURRENT.md` at the start of a task: short state, kept
+  under 8 KB. Replace stale lines, never append history.
+- Before fixing a failure, run
+  `python .agent-context/tools/context.py search "<symptom words>"` (§0: search
+  the failure). It returns `status: verified` lessons only; `--all` adds drafts.
+- A lesson is one file in `lessons/` with the frontmatter shown in CURRENT.md.
+  Mark it `verified` only with a test, command output or live run as proof;
+  everything else is `draft`. English, no secrets or private data.
+- Decisions go to `decisions/NNNN-*.md`. Scratch output goes to `logs/`, which
+  is never versioned (`tools/cleanup.ps1`, dry run unless `-Apply`).
+- The SQLite index is a cache under `.agent-context/.cache/`; never commit it.
+- `tools/guard-destructive.ps1` is an optional `PreToolUse` hook that answers
+  `ask` for destructive shell commands. Register it per machine (`.claude/*` is
+  not versioned). Under `bypassPermissions` the `ask` still holds, and in a
+  headless run it denies, so do not register it for unattended workers.

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from jarvis.core.process_utils import NO_WINDOW_CREATIONFLAGS
+from jarvis.core.result_scope import annotate_command_sample
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,17 @@ READ_ONLY_TOOLS: Final[frozenset[str]] = frozenset({"Read", "Ls", "Glob", "Grep"
 EDIT_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit"})
 MUTATING_TOOLS: Final[frozenset[str]] = frozenset({"Write", "Edit", "RunCommand"})
 
+#: Instant / chat folder path only. Coding panes and mission harness keep
+#: their own output limits. Caps mark a sample (annotate / truncated), they
+#: must not starve a real turn of context (mandate 2026-08-24 / 7c985c1ba).
 _READ_CAP_CHARS = 60_000
 _COMMAND_CAP_CHARS = 30_000
 _GREP_MAX_RESULTS = 200
+#: A Grep stops after this many files or seconds and says it is partial.
+_GREP_MAX_FILES = 20_000
+_GREP_MAX_SECONDS = 20.0
+#: Files larger than this are skipped by Grep (logs, dumps, cloud archives).
+_GREP_MAX_FILE_BYTES = 2_000_000
 _GLOB_MAX_RESULTS = 500
 _DEFAULT_COMMAND_TIMEOUT_S = 120.0
 _MAX_COMMAND_TIMEOUT_S = 900.0
@@ -142,7 +151,8 @@ TOOL_SPECS: Final[tuple[dict[str, Any], ...]] = (
         "description": (
             "Run a shell command in the working directory and return its output. "
             "Use for git, tests, builds, package managers and anything the other "
-            "tools cannot do. Commands that need a terminal UI will not work."
+            "tools cannot do. Commands that need a terminal UI will not work. "
+            "A limited list is a sample."
         ),
         "input_schema": {
             "type": "object",
@@ -243,6 +253,31 @@ def _cap(text: str, limit: int) -> str:
     return text[:limit] + f"\n…[truncated, {len(text) - limit} more characters]"
 
 
+def _cap_read(text: str, limit: int = _READ_CAP_CHARS) -> str:
+    """Cap a Read payload and point the model at offset/limit for the rest."""
+    if len(text) <= limit:
+        return text
+    kept = text[:limit]
+    omitted = len(text) - limit
+    return (
+        f"{kept}\n…[truncated, {omitted} more characters; "
+        "use offset/limit to read the rest]"
+    )
+
+
+def _cap_command_output(text: str, limit: int = _COMMAND_CAP_CHARS) -> str:
+    """Cap RunCommand / test output with head and tail around a marker."""
+    if len(text) <= limit:
+        return text
+    marker = f"\n…[truncated middle, {len(text) - limit} characters omitted]…\n"
+    keep = max(0, limit - len(marker))
+    head = keep // 2
+    tail = keep - head
+    if tail <= 0:
+        return text[:limit] + "\n…[truncated]"
+    return text[:head] + marker + text[-tail:]
+
+
 # ---------------------------------------------------------------- tools
 
 
@@ -288,7 +323,7 @@ def _read(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     if start or end < len(lines):
         header += f", showing {start + 1}-{min(end, len(lines))}"
     header += ")"
-    return _cap(header + "\n" + body, _READ_CAP_CHARS), False
+    return _cap_read(header + "\n" + body, _READ_CAP_CHARS), False
 
 
 def _write(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
@@ -403,17 +438,38 @@ def _grep(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
         return f"Invalid regular expression: {exc}", True
     name_glob = str(args.get("glob") or "").strip() or None
     limit = min(int(args.get("max_results") or _GREP_MAX_RESULTS), _GREP_MAX_RESULTS)
-    files = [root] if root.is_file() else list(_iter_files(root)) if root.is_dir() else []
-    if not files:
+    # Lazy: materialising the walk first (list(...)) scanned the whole tree
+    # before the bound below could apply, so a search with no match never ended.
+    if root.is_file():
+        files = iter([root])
+    elif root.is_dir():
+        files = _iter_files(root)
+    else:
         return f"Nothing to search at {_display(root, cwd)}", True
     hits: list[str] = []
+    # A search with no match never reaches the hit limit, so without a bound it
+    # walked the whole folder: a session rooted at the home directory scanned
+    # 134k files in 45 s and had not finished. The bound makes the search end,
+    # and the reply says the search is partial instead of looking complete.
+    deadline = time.monotonic() + _GREP_MAX_SECONDS
+    scanned = 0
+    stopped = ""
     for p in files:
+        if scanned >= _GREP_MAX_FILES:
+            stopped = f"after {scanned} files"
+            break
+        if time.monotonic() >= deadline:
+            stopped = f"after {_GREP_MAX_SECONDS:.0f} s, {scanned} files"
+            break
         rel_name = p.relative_to(root).as_posix() if root.is_dir() else p.name
         if name_glob and not (
             fnmatch.fnmatch(p.name, name_glob) or fnmatch.fnmatch(rel_name, name_glob)
         ):
             continue
+        scanned += 1
         try:
+            if p.stat().st_size > _GREP_MAX_FILE_BYTES:
+                continue
             with p.open("r", encoding="utf-8", errors="replace") as fh:
                 for no, line in enumerate(fh, start=1):
                     if rx.search(line):
@@ -425,12 +481,16 @@ def _grep(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
             continue
         if len(hits) >= limit:
             break
+    partial = (
+        f"\n…search is partial: stopped {stopped}; narrow the path or the glob"
+        if stopped else ""
+    )
     if not hits:
-        return f"No matches for {pattern!r}", False
+        return f"No matches for {pattern!r}{partial}", False
     out = "\n".join(hits)
     if len(hits) >= limit:
         out += f"\n…stopped at {limit} matches"
-    return out, False
+    return out + partial, False
 
 
 async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
@@ -472,7 +532,8 @@ async def _run_command(args: dict[str, Any], cwd: Path) -> tuple[str, bool]:
     text = raw.decode("utf-8", errors="replace")
     took = time.perf_counter() - started
     code = proc.returncode
-    out = _cap(text.rstrip(), _COMMAND_CAP_CHARS)
+    out = _cap_command_output(text.rstrip(), _COMMAND_CAP_CHARS)
+    out = annotate_command_sample(out, command)
     footer = f"\n[exit {code} · {took:.1f}s]"
     return (out + footer).strip(), code != 0
 

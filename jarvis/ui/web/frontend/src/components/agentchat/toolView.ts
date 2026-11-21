@@ -242,3 +242,28 @@ export function outputTokens(usage: Record<string, unknown> | null | undefined):
   const v = usage.output_tokens ?? usage.output ?? usage.completion_tokens;
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
+
+/** The turn's INPUT tokens — the side that actually costs.
+ *
+ * A turn's receipt used to show output alone, which on a subscription is the
+ * one harmless number: measured live on 2026-10-31, twelve chat turns ran
+ * 16_356-17_156 input tokens against 68-179 output, and 29 later turns reached
+ * 32_956 input. The receipt showed "104 tokens" and no price, because
+ * `costUsd` is 0 on a plan seat. So the surface that spends the plan window
+ * was the one surface that never said so. */
+export function inputTokens(usage: Record<string, unknown> | null | undefined): number | null {
+  if (!usage) return null;
+  const v = usage.input_tokens ?? usage.input ?? usage.prompt_tokens;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** Input tokens served from the provider's prompt cache, when it reports any.
+ *
+ * `input_tokens` is already the UNCACHED share (the brains subtract it, as the
+ * cost contract requires), so this is additional, not a subset. Showing it is
+ * what makes a cache that stopped working visible instead of silent. */
+export function cachedTokens(usage: Record<string, unknown> | null | undefined): number | null {
+  if (!usage) return null;
+  const v = usage.cache_hit_tokens ?? usage.cached_tokens ?? usage.cache_read_input_tokens;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}

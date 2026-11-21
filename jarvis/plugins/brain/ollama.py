@@ -68,8 +68,17 @@ RECOMMENDED_VISION_PULL = "qwen3-vl"
 
 # Local server: an unreachable endpoint must fail fast (2 s) so the fallback
 # chain moves on, while a slow CPU-bound generation may legitimately stream
-# for minutes — hence the wide read timeout.
+# for minutes — hence the wide read timeout. The default below is the remote /
+# unknown-host budget; loopback uses :func:`client_timeout_for` (read ≥ 300 s).
+# Connect stays at 2 s either way. PR #107's lead first-sign budget (6 s) is a
+# separate bound on *setup* and is not this read value.
 CLIENT_TIMEOUT = httpx.Timeout(connect=2.0, read=120.0, write=30.0, pool=30.0)
+#: Prefill of ~23k tokens at ~100 tok/s is ~240 s on CPU; 300 s leaves margin.
+LOCAL_READ_TIMEOUT_S = 300.0
+#: Without a vouchable accelerator, plan at most a 16k window (8k–16k CPU
+#: profile). Plenty of system RAM must not push a CPU-only host to the 32k
+#: accelerator ceiling — that is what made a 100 % CPU run look "GPU-sized".
+CPU_CONTEXT_CEILING = 16_384
 
 # The automatic window per (server root, model): sized once per process, since
 # a changed ``num_ctx`` makes Ollama reload the weights.
@@ -84,6 +93,23 @@ _PROFILE_REFUSED_TTL_S = 300.0
 
 _NUM_CTX_PARAMETER_RE = re.compile(r"^\s*num_ctx\s+(\d+)\s*$", re.MULTILINE)
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def client_timeout_for(root: str) -> httpx.Timeout:
+    """httpx timeout for one Ollama server root.
+
+    Connect is always the 2 s fail-fast from :data:`CLIENT_TIMEOUT` so a dead
+    host still hands the fallback chain the next family. Only the read budget
+    grows for a loopback server, where CPU-bound prefill can take minutes.
+    """
+    if _is_this_machine(root):
+        return httpx.Timeout(
+            connect=CLIENT_TIMEOUT.connect,
+            read=LOCAL_READ_TIMEOUT_S,
+            write=CLIENT_TIMEOUT.write,
+            pool=CLIENT_TIMEOUT.pool,
+        )
+    return CLIENT_TIMEOUT
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +283,27 @@ class OllamaBrain:
             return False
         return self._runtime_present()
 
+    @staticmethod
+    def runtime_reachable() -> bool:
+        """Whether the configured Ollama server answers a free ``/api/version``.
+
+        Selection asks this through :mod:`jarvis.local_models.runtime_reachable`
+        so a stopped local daemon is skipped instead of winning the worker
+        chain on keylessness alone. Read-only; never starts the server.
+        """
+        from jarvis.core import config as cfg_mod
+        from jarvis.local_models.runtime_reachable import http_get_ok
+
+        try:
+            ep = cfg_mod.resolve_provider_endpoint(
+                "ollama", vendor_default_base_url=default_server_root()
+            )
+            root = normalize_server_root(ep.base_url or default_server_root())
+        except Exception:  # noqa: BLE001 — unreadable endpoint is not reachable
+            log.debug("ollama runtime_reachable: endpoint unreadable", exc_info=True)
+            return False
+        return http_get_ok(f"{root}/api/version")
+
     def _runtime_present(self) -> bool:
         """Whether a server can exist at all, without a network call.
 
@@ -305,7 +352,7 @@ class OllamaBrain:
                 # on a non-empty one; a team proxy swaps in its real token.
                 api_key=self._credential or "ollama",
                 base_url=f"{root}/v1",
-                timeout=CLIENT_TIMEOUT,
+                timeout=client_timeout_for(root),
                 max_retries=0,
             )
         return self._client
@@ -349,7 +396,7 @@ class OllamaBrain:
         root = self._resolve_root()
         try:
             async with httpx.AsyncClient(
-                timeout=CLIENT_TIMEOUT, headers=self._native_headers(),
+                timeout=client_timeout_for(root), headers=self._native_headers(),
             ) as client:
                 resp = await client.get(f"{root}/api/tags")
                 resp.raise_for_status()
@@ -435,7 +482,7 @@ class OllamaBrain:
         caps_set: set[str] | None = None
         try:
             async with httpx.AsyncClient(
-                timeout=CLIENT_TIMEOUT, headers=self._native_headers(),
+                timeout=client_timeout_for(root), headers=self._native_headers(),
             ) as client:
                 resp = await client.post(f"{root}/api/show", json={"model": name})
                 resp.raise_for_status()
@@ -664,7 +711,7 @@ class OllamaBrain:
         size_gb: float | None = None
         try:
             async with httpx.AsyncClient(
-                timeout=CLIENT_TIMEOUT, headers=self._native_headers(),
+                timeout=client_timeout_for(root), headers=self._native_headers(),
             ) as client:
                 resp = await client.get(f"{root}/api/tags")
                 resp.raise_for_status()
@@ -679,18 +726,26 @@ class OllamaBrain:
         if model not in self._native_context:
             await self._capabilities(model, root)
         if _is_this_machine(root):
-            accelerator_gb, _source = await asyncio.to_thread(ollama_pull.accelerator_gb)
+            accelerator_gb, source = await asyncio.to_thread(ollama_pull.accelerator_gb)
             ram_gb = await asyncio.to_thread(ollama_pull.total_memory_gb)
         else:
             # The server is another machine; this one's memory says nothing
             # about what fits there.
-            accelerator_gb, ram_gb = 0.0, None
+            accelerator_gb, source, ram_gb = 0.0, "none", None
         tokens, reason = automatic_context(
             size_gb=size_gb,
             native_context=self._native_context.get(model),
             accelerator_gb=accelerator_gb,
             ram_gb=ram_gb,
         )
+        # CPU-only (or unknown accelerator): keep the 8k–16k profile even when
+        # system RAM would otherwise fund the 32k accelerator ceiling.
+        if accelerator_gb <= 0 or source in {"none", "cpu"}:
+            if tokens > CPU_CONTEXT_CEILING:
+                reason = (
+                    f"{reason}; capped to {CPU_CONTEXT_CEILING:,} for CPU-only host"
+                )
+            tokens = min(tokens, CPU_CONTEXT_CEILING)
         if size_gb is not None and model in self._native_context:
             _AUTOMATIC_CONTEXT[key] = tokens
             # A brain built for the next turn budgets for this from the start.
@@ -733,7 +788,7 @@ class OllamaBrain:
             running: int | None = None
             try:
                 async with httpx.AsyncClient(
-                    timeout=CLIENT_TIMEOUT, headers=self._native_headers(),
+                    timeout=client_timeout_for(root), headers=self._native_headers(),
                 ) as client:
                     resp = await client.get(f"{root}/api/ps")
                     resp.raise_for_status()

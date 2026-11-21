@@ -268,13 +268,17 @@ class FastBootstrap:
 
     @staticmethod
     async def _ok_health(send: Any) -> None:
-        # Same ``instance`` field the full app's /api/health carries, so the
-        # frontend can badge a dev window from the very first poll.
-        from jarvis.core.instance import current_instance
+        # Same deployment fields the full app's /api/health carries, so the
+        # frontend can badge a dev window from the very first poll and a voice
+        # tool wrapping health sees a consistent shape while warming.
+        import json
 
-        body = (
-            '{"ok": true, "warming": true, "instance": "' + current_instance().name + '"}'
-        ).encode("ascii")
+        from jarvis.core.runtime_location import runtime_location_facts
+
+        body = json.dumps(
+            runtime_location_facts(warming=True),
+            separators=(",", ":"),
+        ).encode("utf-8")
         await send(
             {
                 "type": "http.response.start",

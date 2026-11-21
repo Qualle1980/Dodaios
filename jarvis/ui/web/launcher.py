@@ -536,6 +536,10 @@ async def _run_headless(args) -> int:
 
         assert_bind_safe(_host, _control_key.get_control_key())
     _port = args.port if args.port is not None else _fast_admin_port()
+    from jarvis.core import runtime_refs as _runtime_refs
+
+    _runtime_refs.set_listen_endpoint(_host, _port)
+    _runtime_refs.set_api_base_url(f"http://127.0.0.1:{_port}")
     _bootstrap_server = uvicorn.Server(
         uvicorn.Config(
             app=_bootstrap_app,

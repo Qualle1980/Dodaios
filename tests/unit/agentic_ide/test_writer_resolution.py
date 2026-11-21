@@ -18,49 +18,53 @@ def _cfg(choice: str) -> SimpleNamespace:
 
 
 def test_auto_prefers_the_pinned_tool_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The live 2026-08-18 16:10 delay: ``auto`` handed a spoken instruction to
-    the subscription CLI, which spent 18.9 s — nearly all of it its own process
-    start — while the user's Tool Model would have written the same brief in
-    1-3 s. Under ``auto`` the writer that answers soonest goes first, and a
-    slower rung is not even probed while a faster one qualifies."""
+    """Under ``auto`` the subscription is probed before the Tool Model. When no
+    coding CLI qualifies, the pinned Tool Model still writes the brief — and a
+    slower API rung is not probed while it does."""
+    probed_api: list[int] = []
     monkeypatch.setattr(writer, "_load_config", lambda: _cfg("auto"))
+    monkeypatch.setattr(writer, "_subscription", lambda cfg, timeout: None)
     monkeypatch.setattr(writer, "_tool_model", lambda cfg: SimpleNamespace(name="vertex"))
-    monkeypatch.setattr(writer, "_quality", lambda cfg: "api-brain")
     monkeypatch.setattr(
-        writer,
-        "_subscription",
-        lambda cfg, timeout: pytest.fail("probed a coding CLI while a faster writer qualified"),
+        writer, "_quality", lambda cfg: probed_api.append(1) or "api-brain"
     )
 
     brain, source = writer.resolve_writer()
 
     assert getattr(brain, "name", "") == "vertex"
     assert source == "tool_model:vertex"
+    assert not probed_api
 
 
-def test_auto_prefers_the_api_tier_over_a_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No Tool Model pinned: a direct API call has no cold start to pay, so it
-    writes before any coding CLI is asked."""
+def test_auto_prefers_the_subscription_over_the_api_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subscription-first ``auto``: a connected coding CLI writes before any
+    API-billed rung is asked, including the quality tier."""
+    probed_api: list[int] = []
     monkeypatch.setattr(writer, "_load_config", lambda: _cfg("auto"))
-    monkeypatch.setattr(writer, "_tool_model", lambda cfg: None)
-    monkeypatch.setattr(writer, "_quality", lambda cfg: "api-brain")
     monkeypatch.setattr(
-        writer,
-        "_subscription",
-        lambda cfg, timeout: pytest.fail("probed a coding CLI while a faster writer qualified"),
+        writer, "_subscription", lambda cfg, timeout: SimpleNamespace(name="claude-cli")
+    )
+    monkeypatch.setattr(
+        writer, "_tool_model", lambda cfg: probed_api.append(1) or SimpleNamespace(name="vertex")
+    )
+    monkeypatch.setattr(
+        writer, "_quality", lambda cfg: probed_api.append(1) or "api-brain"
     )
 
     brain, source = writer.resolve_writer()
 
-    assert brain == "api-brain"
-    assert source == "api"
+    assert getattr(brain, "name", "") == "claude-cli"
+    assert source == "subscription:claude-cli"
+    assert not probed_api
 
 
 def test_auto_reaches_the_subscription_when_nothing_api_side_qualifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The downloader whose ONLY credential is a coding CLI still gets a
-    written brief — the subscription is last, not gone."""
+    written brief — the subscription leads ``auto``, and still answers alone."""
     monkeypatch.setattr(writer, "_load_config", lambda: _cfg("auto"))
     monkeypatch.setattr(writer, "_tool_model", lambda cfg: None)
     monkeypatch.setattr(writer, "_quality", lambda cfg: None)

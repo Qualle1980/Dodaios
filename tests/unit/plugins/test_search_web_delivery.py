@@ -52,3 +52,39 @@ def test_tool_context_reaches_execution_context() -> None:
     )
     merged = {**loop._tool_context, "output_language": "de", "voice_confirm": False}
     assert merged == {"delivery": "written", "output_language": "de", "voice_confirm": False}
+
+
+class TestQueryVariantsAcceptBothShapes:
+    """The required field is `query`, so that is where a batching model puts
+    its list.
+
+    `jarvis/brain/manager.py` instructs the model: "For web research: put your
+    2-3 query variants into ONE search_web call (its 'queries' parameter)".
+    The schema marks `query` -- not `queries` -- as required, so a model that
+    batches reaches for `query` and sends a list. Live 2026-11-07: a question
+    about Crunchyroll prices died on `'list' object has no attribute 'strip'`,
+    and the assistant told the owner it had no internet access. It does; the
+    retry one second later with a plain string succeeded.
+    """
+
+    def test_a_plain_string_is_one_variant(self) -> None:
+        assert sw._query_variants({"query": " crunchyroll preise "}) == ["crunchyroll preise"]
+
+    def test_a_list_in_the_required_field_is_not_a_crash(self) -> None:
+        got = sw._query_variants({"query": ["crunchyroll preise", "crunchyroll cost"]})
+        assert got == ["crunchyroll preise", "crunchyroll cost"]
+
+    def test_both_fields_merge_without_duplicates(self) -> None:
+        got = sw._query_variants(
+            {"query": ["a question", "A QUESTION"], "queries": ["another one", "a question"]}
+        )
+        assert got == ["a question", "another one"]
+
+    def test_the_variant_cap_still_holds(self) -> None:
+        got = sw._query_variants({"query": [f"q{i}" for i in range(10)]})
+        assert len(got) == sw._MAX_QUERY_VARIANTS
+
+    def test_nothing_usable_is_empty_not_an_exception(self) -> None:
+        assert sw._query_variants({}) == []
+        assert sw._query_variants({"query": None, "queries": []}) == []
+        assert sw._query_variants({"query": ["", "   "]}) == []

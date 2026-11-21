@@ -113,6 +113,7 @@ from jarvis.voice.contextual_readback import render_readback
 from .action_honesty import has_unbacked_action_claim, replace_unbacked_action_claim
 from .assistant_name import resolve_assistant_name
 from .dispatcher import BrainDispatcher
+from .lead_budget import LeadActivity, LeadTookTooLong, run_lead_under_budget
 from .evidence_gate import live_surface_covers
 from .identity import identity_block
 from .intent_router import RoutingDecision, classify
@@ -159,6 +160,17 @@ _TURN_HISTORY_OVERRIDE: ContextVar[tuple[BrainMessage, ...] | None] = ContextVar
 #: the manager, so a concurrent voice turn keeps its own brain.
 _TURN_OVERRIDE: ContextVar[TurnOverride | None] = ContextVar(
     "jarvis.brain.manager.turn_override",
+    default=None,
+)
+#: The seat an external surface (a subscription CLI on the typed chat) answers
+#: on, set only while ``render_surface_prompt`` builds its head. ``None`` means
+#: "not a surface build": the manager's own ``_active_turn_identity`` applies.
+#: ``("", None)`` means "a surface build that named no seat": no identity line
+#: at all, because the manager's value belongs to the last voice/brain turn and
+#: would name the wrong model (live 2026-11-15: Claude and Antigravity seats
+#: both answered "I am Gemini").
+_SURFACE_IDENTITY: ContextVar[tuple[str, str | None] | None] = ContextVar(
+    "jarvis.brain.manager.surface_identity",
     default=None,
 )
 
@@ -1476,6 +1488,106 @@ def _terminals_spawned_line(
     )
 
 
+#: Work handed to a terminal rather than a request to open more panes.
+#: "Gib dem Claude-Code-Terminal einen Auftrag …" uses give/gib as a handoff
+#: verb; without this, ``detect_spawn`` treats it as "open one pane" because
+#: ``gib`` is also an open-verb stem ("gib mir zwei Terminals").
+_HANDOFF_TO_TERMINAL_RE = re.compile(
+    r"\b(?:gib|geb\w*|give|assign)\b"
+    r"\s+(?:dem|der|den|the)\s+"
+    r".{0,48}?\b(?:terminal|pane)s?\b",
+    re.IGNORECASE,
+)
+
+#: Nouns that mark a coding task on the utterance (DE/EN at least).
+_TASK_NOUN_RE = re.compile(
+    r"\b(?:auftrag\w*|aufgabe\w*|task|assignment|job)\b",
+    re.IGNORECASE,
+)
+
+#: Explicit model pick on a pure-open utterance ("with model X" / "mit Modell X").
+_EXPLICIT_SPAWN_MODEL_RE = re.compile(
+    r"\b(?:with\s+|mit\s+)?(?:model|modell)\s*[:=]?\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,119})",
+    re.IGNORECASE,
+)
+
+#: Explicit effort pick ("with effort medium" / "mit Aufwand high").
+_EXPLICIT_SPAWN_EFFORT_RE = re.compile(
+    r"\b(?:with\s+|mit\s+)?(?:effort|aufwand)\s*[:=]?\s*"
+    r"([A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+
+
+def is_pure_open_request(text: str) -> bool:
+    """True only for a pure "open N panes" request with no task text.
+
+    The spawn fast-path may open panes only when this returns True. Anything
+    that also carries work (a file to create, a build, a review, "Gib dem
+    …-Terminal einen Auftrag …") returns False so Instant chooses model and
+    effort and briefs. Deterministic; German and English; no LLM.
+    """
+    from jarvis.agentic_ide import intent as ide_intent
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if ide_intent.detect_spawn(cleaned) is None:
+        return False
+    if ide_intent.spawn_includes_task(cleaned):
+        return False
+    if _HANDOFF_TO_TERMINAL_RE.search(cleaned) and _TASK_NOUN_RE.search(cleaned):
+        return False
+    if _TASK_NOUN_RE.search(cleaned):
+        return False
+    return True
+
+
+def _explicit_spawn_model(text: str) -> str:
+    match = _EXPLICIT_SPAWN_MODEL_RE.search(text or "")
+    return match.group(1).strip() if match else ""
+
+
+def _explicit_spawn_effort(text: str) -> str:
+    match = _EXPLICIT_SPAWN_EFFORT_RE.search(text or "")
+    return match.group(1).strip().lower() if match else ""
+
+
+def _resolve_spawn_launch_picks(
+    agent: str, user_text: str
+) -> tuple[str, str] | dict[str, str]:
+    """Catalog model/effort for a pure-open group, or a refusal payload.
+
+    Same rules as ``workspace-orchestrate`` create: an omitted model uses the
+    cheap ``simple`` default for that CLI; an explicit id is checked with
+    ``launch_picks.normalize_model`` / ``normalize_effort`` against the
+    catalogs. Never invent an id.
+    """
+    from jarvis.workspace import launch_picks, task_size
+
+    wanted_model = _explicit_spawn_model(user_text)
+    wanted_effort = _explicit_spawn_effort(user_text)
+    if wanted_model:
+        got_model = launch_picks.normalize_model(agent, wanted_model)
+        if got_model != wanted_model:
+            return {"status": "not_accepted", "model": wanted_model, "cli": agent}
+        model = got_model
+    else:
+        model = task_size.pick_for_size(agent, "simple").model
+
+    if wanted_effort:
+        got_effort = launch_picks.normalize_effort(agent, wanted_effort)
+        if got_effort != wanted_effort:
+            return {"status": "not_accepted", "effort": wanted_effort, "cli": agent}
+        effort = got_effort
+    elif not wanted_model:
+        effort = task_size.pick_for_size(agent, "simple").effort
+    else:
+        effort = ""
+    return model, effort
+
+
 # Conversational coaching: "help me [get better at a soft / cognitive /
 # conversational skill]" — asking, thinking, phrasing, deciding, understanding,
 # expressing, communicating. This is CONVERSATION (Jarvis answers inline and
@@ -2465,12 +2577,9 @@ _TOOL_ROUTING_RULES = (
 # old wording sat under a list that did not contain the tools it named, so it
 # read as an order to refuse work the surface actually covered (PR-05).
 _TOOL_LIST_RULE = (
-    "STRENGE REGEL: Rufe ausschließlich Werkzeuge aus dieser Liste auf und "
-    "erfinde niemals einen Werkzeugnamen. Passt für die gewünschte Aktion "
-    "wirklich keines, sag ehrlich: "
-    "'Das kann ich noch nicht — mir fehlt das passende Werkzeug.' "
-    "Und behaupte NIEMALS, etwas getan zu haben, das du nicht in diesem Turn "
-    "wirklich aufgerufen hast und dessen Ergebnis du gesehen hast.\n"
+    # English once: the bilingual duplicate cost ~75 tokens every call and
+    # the model already follows the English half. The German user-facing
+    # refusal still appears in spoken/written replies via other rules.
     "Call ONLY tools from the list above and never invent a tool name. If "
     "nothing fits, say honestly: \"I can't do that yet — I don't have a "
     "registered tool for it.\" And NEVER claim to have done something you did "
@@ -3680,6 +3789,11 @@ class BrainManager:
         """Filter a delegated turn to tool-capable cross-family candidates."""
         from jarvis.core.model_selection import operation_model, worker_selection
 
+        # Explicit operation pin or configured [brain.worker] collapses the
+        # hoist (subscription must not become metered API). Reachability for
+        # scheduled tasks lives in usable_worker_selection / _task_provider_chain
+        # — not here: usable_* would short-circuit to any rescue-tail key and
+        # erase the Tool Model cross-family chain (AP-21 vs hoist contract).
         selection = operation_model.get() or worker_selection(self._config)
         if selection is not None:
             # A selected subscription must not silently turn into metered API usage.
@@ -3893,6 +4007,7 @@ class BrainManager:
         loop_control: Any = None,
         own_tools: Iterable[str] = (),
         direct_tools: frozenset[str] | None = None,
+        budget: Any = None,
     ) -> BrainDispatcher:
         """Builds the dispatcher with an optional tool override.
 
@@ -3955,11 +4070,27 @@ class BrainManager:
         )
         if cards:
             system_prompt = f"{system_prompt}\n\n{cards}"
+        # Project mode: the host's intent format + bounded state package while a
+        # project is active. Off by default, so ordinary chat is unchanged.
+        try:
+            from jarvis.host_controller.chat_bridge import (
+                active_project,
+                project_prompt_addon,
+            )
+
+            if active_project() is not None:
+                addon = project_prompt_addon()
+                if addon:
+                    system_prompt = f"{system_prompt}\n\n{addon}"
+        except Exception as exc:  # noqa: BLE001 - never break a turn over this
+            log.warning("project mode: directive not added (%s)", exc)
         if delegated_voice:
             system_prompt = f"{system_prompt}\n\n{_DELEGATE_VOICE_DIRECTIVE}"
         kwargs: dict[str, Any] = {}
         if max_turns is not None:
             kwargs["max_turns"] = max_turns
+        if budget is not None:
+            kwargs["budget"] = budget
         return BrainDispatcher(
             brain,
             tools=tools,
@@ -4002,9 +4133,13 @@ class BrainManager:
             kwargs["own_tools"] = tuple(override.tools_extra)
         if override.tools_direct is not None:
             kwargs["direct_tools"] = override.tools_direct
+        if override.budget is not None:
+            kwargs["budget"] = override.budget
         return kwargs
 
-    async def render_surface_prompt(self, *, user_text: str) -> tuple[str, str]:
+    async def render_surface_prompt(
+        self, *, user_text: str, provider: str = "", model: str | None = None
+    ) -> tuple[str, str]:
         """(system prompt, turn context) for an external agent that should BE Jarvis.
 
         A subscription CLI seat on the typed chat runs its own loop, but the
@@ -4015,8 +4150,16 @@ class BrainManager:
         text pulls in, and the per-turn context (date). Read-only:
         nothing is stored on the manager, so a voice turn running alongside
         sees no trace of it.
+
+        ``provider``/``model`` name the seat that answers. The identity line
+        then names that seat; without them the prompt carries no identity line,
+        never the manager's own, which belongs to the last brain turn.
         """
-        base = self._build_system_prompt()
+        token = _SURFACE_IDENTITY.set(((provider or "").strip(), model))
+        try:
+            base = self._build_system_prompt()
+        finally:
+            _SURFACE_IDENTITY.reset(token)
         prompt = base
         if self._wiki_injector is not None:
             try:
@@ -4025,6 +4168,7 @@ class BrainManager:
                 )
             except Exception:  # noqa: BLE001 — the layers without the wiki are still Jarvis
                 log.debug("render_surface_prompt: wiki context skipped", exc_info=True)
+        prompt += self._memory_turn_suffix(user_text)
         try:
             turn_context = self._build_turn_context()
         except Exception:  # noqa: BLE001 — the context block is a nicety
@@ -4428,6 +4572,18 @@ class BrainManager:
             return target_prefix + raw_output[len(de_prefix):]
         return raw_output
 
+    def _prompt_identity(self) -> tuple[str, str | None] | None:
+        """The (provider, model) the identity line names, or ``None`` for none.
+
+        A surface build (``render_surface_prompt``) names its own seat or
+        nothing; every other build names the provider this manager's current
+        turn runs on. getattr: tolerates ``__new__``-constructed test managers.
+        """
+        surface = _SURFACE_IDENTITY.get()
+        if surface is not None:
+            return surface if surface[0] else None
+        return getattr(self, "_active_turn_identity", None)
+
     def _build_system_prompt(self) -> str:
         """Builds the system prompt with Jarvis-Agent-style workspace injection.
 
@@ -4456,7 +4612,7 @@ class BrainManager:
                 if CONVERSATIONAL_RESPONSE_STYLE in (private.system_extra or "")
                 else _WRITTEN_CHAT_STYLE,
             ]
-            identity = getattr(self, "_active_turn_identity", None)
+            identity = self._prompt_identity()
             if identity:
                 parts.append(_provider_identity_directive(identity[0], identity[1], "this agent"))
             parts.append(self._reply_language_directive())
@@ -4495,12 +4651,13 @@ class BrainManager:
                 pass
 
         # Mandate phase 2 (reactivated 2026-04-28): persona block from
-        # JARVIS_PERSONA.md incl. ECHO-PARAPHRASE section and hangup contract.
-        # The "effective" loader returns the user's custom system prompt when one
-        # is set in Settings (data/custom_system_prompt.md), else the packaged
-        # default. Read fresh each turn, so an edit/reset applies on the next turn
-        # without a restart. Empty string when nothing is available — no crash.
-        persona_block = load_effective_persona_prompt()
+        # JARVIS_PERSONA.md. Written (typed) turns use the compact persona:
+        # Instant coding was re-sending the full ~3300-token voice handbook
+        # every call, then overriding it with WRITTEN_CHAT_STYLE. Compact keeps
+        # character, language and honesty; voice-only sections (hangup, long
+        # echo examples, spoken-digit rules) stay in the full persona for
+        # speech. Custom override still wins (loader contract).
+        persona_block = load_effective_persona_prompt(compact=_is_written_turn())
         if persona_block:
             parts.append(persona_block)
 
@@ -4708,24 +4865,23 @@ class BrainManager:
 
         # Structural-only base block (2026-06-29 consolidation): the editable
         # persona above now OWNS voice / tone / length / anti-filler /
-        # screen-context rules. They used to be duplicated AND contradicted here
-        # (this block said "KEINE Ein-Satz-Pflicht" while the old persona said
-        # "one or two sentences, never paragraphs" — the mixed signal that made
-        # replies choppy). This block keeps ONLY the non-editable structural
-        # truths: the runtime name stitch + the action/tool routing pointer.
-        # Platform-neutral (no "Windows 11" — cloud-first doctrine).
-        base = (
-            f"Du bist {name}, der persoenliche Meta-Orchestrator dieses Users. "
-            "Deine Stimme, dein Ton und deine Antwortlaenge richten sich nach der "
-            "Persona-Beschreibung weiter oben in diesem Prompt; halte dich an sie "
-            "und erfinde keine eigenen Stil- oder Laengen-Regeln. "
-            "Bei Aktionen: passende Tools sofort aufrufen, mehrere im selben Turn "
-            "wenn noetig. Aufgaben fuer einen deiner Agenten (Karte 'Your agent "
-            "society'): delegate_to_agent. Bei echten Brocken ohne passenden Agenten "
-            "(Code bauen/refactoren, langer Bericht, Multi-Step-Aufgabe): spawn_worker "
-            "mit der User-Utterance. Bildschirm/Apps bedienen: computer_use."
-        )
-        parts.append(base)
+        # screen-context rules. Written turns already carry the compact persona,
+        # TOOL_ROUTING_RULES and WRITTEN_CHAT_STYLE — repeating this German
+        # meta-orchestrator block duplicated ~150 tokens every Instant call.
+        # Voice turns keep it: spoken prompts have no WRITTEN_CHAT_STYLE.
+        if not _is_written_turn():
+            base = (
+                f"Du bist {name}, der persoenliche Meta-Orchestrator dieses Users. "
+                "Deine Stimme, dein Ton und deine Antwortlaenge richten sich nach der "
+                "Persona-Beschreibung weiter oben in diesem Prompt; halte dich an sie "
+                "und erfinde keine eigenen Stil- oder Laengen-Regeln. "
+                "Bei Aktionen: passende Tools sofort aufrufen, mehrere im selben Turn "
+                "wenn noetig. Aufgaben fuer einen deiner Agenten (Karte 'Your agent "
+                "society'): delegate_to_agent. Bei echten Brocken ohne passenden Agenten "
+                "(Code bauen/refactoren, langer Bericht, Multi-Step-Aufgabe): spawn_worker "
+                "mit der User-Utterance. Bildschirm/Apps bedienen: computer_use."
+            )
+            parts.append(base)
 
         # Always-on self-control truth (see _SELF_CONTROL_STANDING rationale):
         # keyword-free self-control phrasings must still find the tool path,
@@ -4794,7 +4950,7 @@ class BrainManager:
         # is already a slow path (and matches the pre-existing per-turn mutable
         # flags). getattr: tolerates __new__-constructed test managers that bypass
         # __init__ (the attr is always set in __init__ for the production path).
-        identity = getattr(self, "_active_turn_identity", None)
+        identity = self._prompt_identity()
         if identity:
             parts.append(
                 _provider_identity_directive(identity[0], identity[1], name)
@@ -4814,6 +4970,24 @@ class BrainManager:
         parts.append(self._reply_language_directive())
 
         return "\n\n".join(p for p in parts if p)
+
+    def _memory_turn_suffix(self, user_text: str) -> str:
+        """Memories matching THIS message (ADR-0044 chunk 3), or "".
+
+        The identity card above is standing and cached; this is per turn. One
+        FTS query against a local file, no model call, and whatever the card
+        already holds is left out, so a memory is never paid for twice in one
+        prompt. Defensive like every ambient block here: a turn never fails
+        over knowledge it did not need.
+        """
+        try:
+            from jarvis.memory.vault import runtime
+
+            suffix = runtime.turn_suffix(getattr(self, "_config", None), user_text)
+        except Exception:  # noqa: BLE001 — ambient knowledge never breaks a turn
+            log.debug("memory turn recall skipped", exc_info=True)
+            return ""
+        return "\n\n" + suffix if suffix else ""
 
     def _cache_optimized(self) -> bool:
         """True when the cache-optimized prompt layout (Wave 2) is enabled."""
@@ -8478,6 +8652,11 @@ class BrainManager:
             return None
         if request is None:
             return None
+        # A pending CLI answer is still a pure open of the held fleet. Every
+        # other turn that carries task text stands down so Instant (typed chat)
+        # or the normal brain path chooses model/effort and briefs.
+        if answered is None and not is_pure_open_request(user_text):
+            return None
 
         out_lang = resolve_output_language(
             self._reply_language,
@@ -8541,6 +8720,9 @@ class BrainManager:
             # a substitute pane would grant a request that was just refused.
             return " ".join(refused) if refused else None
 
+        def _spawn_agent_for_picks(group_agent: str | None, fallback: str) -> str:
+            return group_agent or fallback
+
         try:
             if registry.session is None:
                 # No workspace open: take the most recent one. Reading the
@@ -8553,21 +8735,55 @@ class BrainManager:
                     return action_phrase("ide_terminals_nowhere", out_lang)
                 recent = entries[0]
                 fallback_agent = request.agent or _recent_agent(recent)
-                # One spec per pane, group by group: "5 Codex and 3 Claude Code
-                # terminals" is a mixed fleet, and collapsing it to one agent
-                # opened five of the first kind and silently dropped the rest
-                # (maintainer report 2026-07-26).
-                specs = [
-                    {"agent": group.agent or fallback_agent}
-                    for group in request.groups
-                    for _ in range(group.count)
-                ]
+                # Validate every group's model/effort BEFORE start — an unknown
+                # id must not open any pane of the fleet.
+                specs: list[dict[str, str]] = []
+                for group in request.groups:
+                    agent = _spawn_agent_for_picks(group.agent, fallback_agent)
+                    picks = _resolve_spawn_launch_picks(agent, user_text)
+                    if isinstance(picks, dict):
+                        bad = picks.get("model") or picks.get("effort") or ""
+                        return action_phrase(
+                            "ide_terminal_model_unknown",
+                            out_lang,
+                            model=bad,
+                            cli=agent,
+                        )
+                    model, effort = picks
+                    for _ in range(group.count):
+                        specs.append(
+                            {"agent": agent, "model": model, "effort": effort}
+                        )
                 session = await registry.start(recent.path, specs)
                 created = list(session.terminals)
                 folder_label = recent.name
             else:
-                created = []
+                from jarvis.agentic_ide.session import _prevailing_agent
+
+                fallback_agent = _prevailing_agent(registry.session) or "claude"
+                # Same validate-before-open rule as the start path above.
+                planned: list[tuple[str | None, int, str, str]] = []
                 for group in request.groups:
+                    agent = _spawn_agent_for_picks(group.agent, fallback_agent)
+                    picks = _resolve_spawn_launch_picks(agent, user_text)
+                    if isinstance(picks, dict):
+                        # One group that cannot take this model is that group's
+                        # refusal; the other groups still open and the refusal
+                        # is named with the result (not a reason to drop them all).
+                        bad = picks.get("model") or picks.get("effort") or ""
+                        refused.append(
+                            action_phrase(
+                                "ide_terminal_model_unknown",
+                                out_lang,
+                                model=bad,
+                                cli=agent,
+                            )
+                        )
+                        continue
+                    model, effort = picks
+                    planned.append((group.agent, group.count, model, effort))
+                created = []
+                for group_agent, count, model, effort in planned:
                     # One group's failure is that GROUP's failure.
                     #
                     # A CLI that is not installed, or one whose binary vanished,
@@ -8580,12 +8796,15 @@ class BrainManager:
                     # instead of all at once.
                     try:
                         opened, _capped = await registry.add_terminals(
-                            group.count, agent=group.agent
+                            count,
+                            agent=group_agent,
+                            model=model,
+                            effort=effort,
                         )
                     except SessionError as exc:
                         log.info(
                             "Agentic IDE spawn: %s group refused: %s",
-                            group.agent or "inherited",
+                            group_agent or "inherited",
                             exc,
                         )
                         refused.append(str(exc))
@@ -10945,6 +11164,19 @@ class BrainManager:
         answer that must stay untouched (which is also every failure case: a
         badly parsed reply never delegates).
         """
+        # Project mode: a reply that is one host intent is executed by the host.
+        # Anything else falls through to the envelope handling below. A host
+        # fault is logged and never breaks the chat.
+        from jarvis.host_controller.chat_bridge import route_reply as host_route_reply
+
+        try:
+            hosted = await asyncio.to_thread(host_route_reply, reply)
+        except Exception as exc:  # noqa: BLE001 - a host fault must not break chat
+            log.warning("project mode: host action failed (%s)", exc)
+            hosted = None
+        if hosted is not None:
+            return hosted
+
         from jarvis.plugins.brain.chatgpt_web import parse_route_decision
 
         decision = parse_route_decision(reply)
@@ -11262,18 +11494,31 @@ class BrainManager:
     def _override_chain(
         self, override: TurnOverride, level: str
     ) -> list[tuple[str, str | None]]:
-        """The chain for a caller-picked turn: exactly the pick, no stand-in.
+        """The pick, followed by every reachable visible chat stand-in.
 
-        A person who chose a model in the chat gets that model or an honest
-        error — never a silent cross-provider fallback. A tool-incapable pick
-        does not authorize another provider to lead or bill this turn.
+        The selected provider always goes first. If it fails, the resolver
+        chain supplies candidates and a positively connected subscription seat
+        may join even when it is absent from that chain. The typed-chat policy
+        admits seat-allowed accounts (including API keys); known-disconnected
+        logins are skipped; keyless local runtimes stay last. The receipt names
+        the provider that actually answered, so this is never a silent
+        cross-provider switch. A tool-incapable pick still does not authorize a
+        separate tool lead. Background work keeps its own stricter gate.
 
         One exception the person configured themselves: with
         ``deep_brain_escalation = "explicit"``, a pick of the default brain
         (``brain.primary``) hands a turn with a reasoning or coding keyword to
         the ``deep_brain`` first; the pick stays as its fallback.
         """
+        from jarvis.brain.background_policy import (
+            chat_fallback_providers,
+            login_state,
+        )
+        from jarvis.brain.resolver import _resolve_chain
+        from jarvis.ui.web.provider_spec import PROVIDERS, provider_billing
+
         pick: tuple[str, str | None] = (override.provider, override.model)
+        chain = [pick]
         brain_cfg = self._config.brain
         deep_brain = brain_cfg.deep_brain
         if (
@@ -11290,8 +11535,44 @@ class BrainManager:
                 "Chat pick %s escalates a %s turn to deep_brain %s.",
                 override.provider, level, deep_brain,
             )
-            return [(deep_brain, escalated), pick]
-        return [pick]
+            chain = [(deep_brain, escalated), pick]
+
+        resolved = [
+            entry for entry in _resolve_chain(self._config)
+            if entry not in chain
+        ]
+        seen = {provider for provider, _model in chain} | {
+            provider for provider, _model in resolved
+        }
+        for spec in PROVIDERS:
+            if spec.tier != "brain" or spec.id in seen:
+                continue
+            if not provider_billing(spec).startswith("subscription"):
+                continue
+            if login_state(spec.id) is not True:
+                continue
+            model = self._deep_model(spec.id) or self._fast_model(spec.id) or None
+            resolved.append((spec.id, model))
+            seen.add(spec.id)
+
+        policy = chat_fallback_providers(
+            (provider for provider, _model in resolved),
+            primary=override.provider,
+        )
+        stand_ins = [entry for entry in resolved if policy.permits(entry[0])]
+        # Sort by card billing, not keyless_local: ollama stays "local" on the
+        # card even when it is blocklisted as an automatic seat successor, and
+        # a connected subscription seat must still answer before any local.
+        billing = {spec.id: provider_billing(spec) for spec in PROVIDERS}
+        cloud = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") != "local"
+        ]
+        local = [
+            entry for entry in stand_ins if billing.get(entry[0], "api") == "local"
+        ]
+        chain.extend(cloud)
+        chain.extend(local)
+        return list(dict.fromkeys(chain))
 
     def _build_fallback_chain(self, level: str) -> list[tuple[str, str | None]]:
         """Returns a prioritised list of (provider, model) attempts."""
@@ -11523,6 +11804,13 @@ class BrainManager:
         keep = [entry for entry in deduped if entry[0] == self._switched_to == active]
         if tool_lead is not None:
             keep.append(tool_lead)
+        # Explicit escalation left an unrecognised turn on the active provider
+        # (capable-default). Keep that choice: without it, without_voice_key
+        # drops an active gemini that shares the gemini-live key and the
+        # configured deep_brain/fallback (claude-api) leads instead — undoing
+        # the skip at the deep_brain prepend above.
+        if explicit_only and weak_signal:
+            keep.extend(entry for entry in deduped if entry[0] == active)
         return self._keep_off_voice_key(
             deduped,
             keep=keep,
@@ -12459,6 +12747,24 @@ class BrainManager:
         if not is_smalltalk_turn and self._is_self_control_turn(user_text):
             self._self_control_directive = _SELF_CONTROL_DIRECTIVE
 
+        # Project mode: STATUS and ja/nein approval are answered by the host
+        # before Instant (or any other brain) sees the turn.
+        try:
+            from jarvis.host_controller.chat_bridge import handle_project_user_turn
+
+            hosted_user = await asyncio.to_thread(handle_project_user_turn, user_text)
+        except Exception as exc:  # noqa: BLE001 — never break a turn over this
+            log.warning("project mode: user-turn host failed (%s)", exc)
+            hosted_user = None
+        if hosted_user is not None:
+            await self._record_response_side_effects(
+                user_text=user_text,
+                response_text=hosted_user,
+                use_history=use_history,
+                trace_id=trace_uuid,
+            )
+            return hosted_user
+
         # A closed-set one-shot is answered here, with no model at all.
         # Measured live 2026-10-20: "danke" cost 7.8 s because it travelled
         # the whole provider chain and waited for a model answer — and there
@@ -12550,6 +12856,7 @@ class BrainManager:
         used_provider: str | None = None
         used_model: str | None = None
         _turn_executed: set[str] = set()  # tools that REALLY ran this turn
+        _turn_failed: set[str] = set()  # tools that ran and returned success=False
         # AI Pointer (deictic push): launch the cursor-element resolution BEFORE
         # the vision-image await so it overlaps with it instead of running serially
         # after (AP-9: keep the deictic turn off the serial hot path). The task does
@@ -12610,6 +12917,13 @@ class BrainManager:
             # Any unexpected error in the injector must never crash a voice turn.
             log.warning("WikiContextInjector raised unexpectedly — skipping", exc_info=True)
             self._wiki_context_suffix = ""
+
+        # ADR-0044: memories that match THIS message, next to the wiki
+        # snippets and carried by the same suffix, so cache-optimized mode
+        # moves both onto the user message and the cached system prompt stays
+        # byte-stable. The standing card already holds the person's profile;
+        # this is the half a budget that always fits cannot hold.
+        self._wiki_context_suffix += self._memory_turn_suffix(user_text)
 
         # Wave 2 (omni-latency): assemble the per-turn dynamic context (date +
         # wiki) once. In cache-optimized mode it rides on the user
@@ -12975,25 +13289,72 @@ class BrainManager:
             # the chosen talker streams the answer normally after the fall-through.
             _is_router_lead = self._router_lead_key == (prov_name, model)
             _attempt_consumer = None if _is_router_lead else text_consumer
+            attempt_streamed = False
+            attempt_had_tool_calls = False
+            if turn_override is not None and _attempt_consumer is not None:
+                original_consumer = _attempt_consumer
+
+                def track_chat_output(
+                    chunk: str, consumer: Callable[[str], None] = original_consumer
+                ) -> None:
+                    nonlocal attempt_streamed
+                    if chunk:
+                        attempt_streamed = True
+                    consumer(chunk)
+
+                _attempt_consumer = track_chat_output
+            # A lead that is still setting itself up shows no sign of life, and
+            # the bounds that exist cannot see that: the tool-loop deadline is
+            # checked between rounds and the stall watchdog waits 30 s, which is
+            # the right number for an answer and far too long for a provider
+            # whose only job is to name a tool. See jarvis/brain/lead_budget.py
+            # for the measured turn this comes from.
+            _lead_alive = LeadActivity() if _is_router_lead else None
             try:
                 # CostMeter: start per-trace tracking (idempotent if already started).
                 if self._cost_meter is not None:
                     self._cost_meter.start(trace_uuid, prov_name, model)
-                agg = await disp.dispatch(
-                    user_text,
-                    images=images,
-                    history=history,
-                    trace_id=trace_id,
-                    intent_level=decision.level,
-                    evidence_required_tool=self._evidence_required_tool,
-                    text_consumer=_attempt_consumer,
-                    ack_emitter=_tool_ack_emitter,
-                    on_progress=on_progress,
-                    turn_context=turn_context,
-                    reply_language=self._reply_language,
-                    conversation_language=self._conversation_language,
-                    voice_confirm=(allow_voice_confirm and self._voice_confirm_enabled),
-                )
+
+                # Bound as defaults, not captured: this closure is awaited
+                # inside its own iteration, but a late-bound chain variable
+                # here would be a silent cross-provider mix-up (ruff B023).
+                def _attempt(
+                    _disp: Any = disp,
+                    _consumer: Any = _attempt_consumer,
+                    _alive: LeadActivity | None = _lead_alive,
+                ) -> Any:
+                    return _disp.dispatch(
+                        user_text,
+                        images=images,
+                        history=history,
+                        trace_id=trace_id,
+                        intent_level=decision.level,
+                        evidence_required_tool=self._evidence_required_tool,
+                        text_consumer=(
+                            _consumer if _alive is None else _alive.wrap(_consumer)
+                        ),
+                        ack_emitter=(
+                            _tool_ack_emitter if _alive is None
+                            else _alive.wrap(_tool_ack_emitter)
+                        ),
+                        on_progress=(
+                            on_progress if _alive is None
+                            else _alive.wrap(on_progress)
+                        ),
+                        turn_context=turn_context,
+                        reply_language=self._reply_language,
+                        conversation_language=self._conversation_language,
+                        voice_confirm=(
+                            allow_voice_confirm and self._voice_confirm_enabled
+                        ),
+                    )
+
+                if _lead_alive is None:
+                    agg = await _attempt()
+                else:
+                    agg = await run_lead_under_budget(
+                        _attempt, _lead_alive, provider=prov_name, model=model,
+                    )
                 # Post-call cost hook: aggregated usage → meter.
                 # The meter cancels on overrun via CancelToken (see ADR-0006);
                 # the pre-call gate above catches that on the next turn.
@@ -13006,6 +13367,15 @@ class BrainManager:
                         tokens_cache_hit=int(agg.usage.get("cache_hit_tokens", 0)),
                         usd=usd, timestamp_ns=time.time_ns(),
                     ))
+                # A returned error marker is not a completed chat response.
+                # Retry only if neither visible text nor tool calls exist.
+                if (
+                    turn_override is not None
+                    and str(getattr(agg, "finish_reason", "")).lower() == "error"
+                ):
+                    attempt_had_tool_calls = bool(agg.tool_calls)
+                    raise RuntimeError("Provider stream ended with finish_reason=error")
+
                 # Empty-Response-Guard: wenn der Provider zwar erfolgreich
                 # antwortet aber **leeren** Content liefert (Safety-Block,
                 # truncated-Response, Schema-Mismatch), behandeln wir das wie
@@ -13122,8 +13492,10 @@ class BrainManager:
                 )
                 # Remember the tools that REALLY ran so the post-recovery
                 # evidence-gate enforcement (below) can tell whether a mandated
-                # tool was actually called this turn.
+                # tool was actually called this turn. Failed names feed the
+                # honesty rewrite so a spoken success cannot ignore them.
                 _turn_executed = set(executed)
+                _turn_failed = set(getattr(agg, "failed_tool_names", None) or ())
                 used_provider, used_model = prov_name, model
                 if turn_override is None:
                     _health_ledger.record_success(
@@ -13207,7 +13579,7 @@ class BrainManager:
 
                 if idx > 0:
                     log.info(
-                        "Fallback-Hit: %s(%s) — %d provider übersprungen",
+                        "Fallback hit: %s(%s) — skipped %d provider(s)",
                         prov_name, model, idx,
                     )
                 if screen_turn_t0 is not None:
@@ -13228,7 +13600,26 @@ class BrainManager:
                             to_provider=prov_name,
                         ))
                 break
+            except LeadTookTooLong as abandoned:
+                # OUR deadline ended this attempt, so it says nothing about the
+                # provider: no health failure, no cooldown, no dead-list entry.
+                # Recording one would turn a status dot red for a setting, the
+                # same reasoning the local_context carve-out below rests on.
+                log.warning(
+                    "Tool lead %s(%s) produced nothing in %.1fs — the turn goes "
+                    "on without a lead.", prov_name, model, abandoned.budget_s,
+                )
+                self._router_lead_key = None
+                continue
             except Exception as exc:  # noqa: BLE001
+                if turn_override is not None and (attempt_streamed or attempt_had_tool_calls):
+                    stage = "sending part of the answer" if attempt_streamed else "tool calls"
+                    raise RuntimeError(
+                        f"{prov_name} ({model or 'default model'}) stopped after "
+                        f"{stage}: {exc}. No fallback was attempted because it "
+                        "could mix responses or repeat tool actions. Reconnect the "
+                        "provider or choose another model and retry."
+                    ) from exc
                 last_exc = exc
                 msg = str(exc)
                 # Classify FIRST so a terminal-billing 429 ("credits depleted",
@@ -13251,7 +13642,7 @@ class BrainManager:
                     provider_errors.append(
                         (prov_name, model, "rate_limit", "HTTP 429"))
                 else:
-                    log.warning("Brain %s(%s) fehlgeschlagen: %s", prov_name, model, exc)
+                    log.warning("Brain %s(%s) failed: %s", prov_name, model, exc)
                     if (
                         turn_override is None
                         and kind in _DEAD_LIST_KINDS
@@ -13338,8 +13729,23 @@ class BrainManager:
 
         if used_provider is None:
             self._last_turn_all_failed = True
-            log.error("Alle %d Provider-Versuche fehlgeschlagen. Letzter Fehler: %s",
-                     len(chain), last_exc)
+            log.error(
+                "All %d provider attempts failed. Last error: %s",
+                len(chain),
+                last_exc,
+            )
+            if turn_override is not None:
+                attempts = "; ".join(
+                    f"{provider} ({model or 'default model'}): {detail or kind}"
+                    for provider, model, kind, detail in provider_errors
+                )
+                raise RuntimeError(
+                    "The selected provider failed and no reachable stand-in "
+                    "could answer. "
+                    f"Attempts: {attempts or str(last_exc) or 'no provider was callable'}. "
+                    "Reconnect the provider, choose another model, or start a "
+                    "local runtime and retry."
+                )
             # Developer diagnostic → LOG only. The voice path gets a localized,
             # provider-agnostic apology (live complaint 2026-06-01: the grok/
             # Anthropic billing diagnostic was spoken while Gemini was active).
@@ -13421,6 +13827,7 @@ class BrainManager:
             response_text,
             executed_tools=execution_evidence,
             language=honesty_lang,
+            failed_tools=_turn_failed,
         )
         if honest_response != response_text:
             log.warning(
@@ -13442,10 +13849,16 @@ class BrainManager:
         # side effect (it showed up as a provider being constructed where no
         # turn asked for it).
         stripped = response_text.strip()
+        # Project mode checks the reply whichever brain led the turn: the host's
+        # intent format is in the prompt for every brain, so a tool-capable
+        # lead must be able to hand an intent to the host too.
+        from jarvis.host_controller.chat_bridge import active_project
+
+        project_on = active_project() is not None
         if (
             stripped.startswith(("{", "```"))
             and stripped.endswith(("}", "```"))
-            and not self._active_can_call_tools()
+            and (project_on or not self._active_can_call_tools())
         ):
             routed = await self._route_text_only_delegation(
                 response_text,
@@ -14350,11 +14763,14 @@ class BrainManager:
         """Keep the selected agent and billing account for the entire scheduled turn."""
         from jarvis.core.model_selection import (
             operation_model,
+            usable_worker_selection,
             use_operation_model,
-            worker_selection,
         )
 
-        selected = operation_model.get() or worker_selection(self._config)
+        # Selection may dial a local runtime (free HTTP); keep it off the loop.
+        selected = operation_model.get()
+        if selected is None:
+            selected = await asyncio.to_thread(usable_worker_selection, self._config)
         with use_operation_model(selected):
             return await self._run_task_with_selection(
                 prompt=prompt,
@@ -14409,14 +14825,16 @@ class BrainManager:
         if wants_artifact(prompt) and _ARTIFACT_TOOL_NAME not in allowed_tools:
             allowed_tools = (*allowed_tools, _ARTIFACT_TOOL_NAME)
         tools = self._select_task_tools(allowed_tools)
-        from jarvis.core.model_selection import operation_model, worker_selection
+        from jarvis.core.model_selection import operation_model, usable_worker_selection
         from jarvis.core.task_agent import (
             dual_seat_subscription,
             run_selected,
             subscription_seat_off_loop,
         )
 
-        selected = operation_model.get() or worker_selection(self._config)
+        selected = operation_model.get()
+        if selected is None:
+            selected = await asyncio.to_thread(usable_worker_selection, self._config)
         if (
             selected is not None
             and await subscription_seat_off_loop(selected.provider) is not None
@@ -14565,9 +14983,18 @@ class BrainManager:
         an unattended background turn. Capped so an unattended run cannot
         walk a long chain for minutes.
         """
-        from jarvis.core.model_selection import operation_model, worker_selection
+        from jarvis.core.model_selection import operation_model, usable_worker_selection
 
-        selected = operation_model.get() or worker_selection(self._config)
+        # Capability-gated: a configured ``[brain.worker]`` whose provider was
+        # disabled at boot (no key) must not hard-pin the whole scheduled turn
+        # onto a dead brain. ``usable_worker_selection`` walks the rescue tail;
+        # ``None`` falls through to the Tool Model cross-family chain.
+        # Sync helper: async callers (``run_task``) already resolved selection
+        # off-loop into ``operation_model``; a direct sync call here still runs
+        # the local-runtime probe on a worker thread via the reachability module
+        # when no running loop is present, and answers "not usable" on-loop
+        # without blocking (cache fill in the background).
+        selected = operation_model.get() or usable_worker_selection(self._config)
         if selected is not None:
             return [(selected.provider, selected.model)]
         try:
@@ -14585,7 +15012,12 @@ class BrainManager:
             chain.append((name, model))
         if chain:
             return chain
-        name = self._active_name
+        # Last resort: the live primary. A partial construct (contract stubs)
+        # or a manager with nothing selected has no ``_active_name`` — refuse
+        # with an empty chain instead of AttributeError (AP-30).
+        name = getattr(self, "_active_name", None)
+        if not name:
+            return []
         model = (
             (self._deep_model(name) or self._fast_model(name))
             if intent == "deep" else self._fast_model(name)

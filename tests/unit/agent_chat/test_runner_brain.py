@@ -379,8 +379,14 @@ async def test_a_continuation_is_briefing_not_the_persons_words(
 
     text, kw = fake.calls[0]
     assert text == CONTINUE_TURN and "Kai" not in text
-    briefing = kw["turn_override"].system_extra
-    assert "Kai fixed it." in briefing and original in briefing
+    # Briefing rides as a history user message so instructions+tools stay a
+    # stable prompt-cache prefix across waves — not in system_extra.
+    assert not (kw["turn_override"].system_extra or "").strip()
+    history = kw["history_override"]
+    briefing = next(
+        m.content for m in history if getattr(m, "role", None) == "user" and "Kai fixed it." in m.content
+    )
+    assert original in briefing
     # Tools that check a call against the person's request still see it.
     assert kw["turn_override"].tool_context["person_request"] == original
     assert kw["force_output_language"] == "en"  # the request's language, resolved once

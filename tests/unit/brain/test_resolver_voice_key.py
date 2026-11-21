@@ -22,6 +22,18 @@ def _hermetic(monkeypatch):
     import jarvis.brain.manager as manager
 
     monkeypatch.setattr(manager, "_keyless_provider_is_rescued_by_oauth", lambda pid: False)
+    # Force the keyless local entry-point into available() so the tail
+    # assertions do not depend on which brain plugins this worktree installed.
+    real_registry = resolver._get_registry()
+    base_names = list(real_registry.available())
+    if "local-openai" not in base_names:
+        base_names.append("local-openai")
+
+    class _Registry:
+        def available(self) -> list[str]:
+            return list(base_names)
+
+    monkeypatch.setattr(resolver, "_get_registry", lambda: _Registry())
     yield
     resolver._reset_for_tests()
 
@@ -63,8 +75,9 @@ def test_voice_key_still_precedes_the_keyless_local_tail(monkeypatch) -> None:
 
     providers = _providers(_gpt_live("openai"))
 
-    assert providers.index("openai") < providers.index("ollama")
-    assert providers[-2:] == ["ollama", "local-openai"]
+    assert providers.index("openai") < providers.index("local-openai")
+    assert providers[-1:] == ["local-openai"]
+    assert "ollama" not in providers
 
 
 def test_a_deliberate_local_primary_keeps_the_lead(monkeypatch) -> None:
@@ -90,4 +103,5 @@ def test_codex_without_a_login_is_no_alternative_to_the_voice_key(monkeypatch) -
     providers = _providers(_gpt_live("openai"))
 
     assert "openai" in providers
-    assert providers.index("openai") < providers.index("ollama")
+    assert providers.index("openai") < providers.index("local-openai")
+    assert "ollama" not in providers

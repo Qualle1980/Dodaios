@@ -54,6 +54,14 @@ FIND_TOOLS_NAME: Final[str] = "find_tools"
 CORE_PRIORITY: Final[tuple[str, ...]] = (
     "search_web",
     "wiki_recall",
+    # The long-term memory reads sit with wiki_recall, not in registry order
+    # behind it. "What do you know about Christian?" is a question a model
+    # answers with what it was given: offered no memory tool, it says it knows
+    # nothing instead of looking (live 2026-11-08, every lookup question
+    # failed while the vault held the answer).
+    "memory_search",
+    "memory_topics",
+    "memory_history",
     "wiki_ingest",
     "remember",
     "wiki_list",

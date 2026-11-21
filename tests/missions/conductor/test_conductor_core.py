@@ -268,3 +268,109 @@ def test_how_many_questions_are_lookups_and_still_lose_to_a_change_verb() -> Non
     assert first_lane("How many lines does jarvis/missions/conductor/loop.py have?") == "lookup"
     assert is_read_task("How much space does the repository take?")
     assert not is_read_task("How many tests fail? Fix them.")
+
+
+# --- a rejection outside a mission (Phase C1) -----------------------------------
+
+
+async def test_a_rejected_delegation_is_written_down_without_a_mission_or_a_bus(
+    tmp_path: Path,
+) -> None:
+    """The acceptance gate rejects a CHAT delegation, which is not a mission and
+    publishes nothing on the mission bus. It still has to be documented, so the
+    incident pipeline is reachable without either."""
+    from jarvis.missions.conductor.incidents import IncidentRecorder
+
+    store = LessonStore(tmp_path)
+    recorder = IncidentRecorder(store)
+    await recorder.record(
+        Incident(
+            lane="change",
+            executor="T1",
+            cause="acceptance gate rejected: no test run after the handback",
+            request="Add subtract() to the calculator.",
+        ),
+        learn_key="job-1",
+    )
+
+    lines = [
+        json.loads(x)
+        for x in (tmp_path / "incidents.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(lines) == 1, lines
+    assert lines[0]["executor"] == "T1"
+    assert "no test run" in lines[0]["cause"]
+    assert lines[0]["mission_id"] == ""  # no mission invented to carry it
+
+
+async def test_a_rejected_delegation_teaches_one_rule_per_job_not_per_attempt(
+    tmp_path: Path,
+) -> None:
+    """The General looks at the FIRST failure of a job and may write a rule. A
+    second rejection of the SAME job must not buy a second seat call, or a
+    stubborn job pays for a review per attempt."""
+    import asyncio
+
+    asked: list[str] = []
+
+    from jarvis.missions.conductor.incidents import IncidentRecorder
+
+    async def _seat(prompt: str) -> str:
+        asked.append(prompt)
+        return "ADD 1: Run the tests inside the job's own checkout before claiming a pass."
+
+    store = LessonStore(tmp_path)
+    recorder = IncidentRecorder(store, learn=_seat)
+
+    def _incident(cause: str) -> Incident:
+        return Incident(lane="change", executor="T1", cause=cause, request="Add subtract().")
+
+    await recorder.record(_incident("acceptance gate rejected: no test run"), learn_key="job-1")
+    await recorder.record(_incident("acceptance gate rejected: still no test run"),
+                          learn_key="job-1")
+    await recorder.record(_incident("acceptance gate rejected: no change read"),
+                          learn_key="job-2")
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert len(asked) == 2, asked  # one per job, not one per rejection
+    lines = (tmp_path / "incidents.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3  # every rejection is documented, model call or not
+    assert [r.text for r in store.rules()] == [
+        "Run the tests inside the job's own checkout before claiming a pass."
+    ]
+
+
+async def test_the_bus_recorder_still_learns_once_per_mission(tmp_path: Path) -> None:
+    """bind_incident_recorder keeps its contract after being rebuilt on the
+    shared recorder: two failures of one mission, one seat call."""
+    import asyncio
+
+    from jarvis.missions.conductor.incidents import bind_incident_recorder
+    from jarvis.missions.events import EventEnvelope, MissionFailed
+
+    handlers: list = []
+    asked: list[str] = []
+
+    class _Bus:
+        def subscribe_all(self, handler) -> None:  # type: ignore[no-untyped-def]
+            handlers.append(handler)
+
+    async def _prompt(_mid: str) -> str:
+        return "Add subtract() to the calculator."
+
+    async def _seat(prompt: str) -> str:
+        asked.append(prompt)
+        return "AGREE 1: nothing to add."
+
+    store = LessonStore(tmp_path)
+    bind_incident_recorder(_Bus(), store, _prompt, learn=_seat)
+    for _ in range(2):
+        await handlers[0](EventEnvelope(
+            mission_id="m1", source_actor="kontrollierer", ts_ms=1,
+            payload=MissionFailed(reason="x", last_state="RUNNING"),
+        ))
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert len(asked) == 1, asked

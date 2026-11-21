@@ -13,7 +13,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { CredentialCard } from "./CredentialCard";
 import { QuestionCard } from "./QuestionCard";
 import { toolDiff } from "./toolDiff";
-import { formatTokens, outputTokens } from "./toolView";
+import { cachedTokens, formatTokens, inputTokens, outputTokens } from "./toolView";
 import { activityParts, traceToolIdentity, traceToolName } from "./traceActivity";
 import { ToolChoiceIcon } from "./ToolChoiceChips";
 import { toolIdentityStyle } from "./toolIdentity";
@@ -795,12 +795,35 @@ function WorkTraceBody({ blocks: rawBlocks, status, startedMs, durationMs, error
 
 export function TurnTrace({ turn, ...props }: { turn: TurnItem; onDecide?: Decide; renderText?: (text: string, id: string) => ReactNode; conversation?: boolean; look?: TraceLook; companion?: boolean; face?: ReactNode; extras?: WorkTraceProps["extras"] }) {
   const t = useT();
-  const tokens = outputTokens(turn.usage ?? turn.liveUsage);
+  const usage = turn.usage ?? turn.liveUsage;
+  const tokens = outputTokens(usage);
+  // Input is the bill on an in-process route -- a plan seat prices at $0, so a
+  // receipt gated on `costUsd > 0` shows nothing at all, and tokens are the
+  // only currency the person can act on there.
+  //
+  // But NOT on a vendor CLI: it re-counts the whole conversation on every
+  // step, so its input figure is cumulative and reads as an absurd number for
+  // one question. That is why this receipt was output-only, and the reason
+  // still holds for those rows.
+  //
+  // So the test is positive, never a name list: the in-process routes are the
+  // ones that report per turn (`api`, `voice`, or no runner at all -- a vendor
+  // CLI always names itself). A runner nobody here knows keeps the safe,
+  // output-only receipt rather than inheriting a number that would mislead.
+  const perTurn = ["", "api", "voice"].includes(turn.runner.trim());
+  const sent = perTurn ? inputTokens(usage) : null;
+  const cached = perTurn ? cachedTokens(usage) : null;
   const answered = turn.blocks.some(block => block.kind === "text" && block.text.trim());
   return <WorkTrace {...props} blocks={turn.blocks} status={turn.status} startedMs={turn.startedMs} durationMs={turn.durationMs} error={turn.error}
     completionLabel={!answered ? t("agent_chat.turn_no_answer") : undefined}
-    receipt={tokens !== null && tokens > 0 || turn.costUsd !== null && turn.costUsd > 0 ? <>
-      {tokens !== null && tokens > 0 ? <span aria-live="off" className="tabular-nums">{formatTokens(tokens)} {t("agent_chat.tokens")}</span> : null}
+    receipt={(sent !== null && sent > 0) || (tokens !== null && tokens > 0)
+      || (turn.costUsd !== null && turn.costUsd > 0) ? <>
+      {sent !== null && sent > 0 ? <span aria-live="off" className="tabular-nums"
+        title={`${sent.toLocaleString()} ${t("agent_chat.tokens")}`}>&#8593;&#8201;{formatTokens(sent)}</span> : null}
+      {tokens !== null && tokens > 0 ? <span aria-live="off" className="tabular-nums"
+        title={`${tokens.toLocaleString()} ${t("agent_chat.tokens")}`}>&#8595;&#8201;{formatTokens(tokens)}</span> : null}
+      {cached !== null && cached > 0 ? <span className="tabular-nums"
+        title={`${cached.toLocaleString()} ${t("agent_chat.tokens")}`}>&#9211;&#8201;{formatTokens(cached)}</span> : null}
       {turn.costUsd !== null && turn.costUsd > 0 ? <span className="tabular-nums">${turn.costUsd.toFixed(4)}</span> : null}
     </> : undefined} />;
 }

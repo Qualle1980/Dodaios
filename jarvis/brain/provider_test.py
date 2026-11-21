@@ -48,6 +48,43 @@ PROVIDER_TEST_STATUSES: tuple[str, ...] = (
     ERROR,
 )
 
+# ── Proof depth — how far a test actually got ─────────────────────────────────
+# A status says what HAPPENED; it does not say how DEEP the check went, and the
+# two were being conflated. On 2026-10-30 a connectivity-grade probe reported
+# "ok" for a browser bridge that lost 11 of 11 real turns, and the same word
+# reported a provider answering normally. One vocabulary cannot carry both, so
+# a result now also names the deepest rung it reached.
+#
+# Ordered weakest to strongest. A claim at one rung is satisfied only by a
+# proof at that rung or deeper (``at_least``).
+PROVEN_NOTHING = "nothing"                # no evidence at all
+PROVEN_REACHABLE = "reachable"            # the endpoint answered at the protocol level
+PROVEN_AUTHENTICATED = "authenticated"    # the credential or login was accepted
+PROVEN_ANSWERED = "answered"              # a real turn produced an answer
+PROVEN_TOOL_CALL = "tool_call"            # a tool call actually came back
+PROVEN_END_TO_END = "end_to_end"          # a full acceptance run passed
+
+PROOF_STAGES: tuple[str, ...] = (
+    PROVEN_NOTHING,
+    PROVEN_REACHABLE,
+    PROVEN_AUTHENTICATED,
+    PROVEN_ANSWERED,
+    PROVEN_TOOL_CALL,
+    PROVEN_END_TO_END,
+)
+
+
+def at_least(reached: str, claimed: str) -> bool:
+    """Whether a proof at *reached* is enough to claim *claimed*.
+
+    Fails closed on an unknown name in either position: a stage this build does
+    not know is not a stage it may credit. A typo must not become a pass.
+    """
+    if reached not in PROOF_STAGES or claimed not in PROOF_STAGES:
+        return False
+    return PROOF_STAGES.index(reached) >= PROOF_STAGES.index(claimed)
+
+
 # Statuses where the INTEGRATION itself is proven sound — the provider was
 # reached and answered at the protocol level; only the credential/account/model
 # is the blocker. The UI frames these as "would work with a valid funded key".
@@ -283,6 +320,27 @@ def explain_provider_error(message: str | None) -> str:
     )
 
 
+def _proof_from_status(status: str) -> str:
+    """The depth a *status* proves on its own, with nothing else known.
+
+    Each rung is what the provider's own answer already demonstrates:
+
+    * a rejected credential was still a round trip, so the endpoint is reachable;
+    * "out of credits", "rate limited" and "no access to that model" are all
+      answers the provider can only give AFTER accepting the credential, so
+      they prove authentication — and prove nothing about a turn;
+    * ``ok`` means the tier's real call came back, which is an answer. The two
+      places where ``ok`` means less than that say so explicitly.
+    """
+    if status == OK:
+        return PROVEN_ANSWERED
+    if status in (NO_CREDITS, RATE_LIMITED, MODEL_UNAVAILABLE):
+        return PROVEN_AUTHENTICATED
+    if status == BAD_KEY:
+        return PROVEN_REACHABLE
+    return PROVEN_NOTHING
+
+
 # ── The live per-tier connectivity test ──────────────────────────────────────
 
 
@@ -293,12 +351,24 @@ class ProviderTestResult:
     ``status`` is one of :data:`PROVIDER_TEST_STATUSES`; ``detail`` is a short,
     human-readable note (never a secret); ``latency_ms`` is the round-trip time
     of the real call when one was made.
+
+    ``proof`` says how DEEP the check got, which ``status`` cannot: "ok" is
+    reported both by a probe that ran a real turn and by one that only found a
+    connected login, and reading the second as the first is the confusion this
+    field exists to end. Most callers leave ``proven`` unset and let it follow
+    the status; a site whose success means LESS than an answer sets it.
     """
 
     provider: str
     status: str
     detail: str = ""
     latency_ms: float = 0.0
+    proven: str | None = None
+
+    @property
+    def proof(self) -> str:
+        """The deepest rung this result actually reached."""
+        return self.proven if self.proven is not None else _proof_from_status(self.status)
 
 
 def _is_credential_present(spec: Any) -> bool:
@@ -553,6 +623,8 @@ async def run_provider_test(
     provider = spec.id
 
     # Codex is OAuth-or-key: a connected ChatGPT login IS a working subagent.
+    # Deliberately no turn is sent, so the proof stops at the login: this says
+    # the seat is signed in, never that a turn or a tool call works.
     if spec.auth_mode == "codex":
         status_fn = codex_status or _default_codex_status
         try:
@@ -560,7 +632,12 @@ async def run_provider_test(
         except Exception as exc:  # noqa: BLE001
             return ProviderTestResult(provider, ERROR, f"{type(exc).__name__}: {exc}")
         if getattr(st, "connected", False):
-            return ProviderTestResult(provider, OK, getattr(st, "message", "") or "Connected.")
+            return ProviderTestResult(
+                provider,
+                OK,
+                getattr(st, "message", "") or "Connected.",
+                proven=PROVEN_AUTHENTICATED,
+            )
         return ProviderTestResult(
             provider, NOT_CONFIGURED, getattr(st, "message", "") or "Not connected.",
         )
@@ -576,7 +653,12 @@ async def run_provider_test(
         except Exception as exc:  # noqa: BLE001
             return ProviderTestResult(provider, ERROR, f"{type(exc).__name__}: {exc}")
         if getattr(st, "connected", False):
-            return ProviderTestResult(provider, OK, getattr(st, "message", "") or "Connected.")
+            return ProviderTestResult(
+                provider,
+                OK,
+                getattr(st, "message", "") or "Connected.",
+                proven=PROVEN_AUTHENTICATED,
+            )
         return ProviderTestResult(
             provider, NOT_CONFIGURED, getattr(st, "message", "") or "Not connected.",
         )
@@ -621,6 +703,9 @@ async def run_provider_test(
                 OK,
                 "Realtime session handshake accepted.",
                 latency_ms,
+                # A handshake is the session being opened and the credential
+                # accepted. No turn was spoken, so the proof stops here.
+                proven=PROVEN_AUTHENTICATED,
             )
         except TimeoutError:
             latency_ms = (perf_counter() - started) * 1000.0

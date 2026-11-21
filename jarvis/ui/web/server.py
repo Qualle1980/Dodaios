@@ -533,6 +533,7 @@ class WebServer:
         from .marketplace_publish_routes import router as marketplace_publish_router
         from .marketplace_routes import router as marketplace_router
         from .mcp_routes import router as mcp_router
+        from .memory_routes import router as memory_router
         from .memory_vault_routes import router as memory_vault_router
         from .mission_billing_routes import router as mission_billing_router
         from .missions_auth import router as missions_auth_router
@@ -850,6 +851,10 @@ class WebServer:
         app.include_router(wiki_router)
         # Path-addressed Memory section API (index, reader, map, edits).
         app.include_router(memory_vault_router)
+        # The personal memory vault's own surface (ADR-0044): stats, export,
+        # import, remember. Distinct from the router above, which serves the
+        # page-shaped wiki under /api/wiki despite its file name.
+        app.include_router(memory_router)
         # Phase B3 — Desktop wiki view live-reload WS endpoint.
         # Forwards WikiPageChanged events from the shared EventBus to
         # subscribed UI clients. WikiWatcher is started in start().
@@ -1202,19 +1207,20 @@ class WebServer:
     # ------------------------------------------------------------------
 
     def _register_rest_routes(self, app: FastAPI) -> None:
-        from jarvis.core.instance import current_instance as _ci
-
-        def _instance_name() -> str:
-            return _ci().name
-
         cfg = self.cfg
         bus = self.bus
 
         @app.get("/api/health")
         async def health() -> dict[str, Any]:
-            # ``instance`` lets the frontend badge a dev window as such
-            # (``jarvis.core.instance``): "default" or "dev".
-            return {"ok": True, "version": __version__, "instance": _instance_name()}
+            # Deployment facts for the UI badge and the voice ``runtime_location``
+            # tool. Derived from instance / bind / browser-lock helpers only —
+            # no OS hostname, no secrets (this route stays open_access).
+            from jarvis.core.runtime_location import runtime_location_facts
+
+            return runtime_location_facts(
+                version=__version__,
+                configured_port=cfg.ui.admin_api_port,
+            )
 
         @app.post("/api/ui/shell-painted", status_code=204, response_model=None)
         async def shell_painted() -> Response:
@@ -2852,6 +2858,7 @@ class WebServer:
         from jarvis.core import runtime_refs as _runtime_refs
 
         _runtime_refs.set_api_base_url(f"http://127.0.0.1:{resolved_port}")
+        _runtime_refs.set_listen_endpoint(host, resolved_port)
         # Announce each change of the passive provider-health record on the bus;
         # the existing /ws fan-out carries it to every open window, whose status
         # dots then re-read (no poll, no extra socket — AP-33). Registering is
@@ -2920,6 +2927,15 @@ class WebServer:
                 "MissionManager init failed — /api/missions returns 503"
             )
         _boot_mark("mission_stack")
+
+        # Keep the CLI usage index current without waiting for the cost page.
+        # Armed on a timer, so nothing here runs on the boot path (AP-26).
+        try:
+            from jarvis.ui.web.costs_routes import warm_index_after_boot
+
+            warm_index_after_boot()
+        except Exception as exc:  # noqa: BLE001 - an index warm-up never blocks boot
+            logger.opt(exception=exc).warning("cli usage index warm-up not armed")
 
         # Screenshot retention: auto-delete old Vision / Flight-Recorder blobs
         # (data/flight_recorder/blobs/) after the configured window. Runs a
@@ -3496,6 +3512,27 @@ class WebServer:
         )
         self._wiki_integration_handle = handle
         logger.info("wiki_integration: bootstrap_wiki_integration succeeded")
+
+        # ADR-0044 chunk 4: copy the stores the memory vault replaces into it,
+        # once. Here rather than on a turn: it reads the wiki, the notebooks and
+        # core_memory.json, and a first turn must not pay for that. Entirely
+        # local, no model call, idempotent (the vault records that it ran), and
+        # wrapped so a fault costs the import and never the boot.
+        try:
+            from jarvis.core.config import DATA_DIR
+            from jarvis.memory.vault import runtime as vault_runtime
+            from jarvis.memory.vault.legacy_import import import_once
+
+            vault = await asyncio.to_thread(vault_runtime.active, self.cfg)
+            if vault is not None:
+                ran = await asyncio.to_thread(
+                    import_once, vault, wiki_root=vault_root, data_dir=DATA_DIR
+                )
+                if ran:
+                    logger.info("memory vault: imported the previous memory stores")
+        except Exception:  # noqa: BLE001 — the app boots without its old memory
+            logger.warning("memory vault: the one-time import failed", exc_info=True)
+
         # No periodic re-review of voice sessions: the six-hourly auto-backfill
         # was removed on 2026-09-30 together with the per-turn and end-of-call
         # extraction (it billed paid keys while nobody was at the PC). The
