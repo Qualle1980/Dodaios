@@ -109,3 +109,10 @@ def test_society_api_turn_carries_the_reply_policy_exactly_once(briefed: bool) -
         _TURN_OVERRIDE.reset(token)
     assert prompt.count(CONVERSATIONAL_RESPONSE_STYLE) == 1
     assert "WRITTEN CHAT STYLE" in prompt
+
+
+def test_system_prompt_stops_broad_search_and_asks_for_location(tmp_path):
+    prompt = system_prompt(cwd=tmp_path, assistant_name="Assistant")
+    assert "10 seconds" in prompt
+    assert "Do not walk the whole disk" in prompt
+    assert "ask the person where the file is" in prompt
