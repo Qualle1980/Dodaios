@@ -164,7 +164,13 @@ def build_override(
         model=model,
         reasoning_effort=reasoning_effort,
         tools_extra=(
-            dict(kit_tools) if kit_tools is not None else folder_tools(cwd, stance=stance)
+            dict(kit_tools)
+            if kit_tools is not None
+            else folder_tools(
+                cwd,
+                stance=stance,
+                session_mode=str(getattr(session, "mode", "") or "chat"),
+            )
         ),
         tool_filter=_compose_filters(
             kit.tool_filter,
@@ -225,7 +231,11 @@ async def kit_payload(session: AgentChatSession, brain: Any) -> tuple[dict[str, 
         try:
             coding_tool = await coding_tool_for_session(session.session_id)
             if coding_tool is not None:
-                tools = folder_tools(Path(session.cwd), stance=session.permission_mode or "ask")
+                tools = folder_tools(
+                    Path(session.cwd),
+                    stance=session.permission_mode or "ask",
+                    session_mode=str(getattr(session, "mode", "") or "chat"),
+                )
                 tools[coding_tool.name] = coding_tool
         except Exception:
             log.warning("Dodaios chat: coding-session capability unavailable", exc_info=True)
@@ -515,7 +525,15 @@ async def run_brain_turn(
             current = await asyncio.to_thread(live_catalog, brain, cwd=str(cwd), stance=stance)
             choices = resolve_choices([row.id for row in tool_choices], current)
             base = dict(getattr(brain, "_tools", {}) or {})
-            extra = dict(kit_tools) if kit_tools is not None else folder_tools(cwd, stance=stance)
+            extra = (
+                dict(kit_tools)
+                if kit_tools is not None
+                else folder_tools(
+                    cwd,
+                    stance=stance,
+                    session_mode=str(getattr(session, "mode", "") or "chat"),
+                )
+            )
             base.update(extra)
             extra.update(selection_tools(choices, base))
             kit_tools = extra
@@ -558,7 +576,7 @@ async def run_brain_turn(
     _note_skill_trigger(brain, text)
 
     if bridge is not None:
-        from jarvis.society.surface import requires_explicit_approval
+        from jarvis.agent_chat.write_gate import force_ask_for_session
 
         bridge.arm(
             ref,
@@ -569,11 +587,7 @@ async def run_brain_turn(
                 always_allowed=always_allowed,
                 ask=handle.request_approval,
                 call_id_for=mirror.open_call_id,
-                force_ask=(
-                    lambda name, args: requires_explicit_approval(session.session_id, name, args)
-                )
-                if session.surface == "society"
-                else lambda _name, _args: False,
+                force_ask=force_ask_for_session(session),
             ),
         )
 

@@ -724,6 +724,7 @@ class CodingThreadTool:
             permission_mode=access_mode(runner, "full"),
             title=_clip(str(args.get("title") or ""), 80),
             surface=THREAD_SURFACE,
+            mode="project",
         )
         service.store.set_thread_owner(
             session.session_id,

@@ -423,6 +423,8 @@ class ChatControls:
             bridge = self.service._bridge_for(self.service._bus())
             ref = approval_ref(sid)
             if bridge is not None:
+                from jarvis.agent_chat.write_gate import force_ask_for_session
+
                 bridge.arm(
                     ref,
                     ChatGrant(
@@ -431,6 +433,7 @@ class ChatControls:
                         stance=session.permission_mode,
                         always_allowed=self.service.always_allowed(sid),
                         ask=handle.request_approval,
+                        force_ask=force_ask_for_session(session),
                     ),
                 )
             await handle.emit(

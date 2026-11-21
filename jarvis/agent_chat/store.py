@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS agent_chat_sessions (
     preview          TEXT NOT NULL DEFAULT '',
     surface          TEXT NOT NULL DEFAULT 'agent',
     account_id       TEXT NOT NULL DEFAULT '',
-    runtime          TEXT NOT NULL DEFAULT ''
+    runtime          TEXT NOT NULL DEFAULT '',
+    mode             TEXT NOT NULL DEFAULT 'chat'
 );
 CREATE TABLE IF NOT EXISTS agent_chat_events (
     session_id  TEXT NOT NULL,
@@ -111,6 +112,13 @@ _PREVIEW_MAX_CHARS = 120
 SURFACES: Final[tuple[str, ...]] = ("jarvis", "agent", "local-models", "society", "side")
 DEFAULT_SURFACE: Final[str] = "agent"
 
+#: Session work mode: ``"chat"`` = no project folder (GitHub read free, writes
+#: need an explicit OK); ``"project"`` = a chosen working directory is required.
+#: Distinct from ``permission_mode`` (the runner ladder). Default ``chat`` when
+#: the client omits the field (Phase-2 decision).
+SESSION_MODES: Final[tuple[str, ...]] = ("project", "chat")
+DEFAULT_SESSION_MODE: Final[str] = "chat"
+
 
 @dataclass(frozen=True, slots=True)
 class ChatSelection:
@@ -146,6 +154,8 @@ class AgentChatSession:
     #: A society agent's external runtime (``hermes`` / ``openclaw``,
     #: ``docs/agent-runtimes.md``); empty = the provider picks the runner.
     runtime: str = ""
+    #: ``project`` needs a real working folder; ``chat`` keeps ``cwd`` empty.
+    mode: str = DEFAULT_SESSION_MODE
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -202,6 +212,14 @@ class AgentChatStore:
             # the provider decides the runner (the pre-column behaviour).
             self._conn.execute(
                 "ALTER TABLE agent_chat_sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT ''"
+            )
+        if "mode" not in have:
+            # Sessions from before the column had no explicit work mode; treat
+            # them as chat (no project folder) so existing DBs stay read-safe
+            # for GitHub writes until someone picks project + a cwd.
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN mode TEXT NOT NULL "
+                f"DEFAULT '{DEFAULT_SESSION_MODE}'"
             )
 
     def close(self) -> None:
@@ -261,20 +279,24 @@ class AgentChatStore:
         surface: str = DEFAULT_SURFACE,
         account_id: str = "",
         runtime: str = "",
+        mode: str = DEFAULT_SESSION_MODE,
     ) -> AgentChatSession:
         if surface not in SURFACES:
             raise ValueError(f"surface must be one of {SURFACES}, not {surface!r}")
+        session_mode = (mode or "").strip() or DEFAULT_SESSION_MODE
+        if session_mode not in SESSION_MODES:
+            raise ValueError(f"mode must be one of {SESSION_MODES}, not {session_mode!r}")
         sid = session_id or uuid.uuid4().hex
         now = now_ms()
-        # The route validated the mode against the runner's ladder; the store
-        # keeps the id as given.
-        mode = (permission_mode or "").strip() or "bypass"
+        # The route validated the permission mode against the runner's ladder;
+        # the store keeps the id as given.
+        perm = (permission_mode or "").strip() or "bypass"
         with self._lock:
             self._conn.execute(
                 "INSERT INTO agent_chat_sessions (session_id, title, provider, model, effort, "
                 "cwd, permission_mode, vendor_session, created_ms, updated_ms, message_count, "
-                "preview, surface, account_id, runtime) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, '', ?, ?, ?)",
+                "preview, surface, account_id, runtime, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, '', ?, ?, ?, ?)",
                 (
                     sid,
                     title,
@@ -282,12 +304,13 @@ class AgentChatStore:
                     model,
                     effort,
                     cwd,
-                    mode,
+                    perm,
                     now,
                     now,
                     surface,
                     account_id,
                     runtime,
+                    session_mode,
                 ),
             )
             self._conn.commit()
@@ -355,9 +378,9 @@ class AgentChatStore:
 
     def update_session(self, session_id: str, **fields: Any) -> AgentChatSession | None:
         """Set any of title / provider / model / effort / cwd / permission_mode /
-        vendor_session. Unknown keys are ignored so a route can pass its body
-        through after validation. ``surface`` is deliberately NOT settable: a
-        session is born on one chat and stays there."""
+        vendor_session / mode. Unknown keys are ignored so a route can pass its
+        body through after validation. ``surface`` is deliberately NOT settable:
+        a session is born on one chat and stays there."""
         allowed = {
             "title",
             "provider",
@@ -368,6 +391,7 @@ class AgentChatStore:
             "vendor_session",
             "account_id",
             "runtime",
+            "mode",
         }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
@@ -741,4 +765,9 @@ class AgentChatStore:
             surface=str(row["surface"] or DEFAULT_SURFACE),
             account_id=str(row["account_id"] or "") if "account_id" in row.keys() else "",
             runtime=str(row["runtime"] or "") if "runtime" in row.keys() else "",
+            mode=(
+                str(row["mode"] or DEFAULT_SESSION_MODE)
+                if "mode" in row.keys()
+                else DEFAULT_SESSION_MODE
+            ),
         )

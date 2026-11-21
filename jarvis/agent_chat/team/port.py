@@ -107,6 +107,7 @@ class ChatTurns:
             permission_mode="",
             title=title,
             surface="agent",
+            mode="project",
         )
         return str(session.session_id)
 

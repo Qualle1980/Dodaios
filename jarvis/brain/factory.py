@@ -1954,16 +1954,31 @@ def _subscription_flash_provider(
     )
 
 
+def _flash_provider_label(provider: Any, ack_cfg: Any) -> str:
+    """Concrete name for logs / failover checks without mutating ``ack_cfg``."""
+    for attr in ("provider_name", "name"):
+        value = getattr(provider, attr, None)
+        if value:
+            return str(value)
+    return str(getattr(ack_cfg, "provider", "") or "")
+
+
 def _flash_or_chat_seat(jcfg: Any, ack_cfg: Any) -> Any | None:
-    """Flash REGISTRY adapter, else the chat-seat subscription wrapper."""
-    provider = _build_flash_provider(jcfg, ack_cfg)
-    if provider is not None:
-        return provider
+    """Spoken content: prefer General (``chatgpt-plan``), else Flash REGISTRY.
+
+    Gemini stays on TTS / Live output. Never write the chat-seat id into
+    ``ack_cfg.provider`` — that made a later ``_build_flash_provider`` call log
+    ``provider 'chatgpt-plan' not in REGISTRY`` (finding E).
+    """
     seat_provider, seat_name = _subscription_flash_provider(jcfg, ack_cfg)
-    if seat_provider is None:
-        return None
-    ack_cfg.provider = seat_name
-    return seat_provider
+    if seat_provider is not None:
+        log.info(
+            "Flash content seat: using General %r (ack_cfg.provider left at %r).",
+            seat_name,
+            getattr(ack_cfg, "provider", None),
+        )
+        return seat_provider
+    return _build_flash_provider(jcfg, ack_cfg)
 
 
 def _pick_keyless_flash_fallback(ack_cfg: Any) -> str | None:
@@ -2166,9 +2181,10 @@ def build_spawn_announcer(jcfg: Any | None = None) -> Any:
             threshold=ack_cfg.circuit_breaker_threshold,
             cooldown_s=ack_cfg.circuit_breaker_cooldown_s,
         )
+        resolved = _flash_provider_label(provider, ack_cfg)
         log.info(
             "Spawn-Announcer: LLM composition wired (provider=%s).",
-            ack_cfg.provider,
+            resolved,
         )
         # Failover on a separate provider/key so a dead primary flash provider
         # degrades to the live secondary, not to the canned pool (2026-06-21
@@ -2176,7 +2192,7 @@ def build_spawn_announcer(jcfg: Any | None = None) -> Any:
         # A chat-seat primary has no Flash REGISTRY failover; skip the keyed
         # secondary so we never bill another family for the announcement.
         fb_provider, fb_breaker = (None, None)
-        if ack_cfg.provider in {"gemini", "grok", "openai"}:
+        if resolved in {"gemini", "grok", "openai"}:
             fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
         return SpawnAnnouncementComposer(
             provider=provider,
@@ -2234,15 +2250,15 @@ def build_readback_composer(jcfg: Any | None = None) -> Any:
             threshold=ack_cfg.circuit_breaker_threshold,
             cooldown_s=ack_cfg.circuit_breaker_cooldown_s,
         )
-        # Failover on a separate provider/key (built AFTER the primary resolve
-        # so ack_cfg.provider is the concrete seat). A chat-seat primary has no
-        # Flash REGISTRY failover — skip the keyed secondary.
+        resolved = _flash_provider_label(provider, ack_cfg)
+        # Failover only for Flash REGISTRY primaries. A chat-seat primary must
+        # not bill another family for readbacks (Gemini stays TTS/Live output).
         fb_provider, fb_breaker = (None, None)
-        if ack_cfg.provider in {"gemini", "grok", "openai"}:
+        if resolved in {"gemini", "grok", "openai"}:
             fb_provider, fb_breaker = _build_spawn_fallback(ack_cfg)
         log.info(
             "Readback-Composer: LLM composition wired (provider=%s).",
-            ack_cfg.provider,
+            resolved,
         )
         return ReadbackComposer(
             provider=provider,

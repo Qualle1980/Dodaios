@@ -176,7 +176,11 @@ def _jarvis_tools(_cfg: Any, _brain: Any, session: Any) -> dict[str, Tool]:
     # question spoken was answered, because run-shell inherits the app's own
     # working directory (live 2026-10-30). This is not a permission change:
     # agent_chat.tools.resolve_path always passed an absolute path through.
-    tools = folder_tools(Path(getattr(session, "cwd", "") or Path.home()), stance=stance)
+    tools = folder_tools(
+        Path(getattr(session, "cwd", "") or Path.home()),
+        stance=stance,
+        session_mode=str(getattr(session, "mode", "") or "chat"),
+    )
     tools.update(lead_browser_tools(session))
     return tools
 

@@ -669,10 +669,26 @@ def _exercise_routes(client: TestClient, tmp_path: Path) -> None:
     )
     assert created.status_code == 201, created.text
     sid = created.json()["session_id"]
-    assert created.json()["cwd"] == str(tmp_path)
+    # Default mode is chat: no project folder.
+    assert created.json()["mode"] == "chat"
+    assert created.json()["cwd"] == ""
+
+    project = client.post(
+        "/api/agent-chat/sessions",
+        json={
+            "provider": "fakeprov",
+            "model": "m",
+            "mode": "project",
+            "cwd": str(tmp_path),
+        },
+    )
+    assert project.status_code == 201, project.text
+    assert project.json()["mode"] == "project"
+    assert project.json()["cwd"] == str(tmp_path)
 
     bad = client.post(
-        "/api/agent-chat/sessions", json={"provider": "fakeprov", "cwd": "/no/such/dir"}
+        "/api/agent-chat/sessions",
+        json={"provider": "fakeprov", "mode": "project", "cwd": "/no/such/dir"},
     )
     assert bad.status_code == 400
 
@@ -741,8 +757,20 @@ def test_the_jarvis_chat_starts_in_its_own_folder_not_the_whole_profile(
     assert workspace.is_dir()
     assert svc.default_cwd("agent") == str(home)
 
+    # Default session mode is chat: no project folder (Phase-2 decision).
+    # The surface workspace remains available via default_cwd for callers that
+    # pick project mode and pass that folder explicitly.
     session = svc.create_session(provider="claude-api", surface="jarvis")
-    assert session.cwd == str(workspace)
+    assert session.mode == "chat"
+    assert session.cwd == ""
+    project = svc.create_session(
+        provider="claude-api",
+        surface="jarvis",
+        mode="project",
+        cwd=str(workspace),
+    )
+    assert project.mode == "project"
+    assert project.cwd == str(workspace)
 
 
 def test_an_uncreatable_workspace_falls_back_instead_of_failing_the_chat(

@@ -3249,7 +3249,7 @@ async def run_cli_turn(
         )
         if bridge is not None:
             from jarvis.agent_chat.approval_bridge import ChatGrant
-            from jarvis.society.surface import requires_explicit_approval
+            from jarvis.agent_chat.write_gate import force_ask_for_session
 
             bridge.arm(
                 ref,
@@ -3259,13 +3259,7 @@ async def run_cli_turn(
                     stance=handle.stance or "ask",
                     always_allowed=always_allowed if always_allowed is not None else set(),
                     ask=handle.request_approval,
-                    force_ask=(
-                        lambda name, args: requires_explicit_approval(
-                            session.session_id, name, args
-                        )
-                    )
-                    if session.surface == "society"
-                    else lambda _name, _args: False,
+                    force_ask=force_ask_for_session(session),
                 ),
             )
     from jarvis.agent_chat.surface_kits import kit_for
